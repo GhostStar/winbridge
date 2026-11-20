@@ -2,6 +2,7 @@ pub mod audio;
 pub mod capture;
 pub mod config;
 pub mod encode;
+pub mod helper;
 pub mod input;
 pub mod net;
 pub mod proto;

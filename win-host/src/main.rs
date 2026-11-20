@@ -7,7 +7,7 @@ fn main() -> Result<()> {
     win32::init_dpi();
     let config = Config::parse();
     let filter = tracing_subscriber::EnvFilter::try_new(&config.log_level)?;
-    let log_file = if config.service || config.session_worker {
+    let log_file = if config.service || config.session_worker || config.secure_helper {
         let dir = std::env::var_os("ProgramData")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from("C:\\ProgramData"))
@@ -15,13 +15,21 @@ fn main() -> Result<()> {
         let _ = std::fs::create_dir_all(&dir);
         let name = if config.service {
             "service.log"
+        } else if config.secure_helper {
+            "secure-helper.log"
         } else {
-            "worker.log"
+            "user-worker.log"
         };
         std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(dir.join(name))
+            .or_else(|_| {
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(std::env::temp_dir().join(format!("winbridge-{name}")))
+            })
             .ok()
     } else {
         None
@@ -46,6 +54,15 @@ fn main() -> Result<()> {
     }
     if config.service {
         return service::run_service_dispatcher(config);
+    }
+    if config.secure_helper {
+        let port = config
+            .helper_port
+            .ok_or_else(|| anyhow::anyhow!("--secure-helper requires --helper-port"))?;
+        return win_host::helper::run_server(port, config.helper_token);
+    }
+    if let Some(port) = config.helper_port {
+        win_host::helper::configure_client(port, config.helper_token.clone());
     }
     if config.list_windows {
         for w in win32::list(false)? {

@@ -39,6 +39,7 @@ fn hwnd(arg: &str) -> Result<u64, String> {
     "uninstall_service",
     "service",
     "session_worker",
+    "secure_helper",
 ])))]
 pub struct Config {
     #[arg(long, default_value = "0.0.0.0")]
@@ -83,4 +84,13 @@ pub struct Config {
     /// Internal: run as interactive session worker spawned by the WinBridge service.
     #[arg(long, hide = true)]
     pub session_worker: bool,
+    /// Internal: run as LocalSystem + UIAccess secure-desktop helper spawned by the service.
+    #[arg(long, hide = true)]
+    pub secure_helper: bool,
+    /// Internal: loopback TCP port for session-worker <-> secure-helper IPC.
+    #[arg(long, hide = true)]
+    pub helper_port: Option<u16>,
+    /// Internal: per-launch authentication token for session-worker <-> secure-helper IPC.
+    #[arg(long, hide = true, default_value = "")]
+    pub helper_token: String,
 }

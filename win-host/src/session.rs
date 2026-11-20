@@ -406,9 +406,13 @@ impl Session {
 
     async fn poll_secure_desktop(&mut self) -> Result<()> {
         let state = tokio::task::spawn_blocking(win32::desktop::probe_desktop_state).await?;
+        win32::desktop::set_secure_desktop_hint(
+            state == win32::desktop::DesktopState::SecureAccessible,
+        );
         if state == self.last_desktop_state {
             return Ok(());
         }
+        tracing::info!(from = ?self.last_desktop_state, to = ?state, "desktop security state changed");
         self.last_desktop_state = state;
         match state {
             win32::desktop::DesktopState::SecureAccessible => {
@@ -470,7 +474,7 @@ pub async fn run(
     let observer = win32::Observer::new(events)?;
     let mut sweep = tokio::time::interval(Duration::from_secs(1));
     sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut uac_poll = tokio::time::interval(Duration::from_millis(250));
+    let mut uac_poll = tokio::time::interval(Duration::from_millis(200));
     uac_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut refresh_at = None;
     loop {

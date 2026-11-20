@@ -187,8 +187,42 @@ fn key_input(hid: u32, down: bool) -> Result<INPUT> {
     ))
 }
 
+#[derive(Default)]
+pub(crate) struct DirectExecutor(State);
+
+impl DirectExecutor {
+    pub(crate) fn apply_privileged(
+        &mut self,
+        target_window_id: u64,
+        payload: Payload,
+    ) -> Result<Option<WindowUpdated>> {
+        match win32::desktop::sync_thread_desktop() {
+            Ok(on_secure) => self.0.apply_privileged_inner(target_window_id, payload, on_secure),
+            Err(err) if err.to_string().contains("170") => {
+                // ERROR_BUSY fallback: execute on a clean one-shot thread with zero desktop affinity.
+                let handle = std::thread::Builder::new()
+                    .name("secure-input-oneshot".into())
+                    .spawn(move || -> Result<Option<WindowUpdated>> {
+                        let _guard = win32::desktop::ThreadDesktopResetGuard::new();
+                        let on_secure = win32::desktop::sync_thread_desktop()?;
+                        let mut tmp = State::default();
+                        let res = tmp.apply_privileged_inner(target_window_id, payload, on_secure);
+                        // Don't emit synthetic keyups on oneshot drop.
+                        tmp.keys.clear();
+                        tmp.buttons.clear();
+                        res
+                    })?;
+                handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("secure-input-oneshot thread panicked"))?
+            }
+            Err(err) => Err(err),
+        }
+    }
+}
+
 impl State {
-    fn mouse(&mut self, target: &WindowInfo, ev: MouseEvent) -> Result<()> {
+    fn mouse(&mut self, target: &WindowInfo, ev: MouseEvent, split_click: bool) -> Result<()> {
         unsafe {
             let dx = virtual_axis(
                 target.x,
@@ -204,35 +238,57 @@ impl State {
                 GetSystemMetrics(SM_YVIRTUALSCREEN),
                 GetSystemMetrics(SM_CYVIRTUALSCREEN),
             )?;
-            let mut events = vec![mouse(
+            let move_ev = mouse(
                 MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
                 0,
                 dx,
                 dy,
-            )];
-            match ev.kind {
-                1 => {}
-                2 | 3 => events.push(button(ev.button, ev.kind == 2)?),
-                4 => {
-                    for (i, (delta, flag)) in [
-                        (ev.wheel_delta_x, MOUSEEVENTF_HWHEEL),
-                        (ev.wheel_delta_y, MOUSEEVENTF_WHEEL),
-                    ]
-                    .into_iter()
-                    .enumerate()
-                    {
-                        ensure!(delta.is_finite(), "non-finite wheel delta");
-                        let sum = self.wheel[i] + f64::from(delta);
-                        let amount = sum.round().clamp(i32::MIN as f64, i32::MAX as f64) as i32;
-                        self.wheel[i] = sum - sum.round();
-                        if amount != 0 {
-                            events.push(mouse(flag, amount as u32, 0, 0));
+            );
+            if split_click && matches!(ev.kind, 2 | 3) {
+                // On Winlogon / UAC consent.exe, move cursor first so hover hit-testing settles
+                // before sending button down/up.
+                send(&[move_ev])?;
+                if ev.kind == 2 {
+                    std::thread::sleep(std::time::Duration::from_millis(3));
+                }
+                send(&[button(ev.button, ev.kind == 2)?])?;
+                if ev.kind == 2 {
+                    tracing::info!(
+                        button = ev.button,
+                        norm_x = ev.norm_x,
+                        norm_y = ev.norm_y,
+                        dx,
+                        dy,
+                        "injected secure-desktop mouse click"
+                    );
+                }
+            } else {
+                let mut events = vec![move_ev];
+                match ev.kind {
+                    1 => {}
+                    2 | 3 => events.push(button(ev.button, ev.kind == 2)?),
+                    4 => {
+                        for (i, (delta, flag)) in [
+                            (ev.wheel_delta_x, MOUSEEVENTF_HWHEEL),
+                            (ev.wheel_delta_y, MOUSEEVENTF_WHEEL),
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        {
+                            ensure!(delta.is_finite(), "non-finite wheel delta");
+                            let sum = self.wheel[i] + f64::from(delta);
+                            let amount =
+                                sum.round().clamp(i32::MIN as f64, i32::MAX as f64) as i32;
+                            self.wheel[i] = sum - sum.round();
+                            if amount != 0 {
+                                events.push(mouse(flag, amount as u32, 0, 0));
+                            }
                         }
                     }
+                    _ => bail!("unsupported mouse event"),
                 }
-                _ => bail!("unsupported mouse event"),
+                send(&events)?;
             }
-            send(&events)?;
             match ev.kind {
                 2 => {
                     self.buttons.insert(ev.button);
@@ -245,65 +301,75 @@ impl State {
             Ok(())
         }
     }
-    fn apply(&mut self, target: &WindowInfo, payload: Payload) -> Result<Option<WindowUpdated>> {
-        // Keep input thread attached to whichever desktop currently receives user input
-        // (Default vs Winlogon UAC / Lock Screen when running as LocalSystem service).
-        let on_secure_desktop = win32::desktop::sync_thread_desktop()?;
-        if target.window_id == win32::DESKTOP_WINDOW_ID {
-            let desktop = if on_secure_desktop {
-                // On Winlogon, primary screen metrics match the captured GDI desktop directly.
-                let w = unsafe { GetSystemMetrics(SM_CXSCREEN) }.max(1) as u32;
-                let h = unsafe { GetSystemMetrics(SM_CYSCREEN) }.max(1) as u32;
-                WindowInfo {
-                    window_id: win32::DESKTOP_WINDOW_ID,
-                    x: 0,
-                    y: 0,
-                    width: w,
-                    height: h,
-                    ..Default::default()
-                }
-            } else {
-                win32::primary_desktop_info()?
-            };
-            match payload {
-                Payload::MouseEvent(ev) => self.mouse(&desktop, ev)?,
-                Payload::KeyEvent(ev) => {
-                    send(&[key_input(ev.hid_usage, ev.is_down)?])?;
-                    if ev.is_down {
-                        self.keys.insert(ev.hid_usage);
-                    } else {
-                        self.keys.remove(&ev.hid_usage);
-                    }
-                }
-                Payload::TextInput(t) => text(&t.text)?,
-                Payload::ResizeWindow(_)
-                | Payload::FocusWindow(_)
-                | Payload::CloseWindow(_)
-                | Payload::WindowAction(_) => {}
-                _ => bail!("unsupported input command"),
+
+    fn apply_desktop(&mut self, payload: Payload, on_secure_desktop: bool) -> Result<Option<WindowUpdated>> {
+        let desktop = if on_secure_desktop {
+            // On Winlogon, primary screen metrics match the captured GDI desktop directly.
+            let w = unsafe { GetSystemMetrics(SM_CXSCREEN) }.max(1) as u32;
+            let h = unsafe { GetSystemMetrics(SM_CYSCREEN) }.max(1) as u32;
+            WindowInfo {
+                window_id: win32::DESKTOP_WINDOW_ID,
+                x: 0,
+                y: 0,
+                width: w,
+                height: h,
+                ..Default::default()
             }
-            return Ok(None);
+        } else {
+            win32::primary_desktop_info()?
+        };
+        match payload {
+            Payload::MouseEvent(ev) => self.mouse(&desktop, ev, on_secure_desktop)?,
+            Payload::KeyEvent(ev) => {
+                send(&[key_input(ev.hid_usage, ev.is_down)?])?;
+                if ev.is_down {
+                    self.keys.insert(ev.hid_usage);
+                } else {
+                    self.keys.remove(&ev.hid_usage);
+                }
+            }
+            Payload::TextInput(t) => text(&t.text)?,
+            Payload::ResizeWindow(_)
+            | Payload::FocusWindow(_)
+            | Payload::CloseWindow(_)
+            | Payload::WindowAction(_) => {}
+            _ => bail!("unsupported input command"),
+        }
+        Ok(None)
+    }
+
+    fn apply_privileged_inner(
+        &mut self,
+        target_window_id: u64,
+        payload: Payload,
+        on_secure_desktop: bool,
+    ) -> Result<Option<WindowUpdated>> {
+        if target_window_id == win32::DESKTOP_WINDOW_ID {
+            return self.apply_desktop(payload, on_secure_desktop);
         }
         if on_secure_desktop {
             bail!("UAC 安全桌面当前已激活，请在自动弹出的 Windows 桌面窗口中点击确认");
         }
-        let current = win32::info(target.window_id)?;
-        ensure!(current.pid == target.pid, "window handle has been reused");
+        let current = win32::info(target_window_id)?;
         let hwnd = win32::checked_hwnd(current.window_id)?;
-        check_access(current.pid)?;
         let focus = || -> Result<()> {
-            let owner_id = if current.owner_window_id != 0 {
-                current.owner_window_id
-            } else {
-                target.owner_window_id
-            };
-            let owner = if target.kind == 3 && owner_id != 0 {
-                win32::checked_hwnd(owner_id)?
+            let owner = if current.kind == 3 && current.owner_window_id != 0 {
+                win32::checked_hwnd(current.owner_window_id)?
             } else {
                 hwnd
             };
             foreground(owner)
         };
+        self.apply_window_payload(&current, hwnd, payload, focus)
+    }
+
+    fn apply_window_payload(
+        &mut self,
+        current: &WindowInfo,
+        hwnd: windows_sys::Win32::Foundation::HWND,
+        payload: Payload,
+        focus: impl Fn() -> Result<()>,
+    ) -> Result<Option<WindowUpdated>> {
         match payload {
             Payload::ResizeWindow(r) => {
                 let window = win32::resize(current.window_id, r.width, r.height)?;
@@ -340,7 +406,7 @@ impl State {
                 if ev.kind == 2 {
                     focus()?;
                 }
-                self.mouse(&current, ev)?;
+                self.mouse(current, ev, false)?;
             }
             Payload::KeyEvent(ev) => {
                 focus()?;
@@ -358,6 +424,74 @@ impl State {
             _ => bail!("unsupported input command"),
         }
         Ok(None)
+    }
+
+    fn apply(&mut self, target: &WindowInfo, payload: Payload) -> Result<Option<WindowUpdated>> {
+        if crate::helper::is_configured() {
+            if target.window_id == win32::DESKTOP_WINDOW_ID {
+                return match payload {
+                    Payload::MouseEvent(_) | Payload::KeyEvent(_) | Payload::TextInput(_) => {
+                        crate::helper::forward_input(target.window_id, &payload)
+                    }
+                    Payload::ResizeWindow(_)
+                    | Payload::FocusWindow(_)
+                    | Payload::CloseWindow(_)
+                    | Payload::WindowAction(_) => Ok(None),
+                    _ => bail!("unsupported input command"),
+                };
+            }
+            if win32::desktop::is_secure_desktop() {
+                bail!("UAC 安全桌面当前已激活，请在自动弹出的 Windows 桌面窗口中点击确认");
+            }
+            let current = win32::info(target.window_id)?;
+            ensure!(current.pid == target.pid, "window handle has been reused");
+            let hwnd = win32::checked_hwnd(current.window_id)?;
+            if check_access(current.pid).is_err() {
+                // Target runs with Administrator privileges; forward to LocalSystem + UIAccess helper.
+                return crate::helper::forward_input(target.window_id, &payload);
+            }
+            let focus = || -> Result<()> {
+                let owner_id = if current.owner_window_id != 0 {
+                    current.owner_window_id
+                } else {
+                    target.owner_window_id
+                };
+                let owner = if target.kind == 3 && owner_id != 0 {
+                    win32::checked_hwnd(owner_id)?
+                } else {
+                    hwnd
+                };
+                foreground(owner)
+            };
+            return self.apply_window_payload(&current, hwnd, payload, focus);
+        }
+
+        // Standalone non-service mode: sync local thread desktop directly.
+        let on_secure_desktop = win32::desktop::sync_thread_desktop()?;
+        if target.window_id == win32::DESKTOP_WINDOW_ID {
+            return self.apply_desktop(payload, on_secure_desktop);
+        }
+        if on_secure_desktop {
+            bail!("UAC 安全桌面当前已激活，请在自动弹出的 Windows 桌面窗口中点击确认");
+        }
+        let current = win32::info(target.window_id)?;
+        ensure!(current.pid == target.pid, "window handle has been reused");
+        let hwnd = win32::checked_hwnd(current.window_id)?;
+        check_access(current.pid)?;
+        let focus = || -> Result<()> {
+            let owner_id = if current.owner_window_id != 0 {
+                current.owner_window_id
+            } else {
+                target.owner_window_id
+            };
+            let owner = if target.kind == 3 && owner_id != 0 {
+                win32::checked_hwnd(owner_id)?
+            } else {
+                hwnd
+            };
+            foreground(owner)
+        };
+        self.apply_window_payload(&current, hwnd, payload, focus)
     }
 }
 

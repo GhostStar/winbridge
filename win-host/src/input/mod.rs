@@ -1,5 +1,6 @@
 mod hid_scancode;
 mod injector;
+pub(crate) use injector::DirectExecutor;
 pub use injector::Injector;
 
 use crate::win32;

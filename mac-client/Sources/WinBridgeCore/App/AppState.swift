@@ -86,6 +86,7 @@ final class AppState {
         }
 
         connectionState = .connecting
+        ClientLogger.shared.info("Connecting to \(host):\(settings.port)")
         setBanner("正在连接 \(host):\(settings.port)…", isError: false)
         onStateChanged?()
 
@@ -136,6 +137,7 @@ final class AppState {
                 let ack = try await conn.connect(config: config)
                 self.connectionState = .connected(hostName: ack.hostName, codec: ack.selectedCodec)
                 self.rttMs = nil
+                ClientLogger.shared.info("Connected to \(ack.hostName) codec=\(ack.selectedCodec.displayName)")
                 self.setBanner("已连接到 \(ack.hostName)（\(ack.selectedCodec.displayName)）", isError: false)
                 self.clipboardMonitor.start()
                 if self.settings.audioEnabled {
@@ -150,6 +152,7 @@ final class AppState {
                     self.connection = nil
                 }
                 self.connectionState = .disconnected
+                ClientLogger.shared.error("Connect failed: \(error.localizedDescription)")
                 self.setBanner("连接失败：\(error.localizedDescription)", isError: true)
                 self.onStateChanged?()
             }
@@ -176,8 +179,10 @@ final class AppState {
         controllers.removeAll()
 
         if let error {
+            ClientLogger.shared.error("Disconnected: \(error.localizedDescription)")
             setBanner("连接已断开：\(error.localizedDescription)", isError: true)
         } else {
+            ClientLogger.shared.info("Disconnected cleanly")
             setBanner("已断开连接", isError: false)
         }
         onStateChanged?()
@@ -200,6 +205,7 @@ final class AppState {
         if isDesktopOpen {
             unsubscribeWindow(SyntheticWindow.primaryDesktop)
         } else {
+            ClientLogger.shared.info("Subscribing primary desktop")
             subscribedRootIds.insert(SyntheticWindow.primaryDesktop)
             sendControl(.subscribeWindow(SubscribeWindow(
                 windowId: SyntheticWindow.primaryDesktop,
@@ -291,6 +297,7 @@ final class AppState {
         guard case .connected = connectionState else { return }
         subscribedRootIds.insert(info.windowId)
         let mode = captureMode(for: info)
+        ClientLogger.shared.info("Subscribing window 0x\(String(info.windowId, radix: 16)) (\(info.processName)) mode=\(mode)")
         sendControl(.subscribeWindow(SubscribeWindow(
             windowId: info.windowId,
             targetFps: settings.targetFps,
@@ -362,6 +369,7 @@ final class AppState {
             handleWindowUpdated(update)
 
         case .windowClosed(let closed):
+            ClientLogger.shared.info("WindowClosed 0x\(String(closed.windowId, radix: 16))")
             subscribedRootIds.remove(closed.windowId)
             closeWindowLocally(closed.windowId)
             onStateChanged?()
@@ -402,6 +410,7 @@ final class AppState {
         wc.onOpenManager = { [weak self] in self?.onOpenManager?() }
 
         controllers[info.windowId] = wc
+        ClientLogger.shared.info("Opened window 0x\(String(info.windowId, radix: 16)) kind=\(info.kind) \(info.width)x\(info.height) title=\"\(info.title)\"")
         if info.kind == .normal {
             subscribedRootIds.insert(info.windowId)
         }
@@ -428,6 +437,7 @@ final class AppState {
     }
 
     private func handleHostError(_ err: HostError) {
+        ClientLogger.shared.error("HostError window=0x\(String(err.windowId, radix: 16)) code=\(err.code) msg=\(err.message)")
         let prefix: String
         switch err.code {
         case .displayDisconnected:

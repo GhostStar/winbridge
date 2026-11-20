@@ -10,15 +10,16 @@ use std::{
     time::{Duration, Instant},
 };
 use windows_sys::Win32::{
-    Foundation::{GetLastError, ERROR_ACCESS_DENIED, HANDLE},
+    Foundation::{CloseHandle, GetLastError, ERROR_ACCESS_DENIED, HANDLE},
     Graphics::Gdi::*,
+    Security::{GetTokenInformation, TokenUIAccess, TOKEN_QUERY},
     System::{
         RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken},
         StationsAndDesktops::{
             CloseDesktop, GetThreadDesktop, GetUserObjectInformationW, OpenInputDesktop,
             SetThreadDesktop, HDESK, UOI_NAME,
         },
-        Threading::GetCurrentThreadId,
+        Threading::{GetCurrentProcess, GetCurrentThreadId, OpenProcessToken},
     },
     UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN},
 };
@@ -26,15 +27,41 @@ use windows_sys::Win32::{
 const DESKTOP_ACCESS_ALL: u32 = 0x01FF;
 const DESKTOP_READ_ONLY: u32 = 0x0001;
 
+static SECURE_DESKTOP_HINT: AtomicBool = AtomicBool::new(false);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DesktopState {
     Default,
     /// Active input desktop is a non-Default desktop (e.g. Winlogon UAC or Lock Screen)
-    /// and this process has permission to switch to it (LocalSystem service worker).
+    /// and this process (or its LocalSystem secure-helper) has permission to access it.
     SecureAccessible,
     /// Active input desktop is Winlogon / Secure Desktop, but current process lacks
     /// SYSTEM/TCB permission to open it.
     SecureDenied,
+}
+
+pub fn set_secure_desktop_hint(active: bool) {
+    SECURE_DESKTOP_HINT.store(active, Ordering::Release);
+}
+
+pub fn current_process_ui_access() -> Option<bool> {
+    unsafe {
+        let mut token: HANDLE = ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+            return None;
+        }
+        let mut ui_access: u32 = 0;
+        let mut len: u32 = 0;
+        let ok = GetTokenInformation(
+            token,
+            TokenUIAccess,
+            (&mut ui_access as *mut u32).cast(),
+            mem::size_of::<u32>() as u32,
+            &mut len,
+        );
+        CloseHandle(token);
+        (ok != 0).then_some(ui_access != 0)
+    }
 }
 
 fn desktop_name(desk: HDESK) -> Option<String> {
@@ -59,7 +86,8 @@ fn desktop_name(desk: HDESK) -> Option<String> {
     Some(String::from_utf16_lossy(&buf[..len]))
 }
 
-pub fn probe_desktop_state() -> DesktopState {
+/// Probes the current process's own desktop access directly via `OpenInputDesktop`.
+pub fn probe_desktop_state_local() -> DesktopState {
     unsafe {
         let desk = OpenInputDesktop(0, 0, DESKTOP_READ_ONLY);
         if desk.is_null() {
@@ -79,12 +107,58 @@ pub fn probe_desktop_state() -> DesktopState {
     }
 }
 
+/// Probes the active input desktop, delegating to the LocalSystem `secure-helper` when running
+/// as an interactive user session worker under the Windows Service.
+pub fn probe_desktop_state() -> DesktopState {
+    if let Some(state) = crate::helper::probe_desktop_state() {
+        return state;
+    }
+    probe_desktop_state_local()
+}
+
 pub fn is_secure_desktop() -> bool {
-    probe_desktop_state() != DesktopState::Default
+    if crate::helper::is_configured() {
+        return SECURE_DESKTOP_HINT.load(Ordering::Acquire);
+    }
+    probe_desktop_state_local() != DesktopState::Default
 }
 
 thread_local! {
     static OWNED_DESKTOP: Cell<HDESK> = const { Cell::new(ptr::null_mut()) };
+}
+
+/// Restores the calling thread's original desktop on drop so the last `OpenInputDesktop` handle
+/// can be closed without leaking kernel handles.
+pub struct ThreadDesktopResetGuard {
+    orig: HDESK,
+}
+
+impl ThreadDesktopResetGuard {
+    pub fn new() -> Self {
+        Self {
+            orig: unsafe { GetThreadDesktop(GetCurrentThreadId()) },
+        }
+    }
+}
+
+impl Default for ThreadDesktopResetGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for ThreadDesktopResetGuard {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.orig.is_null() {
+                let _ = SetThreadDesktop(self.orig);
+            }
+            let prev = OWNED_DESKTOP.with(|slot| slot.replace(ptr::null_mut()));
+            if !prev.is_null() {
+                CloseDesktop(prev);
+            }
+        }
+    }
 }
 
 /// Switches the calling thread to whichever interactive desktop currently owns user input
@@ -203,8 +277,8 @@ pub fn capture_gdi_primary_bgra() -> Result<(u16, u16, Vec<u8>)> {
     }
 }
 
-/// Captures frames from the active Secure Desktop (`Winlogon`) on a dedicated clean OS thread
-/// that never touches COM/WinRT/WGC/D3D11, guaranteeing `SetThreadDesktop` never hits `ERROR_BUSY`.
+/// Captures frames from the active Secure Desktop (`Winlogon`) either via the LocalSystem
+/// `secure-helper` loopback IPC (preferred) or locally on a dedicated clean OS thread.
 pub struct SecureGdiCapturer {
     stop: Arc<AtomicBool>,
     rx: Option<Receiver<(u16, u16, Vec<u8>)>>,
@@ -216,29 +290,26 @@ impl SecureGdiCapturer {
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
         let (tx, rx) = mpsc::sync_channel::<(u16, u16, Vec<u8>)>(1);
+        let use_helper = crate::helper::is_configured();
         let thread = std::thread::Builder::new()
             .name("secure-gdi-capture".into())
             .spawn(move || {
-                let orig_desk = unsafe { GetThreadDesktop(GetCurrentThreadId()) };
+                let _guard = ThreadDesktopResetGuard::new();
                 while !worker_stop.load(Ordering::Acquire) {
                     let tick = Instant::now();
-                    if sync_thread_desktop().is_ok() {
-                        if let Ok(frame) = capture_gdi_primary_bgra() {
-                            let _ = tx.try_send(frame);
-                        }
+                    let frame = if use_helper {
+                        crate::helper::capture_secure_frame().ok()
+                    } else if sync_thread_desktop().is_ok() {
+                        capture_gdi_primary_bgra().ok()
+                    } else {
+                        None
+                    };
+                    if let Some(frame) = frame {
+                        let _ = tx.try_send(frame);
                     }
                     let elapsed = tick.elapsed();
                     if elapsed < Duration::from_millis(50) {
                         std::thread::sleep(Duration::from_millis(50) - elapsed);
-                    }
-                }
-                unsafe {
-                    if !orig_desk.is_null() {
-                        let _ = SetThreadDesktop(orig_desk);
-                    }
-                    let prev = OWNED_DESKTOP.with(|slot| slot.replace(ptr::null_mut()));
-                    if !prev.is_null() {
-                        CloseDesktop(prev);
                     }
                 }
             })?;
