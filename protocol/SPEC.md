@@ -98,6 +98,7 @@ After the `WBRGMED\x01` + 16-byte `session_id` handshake returns `0x00`, Windows
 1. **Visible Window Bounds (Avoid the 7px Invisible Border Trap)**
    - On Windows 10/11, `GetWindowRect` includes invisible ~7px drop-shadow resize borders on left, right, and bottom.
    - Windows Host **MUST** compute `(x, y, width, height)` using `DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS)` and crop WGC frames (if needed) to match these exact visible bounds.
+   - `SubscribeWindow.capture_mode` selects between `CAPTURE_MODE_WINDOW` (`CreateForWindow`, supports overlapped windows) and `CAPTURE_MODE_MONITOR_CROP` (`CreateForMonitor` cropped to the target window's visible rect — required for cross-process Android emulators like MuMu, Vulkan surfaces, and hardware overlays).
 2. **Coordinate Mapping for Mouse Events**
    - macOS sends normalized window-local coordinates `(norm_x, norm_y)` where `(0.0, 0.0)` is the top-left of the rendered window frame and `(1.0, 1.0)` is the bottom-right.
    - Windows converts this to virtual desktop coordinates using the target window's current visible rect:

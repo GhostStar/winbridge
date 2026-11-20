@@ -13,6 +13,7 @@ target/
 # Swift / Xcode (mac-client)
 .build/
 .swiftpm/
+/mac-client/build/
 *.xcodeproj/xcuserdata/
 *.xcworkspace/xcuserdata/
 DerivedData/

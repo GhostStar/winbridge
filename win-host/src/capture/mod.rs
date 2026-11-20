@@ -21,9 +21,9 @@ struct Reader {
 }
 
 impl Reader {
-    fn open(id: u64, cursor: bool, staging: bool) -> Result<Self> {
+    fn open(id: u64, cursor: bool, staging: bool, monitor_crop: bool) -> Result<Self> {
         Ok(Self {
-            capture: wgc::Capture::new(id, cursor)?,
+            capture: wgc::Capture::new(id, cursor, monitor_crop)?,
             staging,
             width: 0,
             height: 0,
@@ -84,10 +84,16 @@ fn save_png(path: &Path, w: u16, h: u16, mut pixels: Vec<u8>) -> Result<()> {
     Ok(())
 }
 
-pub fn probe(id: u64, frames: u32, save: Option<&Path>, cursor: bool) -> Result<()> {
+pub fn probe(
+    id: u64,
+    frames: u32,
+    save: Option<&Path>,
+    cursor: bool,
+    monitor_crop: bool,
+) -> Result<()> {
     ensure!(frames > 0, "--frames must be positive");
     let _apt = wgc::Apartment::new()?;
-    let mut reader = Reader::open(id, cursor, true)?;
+    let mut reader = Reader::open(id, cursor, true, monitor_crop)?;
     let start = Instant::now();
     let mut last = start;
     let mut count = 0;
@@ -144,6 +150,7 @@ pub fn stream(
     bitrate_kbps: u32,
     codec: i32,
     cursor: bool,
+    monitor_crop: bool,
     running: &AtomicBool,
     keyframe: &AtomicBool,
     mut emit: impl FnMut(u16, u16, bool, Vec<u8>),
@@ -198,8 +205,14 @@ pub fn stream(
             continue;
         }
         paused = false;
+        if reader.as_ref().is_some_and(|r| r.capture.monitor_changed()) {
+            h264 = None;
+            pending_capture.clear();
+            reader = None;
+            dirty = false;
+        }
         if reader.is_none() {
-            reader = Some(Reader::open(id, cursor, codec != 1)?);
+            reader = Some(Reader::open(id, cursor, codec != 1, monitor_crop)?);
             keyframe.store(true, Ordering::Release);
         }
         let src = reader.as_mut().unwrap();

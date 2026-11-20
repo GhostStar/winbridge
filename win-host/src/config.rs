@@ -9,6 +9,12 @@ pub enum Codec {
     Raw,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum CaptureMode {
+    Window,
+    MonitorCrop,
+}
+
 fn hwnd(arg: &str) -> Result<u64, String> {
     let value = match arg.strip_prefix("0x").or_else(|| arg.strip_prefix("0X")) {
         Some(hex) => u64::from_str_radix(hex, 16),
@@ -39,6 +45,8 @@ pub struct Config {
     pub bitrate: u32,
     #[arg(long, value_enum, default_value = "auto")]
     pub codec: Codec,
+    #[arg(long, value_enum, default_value = "window")]
+    pub capture_mode: CaptureMode,
     #[arg(long)]
     pub capture_cursor: bool,
     #[arg(long, default_value = "info")]

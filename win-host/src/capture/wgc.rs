@@ -18,7 +18,10 @@ use windows::{
         Graphics::{
             Direct3D11::{ID3D11Texture2D, D3D11_BOX, D3D11_TEXTURE2D_DESC},
             Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS},
-            Gdi::{EnumDisplayMonitors, HDC, HMONITOR},
+            Gdi::{
+                EnumDisplayMonitors, GetMonitorInfoW, MonitorFromWindow, HDC, HMONITOR,
+                MONITORINFO, MONITOR_DEFAULTTONEAREST,
+            },
         },
         System::WinRT::{
             Direct3D11::IDirect3DDxgiInterfaceAccess,
@@ -54,6 +57,7 @@ pub(super) struct Capture {
     size: SizeInt32,
     frame: Option<Direct3D11CaptureFrame>,
     hwnd: HWND,
+    monitor: Option<HMONITOR>,
     arrival: Receiver<()>,
     token: EventRegistrationToken,
     item: GraphicsCaptureItem,
@@ -99,6 +103,18 @@ fn check_monitors() -> Result<()> {
     Ok(())
 }
 
+fn monitor_rect(monitor: HMONITOR) -> Result<RECT> {
+    let mut mi = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    ensure!(
+        unsafe { GetMonitorInfoW(monitor, &mut mi) }.as_bool(),
+        "DISPLAY_DISCONNECTED: GetMonitorInfoW failed"
+    );
+    Ok(mi.rcMonitor)
+}
+
 // ContentSize can already exclude the invisible DWM border on some versions of Windows.
 // Calculate the origin for each axis separately and never read the stale area of a pooled texture.
 fn crop_axis(content: u32, extent: i32, origin_delta: i32) -> (u32, u32) {
@@ -107,8 +123,15 @@ fn crop_axis(content: u32, extent: i32, origin_delta: i32) -> (u32, u32) {
     (origin, visible.min(content - origin))
 }
 
+fn crop_monitor_axis(tex_extent: u32, mon_origin: i32, win_start: i32, win_end: i32) -> (u32, u32) {
+    let max = tex_extent.min(i32::MAX as u32) as i32;
+    let start = win_start.saturating_sub(mon_origin).clamp(0, max);
+    let end = win_end.saturating_sub(mon_origin).clamp(start, max);
+    (start as u32, (end - start) as u32)
+}
+
 impl Capture {
-    pub fn new(id: u64, cursor: bool) -> Result<Self> {
+    pub fn new(id: u64, cursor: bool, monitor_crop: bool) -> Result<Self> {
         check_desktop(id)?;
         check_monitors()?;
         ensure!(
@@ -118,7 +141,18 @@ impl Capture {
         let hwnd = HWND(id as usize as _);
         let gpu = Graphics::new()?;
         let interop = factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
-        let item: GraphicsCaptureItem = unsafe { interop.CreateForWindow(hwnd) }?;
+        let (item, monitor): (GraphicsCaptureItem, Option<HMONITOR>) = if monitor_crop {
+            let hmon = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+            ensure!(
+                !hmon.is_invalid(),
+                "DISPLAY_DISCONNECTED: window is not located on any active monitor"
+            );
+            let item: GraphicsCaptureItem = unsafe { interop.CreateForMonitor(hmon) }?;
+            (item, Some(hmon))
+        } else {
+            let item: GraphicsCaptureItem = unsafe { interop.CreateForWindow(hwnd) }?;
+            (item, None)
+        };
         let size = item.Size()?;
         ensure!(size.Width > 0 && size.Height > 0, "empty WGC frame size");
         let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(&gpu.runtime, FORMAT, 2, size)?;
@@ -147,6 +181,7 @@ impl Capture {
             session,
             size,
             hwnd,
+            monitor,
             arrival,
             token,
             item,
@@ -159,6 +194,14 @@ impl Capture {
         Ok(capture)
     }
 
+    pub fn monitor_changed(&self) -> bool {
+        let Some(current) = self.monitor else {
+            return false;
+        };
+        let target = unsafe { MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTONEAREST) };
+        !target.is_invalid() && target != current
+    }
+
     pub fn next(&mut self) -> Result<Option<(ID3D11Texture2D, D3D11_BOX)>> {
         match self.arrival.recv_timeout(Duration::from_millis(80)) {
             Ok(()) => (),
@@ -169,10 +212,12 @@ impl Capture {
             }
             Err(RecvTimeoutError::Disconnected) => bail!("WGC frame pool closed"),
         }
-        ensure!(
-            !self.closed.load(Ordering::Acquire),
-            "WINDOW_NOT_FOUND: capture item closed"
-        );
+        if self.closed.load(Ordering::Acquire) {
+            if self.monitor.is_some() {
+                bail!("DISPLAY_DISCONNECTED: monitor capture item closed");
+            }
+            bail!("WINDOW_NOT_FOUND: capture item closed");
+        }
         self.frame_start = Instant::now();
         let mut frame = match self.pool.TryGetNextFrame() {
             Ok(f) => f,
@@ -220,16 +265,34 @@ impl Capture {
         if got_ext.is_err() {
             ext = outer;
         }
-        let (x, w) = crop_axis(
-            desc.Width.min(size.Width as u32),
-            ext.right - ext.left,
-            ext.left - outer.left,
-        );
-        let (y, h) = crop_axis(
-            desc.Height.min(size.Height as u32),
-            ext.bottom - ext.top,
-            ext.top - outer.top,
-        );
+        let (x, w, y, h) = if let Some(mon) = self.monitor {
+            let mon_rect = monitor_rect(mon)?;
+            let (x, w) = crop_monitor_axis(
+                desc.Width.min(size.Width as u32),
+                mon_rect.left,
+                ext.left,
+                ext.right,
+            );
+            let (y, h) = crop_monitor_axis(
+                desc.Height.min(size.Height as u32),
+                mon_rect.top,
+                ext.top,
+                ext.bottom,
+            );
+            (x, w, y, h)
+        } else {
+            let (x, w) = crop_axis(
+                desc.Width.min(size.Width as u32),
+                ext.right - ext.left,
+                ext.left - outer.left,
+            );
+            let (y, h) = crop_axis(
+                desc.Height.min(size.Height as u32),
+                ext.bottom - ext.top,
+                ext.top - outer.top,
+            );
+            (x, w, y, h)
+        };
         if w == 0 || h == 0 {
             frame.Close()?;
             return Ok(None);
@@ -268,11 +331,18 @@ impl Drop for Capture {
 
 #[cfg(test)]
 mod tests {
-    use super::crop_axis;
+    use super::{crop_axis, crop_monitor_axis};
     #[test]
     fn handles_both_capture_bounds() {
         assert_eq!(crop_axis(1014, 1000, 7), (7, 1000));
         assert_eq!(crop_axis(1000, 1000, 7), (0, 1000));
         assert_eq!(crop_axis(980, 1000, 7), (0, 980));
+    }
+    #[test]
+    fn crops_monitor_bounds_for_window() {
+        assert_eq!(crop_monitor_axis(1920, 0, 100, 1100), (100, 1000));
+        // Secondary monitor with negative origin and partially off-screen window
+        assert_eq!(crop_monitor_axis(1920, -1920, -2000, -1000), (0, 920));
+        assert_eq!(crop_monitor_axis(1920, 0, 1800, 2200), (1800, 120));
     }
 }

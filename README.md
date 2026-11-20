@@ -10,8 +10,33 @@ winbridge/
 │   ├── control.proto   # Protobuf schema for the Control TCP channel
 │   └── SPEC.md         # Transport, 32-byte media frame header, DPI/input contracts
 ├── win-host/           # Rust Windows host (Windows.Graphics.Capture, Media Foundation, Tokio)
-└── mac-client/         # (Next) Swift macOS client (AppKit, VideoToolbox, Network.framework)
+└── mac-client/         # Swift macOS client (AppKit, VideoToolbox, Network.framework)
 ```
+
+## macOS Client
+
+Built with Swift Package Manager (Swift 6.0+, macOS 14+, no Xcode.app required, zero third-party dependencies):
+
+```bash
+cd mac-client
+./scripts/run_tests.sh
+./scripts/bundle_app.sh
+open build/WinBridge.app
+```
+
+Or run directly from the terminal during development:
+
+```bash
+cd mac-client
+swift run
+```
+
+Features:
+- Dual TCP transport (`WBRGCTL\x01` + `WBRGMED\x01`, `TCP_NODELAY`, 5s `Ping` keepalive & live RTT)
+- Hardware H.264 decoding via `VideoToolbox` → `IOSurface` → `CALayer` (plus `JPEG` and `RAW_BGRA`)
+- Seamless multi-window rendering (`NORMAL`, `DIALOG`, and non-activating borderless `POPUP` menus/tooltips)
+- Mouse, smooth trackpad scrolling, USB HID keyboard mapping, optional `Cmd → Ctrl`, and native macOS Chinese IME (`NSTextInputClient` → `TextInput`)
+- Cursor shape sync (standard + custom RGBA) and bidirectional text/PNG clipboard sync
 
 ## Windows Host
 
@@ -25,6 +50,8 @@ cargo build --release --locked
 .\target\release\win-host.exe --list-windows
 .\target\release\win-host.exe --bind 0.0.0.0 --port 9876 --token "your-LAN-secret"
 ```
+
+Use `--capture-mode monitor-crop` to default to monitor capture cropped to the window's visible bounds (useful for Vulkan / cross-process emulators like MuMu), or let the macOS client pick `单窗` vs `屏幕裁剪` per window via `SubscribeWindow.capture_mode`.
 
 Enter the Windows host's LAN address, port and matching token on the client. An empty token enables development mode. The v0.1 TCP transport carries the token, input, pixels and clipboard contents in cleartext. Use a trusted LAN or an encrypted tunnel.
 

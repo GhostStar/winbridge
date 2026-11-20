@@ -26,6 +26,7 @@ fn main() -> Result<()> {
             config.frames,
             config.save.as_deref(),
             config.capture_cursor,
+            config.capture_mode == win_host::config::CaptureMode::MonitorCrop,
         );
     }
     if let Some(id) = config.test_input {

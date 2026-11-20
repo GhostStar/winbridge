@@ -90,6 +90,11 @@ impl Session {
         };
         let codec = self.codec;
         let cursor = self.config.capture_cursor;
+        let monitor_crop = match options.capture_mode {
+            1 => false,
+            2 => true,
+            _ => self.config.capture_mode == crate::config::CaptureMode::MonitorCrop,
+        };
         let notices = self.notices.clone();
         let mux = self.mux.clone();
         self.mux.register(id, info.kind == 3, key.clone());
@@ -113,6 +118,7 @@ impl Session {
                     rate,
                     codec,
                     cursor,
+                    monitor_crop,
                     &alive,
                     &force,
                     |w, h, k, data| mux.push(id, &force, codec as u8, (w, h), k, data),
@@ -175,7 +181,26 @@ impl Session {
             }
             self.remove(id, false)?;
         }
-        self.start(info, id, req)
+        let monitor_crop = match req.capture_mode {
+            1 => false,
+            2 => true,
+            _ => self.config.capture_mode == crate::config::CaptureMode::MonitorCrop,
+        };
+        self.start(info.clone(), id, req)?;
+        if monitor_crop {
+            // Bring window to foreground so monitor-crop capture is immediately unobstructed.
+            let _ = self
+                .injector
+                .execute(
+                    &info,
+                    Payload::FocusWindow(FocusWindow {
+                        window_id: id,
+                        focused: true,
+                    }),
+                )
+                .await;
+        }
+        Ok(())
     }
     async fn request(&mut self, msg: Payload) -> Result<()> {
         let target = match msg {

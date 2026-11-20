@@ -72,6 +72,15 @@ enum VideoCodec {
   VIDEO_CODEC_RAW_BGRA = 4;
 }
 
+enum CaptureMode {
+  CAPTURE_MODE_UNSPECIFIED = 0;
+  // WGC CreateForWindow: captures a single HWND even when overlapped by other windows.
+  CAPTURE_MODE_WINDOW = 1;
+  // WGC CreateForMonitor cropped to the window's visible DWM bounds.
+  // Captures Vulkan, cross-process emulators (e.g. MuMu), overlays, and games cleanly.
+  CAPTURE_MODE_MONITOR_CROP = 2;
+}
+
 enum WindowKind {
   WINDOW_KIND_UNSPECIFIED = 0;
   // Standard top-level application window.
@@ -245,6 +254,8 @@ message SubscribeWindow {
   // If true, host automatically tracks and streams owned dialogs & popups
   // (menus, dropdowns, tooltips) associated with this window/process.
   bool follow_popups = 4;
+  // Optional capture mode override (0 = host default).
+  CaptureMode capture_mode = 5;
 }
 
 message UnsubscribeWindow {
