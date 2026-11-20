@@ -26,10 +26,20 @@ struct Subscription {
     ack: u32,
     running: Arc<AtomicBool>,
     key: Arc<AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
 }
 impl Drop for Subscription {
     fn drop(&mut self) {
         self.running.store(false, Ordering::Release);
+        if let Some(handle) = self.worker.take() {
+            if tokio::runtime::Handle::try_current()
+                .is_ok_and(|rt| rt.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+            {
+                let _ = tokio::task::block_in_place(|| handle.join());
+            } else {
+                let _ = handle.join();
+            }
+        }
     }
 }
 
@@ -49,6 +59,14 @@ struct Session {
     replies: mpsc::Sender<Payload>,
     injector: Injector,
     cursor: Option<CursorShape>,
+}
+impl Drop for Session {
+    fn drop(&mut self) {
+        // Stop all capture threads in parallel before their JoinHandles are joined on drop.
+        for sub in self.windows.values() {
+            sub.running.store(false, Ordering::Release);
+        }
+    }
 }
 fn updated(info: WindowInfo, ack: u32) -> Payload {
     Payload::WindowUpdated(WindowUpdated {
@@ -132,10 +150,13 @@ impl Session {
                     }
                 }
             });
-        if let Err(e) = worker {
-            self.mux.end(id, self.codec as u8);
-            return self.error(id, 2, e.to_string());
-        }
+        let handle = match worker {
+            Ok(handle) => handle,
+            Err(e) => {
+                self.mux.end(id, self.codec as u8);
+                return self.error(id, 2, e.to_string());
+            }
+        };
         self.windows.insert(
             id,
             Subscription {
@@ -145,6 +166,7 @@ impl Session {
                 ack,
                 running,
                 key,
+                worker: Some(handle),
             },
         );
         self.send(updated(info, ack))?;
@@ -160,6 +182,11 @@ impl Session {
             .filter(|(k, s)| **k == id || s.root == id)
             .map(|(k, _)| *k)
             .collect();
+        for &child in &ids {
+            if let Some(sub) = self.windows.get(&child) {
+                sub.running.store(false, Ordering::Release);
+            }
+        }
         for child in ids {
             self.windows.remove(&child);
             self.mux.end(child, self.codec as u8);

@@ -93,7 +93,11 @@ struct Lease<'a>(&'a Server, Arc<Active>);
 impl Drop for Lease<'_> {
     fn drop(&mut self) {
         self.1.stop.send_replace(true);
-        self.0.active.lock().unwrap().take();
+        self.0
+            .active
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
     }
 }
 
@@ -108,7 +112,7 @@ async fn control(server: &Server, mut socket: TcpStream) -> Result<()> {
         ..Default::default()
     };
     let active = {
-        let mut slot = server.active.lock().unwrap();
+        let mut slot = server.active.lock().unwrap_or_else(|e| e.into_inner());
         if hello.protocol_version != 1 {
             ack.reject_reason = "unsupported protocol version".into();
         } else if !server.config.token.is_empty() && hello.auth_token != server.config.token {
@@ -172,7 +176,7 @@ async fn media(server: &Server, mut socket: TcpStream) -> Result<()> {
     let active = server
         .active
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .as_ref()
         .filter(|s| {
             s.id.as_bytes() == &id

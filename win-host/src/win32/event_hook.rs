@@ -183,7 +183,13 @@ impl Drop for Observer {
             PostThreadMessageW(self.id, WM_QUIT, 0, 0);
         }
         if let Some(t) = self.thread.take() {
-            let _ = t.join();
+            if tokio::runtime::Handle::try_current()
+                .is_ok_and(|rt| rt.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+            {
+                let _ = tokio::task::block_in_place(|| t.join());
+            } else {
+                let _ = t.join();
+            }
         }
     }
 }

@@ -49,20 +49,22 @@ impl Drop for Apartment {
 
 const FORMAT: DirectXPixelFormat = DirectXPixelFormat::B8G8R8A8UIntNormalized;
 
+// Field drop order matters: release WGC frame, session, pool, and item BEFORE
+// dropping `gpu` (ID3D11Device / IDirect3DDevice).
 pub(super) struct Capture {
-    pub gpu: Graphics,
     pub frame_start: Instant,
-    pool: Direct3D11CaptureFramePool,
-    session: GraphicsCaptureSession,
-    size: SizeInt32,
     frame: Option<Direct3D11CaptureFrame>,
+    session: GraphicsCaptureSession,
+    pool: Direct3D11CaptureFramePool,
+    item: GraphicsCaptureItem,
+    size: SizeInt32,
     hwnd: HWND,
     monitor: Option<HMONITOR>,
     arrival: Receiver<()>,
     token: EventRegistrationToken,
-    item: GraphicsCaptureItem,
     closed_token: EventRegistrationToken,
     closed: Arc<AtomicBool>,
+    pub gpu: Graphics,
 }
 
 pub(super) fn minimized(id: u64) -> bool {
@@ -203,7 +205,7 @@ impl Capture {
     }
 
     pub fn next(&mut self) -> Result<Option<(ID3D11Texture2D, D3D11_BOX)>> {
-        match self.arrival.recv_timeout(Duration::from_millis(80)) {
+        match self.arrival.recv_timeout(Duration::from_millis(40)) {
             Ok(()) => (),
             Err(RecvTimeoutError::Timeout) => {
                 unsafe { self.gpu.device.GetDeviceRemovedReason() }
@@ -322,9 +324,9 @@ impl Capture {
 impl Drop for Capture {
     fn drop(&mut self) {
         let _ = self.release();
+        let _ = self.session.Close();
         let _ = self.item.RemoveClosed(self.closed_token);
         let _ = self.pool.RemoveFrameArrived(self.token);
-        let _ = self.session.Close();
         let _ = self.pool.Close();
     }
 }

@@ -66,7 +66,7 @@ pub struct Mux {
 
 impl Mux {
     pub fn register(&self, id: u64, popup: bool, force: Arc<AtomicBool>) {
-        let mut slots = self.slots.lock().unwrap();
+        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         let mut old = slots.by_id.remove(&id);
         let seq = old.as_ref().map_or(0, |s| s.seq);
         if old.is_none() {
@@ -97,7 +97,7 @@ impl Mux {
         bytes: Vec<u8>,
     ) {
         let (width, height) = size;
-        let mut slots = self.slots.lock().unwrap();
+        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         let Some(slot) = slots.by_id.get_mut(&id) else {
             return;
         };
@@ -129,7 +129,7 @@ impl Mux {
     }
 
     pub fn end(&self, id: u64, codec: u8) {
-        let mut slots = self.slots.lock().unwrap();
+        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(slot) = slots.by_id.get_mut(&id) {
             slot.closed = true;
             slot.queue.clear();
@@ -149,7 +149,7 @@ impl Mux {
     }
 
     pub fn reset(&self) {
-        let mut slots = self.slots.lock().unwrap();
+        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         for slot in slots.by_id.values_mut().filter(|s| !s.closed) {
             slot.queue.clear();
             slot.wait_idr = true;
@@ -158,7 +158,7 @@ impl Mux {
     }
 
     fn pop(&self) -> Option<Frame> {
-        let mut slots = self.slots.lock().unwrap();
+        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         // Every second turn gives waiting popups priority. Other turns serve the oldest ready window.
         let ready =
             |id: &u64| slots.by_id[id].pending_end.is_some() || !slots.by_id[id].queue.is_empty();

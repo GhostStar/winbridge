@@ -3,6 +3,7 @@ use anyhow::{anyhow, bail, ensure, Context, Result};
 use std::{
     mem::ManuallyDrop,
     ptr, slice,
+    sync::OnceLock,
     time::{Duration, Instant},
 };
 use windows::{
@@ -15,19 +16,19 @@ use windows::{
     },
 };
 
+// Initialize Media Foundation once per process. Repeatedly calling MFShutdown/MFStartup
+// across reconnects or concurrent capture workers tears down global MF work queues while
+// hardware MFT driver threads (NVENC/QSV/AMF) may still be draining, causing native crashes.
 struct Runtime;
 impl Runtime {
     fn start() -> Result<Self> {
-        unsafe {
-            MFStartup(MF_VERSION, MFSTARTUP_FULL)?;
-        }
-        Ok(Self)
-    }
-}
-impl Drop for Runtime {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = MFShutdown();
+        static INIT: OnceLock<std::result::Result<(), String>> = OnceLock::new();
+        let result = INIT.get_or_init(|| {
+            unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL) }.map_err(|e| e.to_string())
+        });
+        match result {
+            Ok(()) => Ok(Self),
+            Err(e) => Err(anyhow!("MFStartup failed: {e}")),
         }
     }
 }
@@ -81,10 +82,12 @@ fn video_type(subtype: &GUID, w: u16, h: u16, fps: u32) -> Result<IMFMediaType> 
     }
 }
 
+// Field drop order matters for COM/MF teardown: release event generator, codec API,
+// and MFT before the DXGI device manager and activation handle.
 struct Transform {
-    mft: IMFTransform,
-    codec: ICodecAPI,
     events: Option<IMFMediaEventGenerator>,
+    codec: ICodecAPI,
+    mft: IMFTransform,
     input: u32,
     output: u32,
     credits: usize,
@@ -94,8 +97,12 @@ struct Transform {
 impl Drop for Transform {
     fn drop(&mut self) {
         unsafe {
+            let _ = self.mft.ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
             let _ = self.mft.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
             let _ = self.mft.ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
+            if self.gpu.is_some() {
+                let _ = self.mft.ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, 0);
+            }
             let _ = self.activation.ShutdownObject();
         }
     }

@@ -15,12 +15,13 @@ use windows_sys::Win32::{
 
 type Reply = oneshot::Sender<Result<Option<WindowUpdated>>>;
 pub struct Injector {
-    tx: sync::Sender<(WindowInfo, Payload, Reply)>,
+    tx: Option<sync::Sender<(WindowInfo, Payload, Reply)>>,
+    thread: Option<std::thread::JoinHandle<()>>,
 }
 impl Injector {
     pub fn new() -> Result<Self> {
         let (tx, rx) = sync::channel::<(WindowInfo, Payload, Reply)>();
-        std::thread::Builder::new()
+        let thread = std::thread::Builder::new()
             .name("window-input".into())
             .spawn(move || {
                 let mut state = State::default();
@@ -30,7 +31,10 @@ impl Injector {
                     }
                 }
             })?;
-        Ok(Self { tx })
+        Ok(Self {
+            tx: Some(tx),
+            thread: Some(thread),
+        })
     }
     pub async fn execute(
         &self,
@@ -39,9 +43,25 @@ impl Injector {
     ) -> Result<Option<WindowUpdated>> {
         let (tx, rx) = oneshot::channel();
         self.tx
+            .as_ref()
+            .context("input thread closed")?
             .send((target.clone(), payload, tx))
             .map_err(|_| anyhow::anyhow!("input thread closed"))?;
         rx.await?
+    }
+}
+impl Drop for Injector {
+    fn drop(&mut self) {
+        drop(self.tx.take());
+        if let Some(handle) = self.thread.take() {
+            if tokio::runtime::Handle::try_current()
+                .is_ok_and(|rt| rt.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+            {
+                let _ = tokio::task::block_in_place(|| handle.join());
+            } else {
+                let _ = handle.join();
+            }
+        }
     }
 }
 
