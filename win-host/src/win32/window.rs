@@ -2,13 +2,60 @@ use crate::proto::WindowInfo;
 use anyhow::{ensure, Context, Result};
 use std::{io, mem, path::Path, ptr};
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, HWND, LPARAM, RECT},
-    Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS},
+    Foundation::{CloseHandle, HWND, LPARAM, POINT, RECT},
+    Graphics::{
+        Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS},
+        Gdi::{GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTOPRIMARY},
+    },
     System::Threading::{
         OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
     },
-    UI::{HiDpi::GetDpiForWindow, WindowsAndMessaging::*},
+    UI::{
+        HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI},
+        WindowsAndMessaging::*,
+    },
 };
+
+/// Reserved synthetic window ID representing the full primary Windows desktop monitor.
+pub const DESKTOP_WINDOW_ID: u64 = 0xFFFF_FFFF_FFFF_0001;
+
+pub fn primary_desktop_info() -> Result<WindowInfo> {
+    unsafe {
+        let monitor = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
+        ensure!(
+            !monitor.is_null(),
+            "DISPLAY_DISCONNECTED: no active primary monitor"
+        );
+        let mut mi: MONITORINFO = mem::zeroed();
+        mi.cbSize = mem::size_of::<MONITORINFO>() as u32;
+        ensure!(
+            GetMonitorInfoW(monitor, &mut mi) != 0,
+            "DISPLAY_DISCONNECTED: GetMonitorInfoW failed"
+        );
+        let r = mi.rcMonitor;
+        let w = r.right.saturating_sub(r.left);
+        let h = r.bottom.saturating_sub(r.top);
+        ensure!(w > 0 && h > 0, "empty primary monitor dimensions");
+        let mut dx = 96u32;
+        let mut dy = 96u32;
+        let _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dx, &mut dy);
+        Ok(WindowInfo {
+            window_id: DESKTOP_WINDOW_ID,
+            owner_window_id: 0,
+            pid: 0,
+            process_name: "desktop".into(),
+            title: "Windows 桌面 (主显示器)".into(),
+            kind: 1,
+            x: r.left,
+            y: r.top,
+            width: w as u32,
+            height: h as u32,
+            dpi: dx.max(96),
+            is_resizable: true,
+            ..Default::default()
+        })
+    }
+}
 
 pub fn foreground_id() -> u64 {
     unsafe { GetForegroundWindow() as usize as u64 }

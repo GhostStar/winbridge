@@ -1,10 +1,11 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
+    path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 mod tracking;
 use crate::{
@@ -51,11 +52,18 @@ struct Notice {
     message: String,
     done: bool,
 }
+pub(super) struct PendingLaunch {
+    pub(super) before: HashSet<u64>,
+    pub(super) options: SubscribeWindow,
+    pub(super) deadline: Instant,
+}
 struct Session {
     config: Arc<Config>,
     codec: i32,
     mux: Arc<Mux>,
     windows: HashMap<u64, Subscription>,
+    apps: HashMap<String, PathBuf>,
+    pending_launches: Vec<PendingLaunch>,
     notices: mpsc::UnboundedSender<Notice>,
     replies: mpsc::Sender<Payload>,
     injector: Injector,
@@ -198,11 +206,20 @@ impl Session {
         }
         Ok(())
     }
-    async fn subscribe(&mut self, req: SubscribeWindow) -> Result<()> {
+    async fn subscribe(&mut self, mut req: SubscribeWindow) -> Result<()> {
         let id = req.window_id;
-        let list = tokio::task::spawn_blocking(|| win32::list(false)).await??;
-        let Some(info) = list.into_iter().find(|w| w.window_id == id) else {
-            return self.error(id, 1, "window is no longer available");
+        let info = if id == win32::DESKTOP_WINDOW_ID {
+            req.follow_popups = false;
+            match tokio::task::spawn_blocking(win32::primary_desktop_info).await? {
+                Ok(info) => info,
+                Err(e) => return self.error(id, 4, format!("{e:#}")),
+            }
+        } else {
+            let list = tokio::task::spawn_blocking(|| win32::list(false)).await??;
+            let Some(info) = list.into_iter().find(|w| w.window_id == id) else {
+                return self.error(id, 1, "window is no longer available");
+            };
+            info
         };
         if let Some(old) = self.windows.get(&id) {
             if old.root == id && old.options == req && old.info.pid == info.pid {
@@ -210,11 +227,12 @@ impl Session {
             }
             self.remove(id, false)?;
         }
-        let monitor_crop = match req.capture_mode {
-            1 => false,
-            2 => true,
-            _ => self.config.capture_mode == crate::config::CaptureMode::MonitorCrop,
-        };
+        let monitor_crop = id != win32::DESKTOP_WINDOW_ID
+            && match req.capture_mode {
+                1 => false,
+                2 => true,
+                _ => self.config.capture_mode == crate::config::CaptureMode::MonitorCrop,
+            };
         self.start(info.clone(), id, req)?;
         if monitor_crop {
             // Bring window to foreground so monitor-crop capture is immediately unobstructed.
@@ -231,6 +249,56 @@ impl Session {
         }
         Ok(())
     }
+    async fn launch(&mut self, req: LaunchApp) -> Result<()> {
+        if !self.apps.contains_key(&req.app_id) {
+            let (_, paths) =
+                tokio::task::spawn_blocking(|| win32::discover_apps(false)).await?;
+            self.apps = paths;
+        }
+        let Some(path) = self.apps.get(&req.app_id).cloned() else {
+            return self.send(Payload::LaunchAppRes(LaunchAppResult {
+                app_id: req.app_id,
+                started: false,
+                message: "application not found in Start Menu or Desktop".into(),
+            }));
+        };
+        let before: HashSet<u64> = if req.auto_subscribe {
+            tokio::task::spawn_blocking(|| win32::list(false))
+                .await??
+                .into_iter()
+                .map(|w| w.window_id)
+                .collect()
+        } else {
+            HashSet::new()
+        };
+        match tokio::task::spawn_blocking(move || win32::launch_shortcut(&path)).await? {
+            Ok(()) => {
+                if req.auto_subscribe {
+                    self.pending_launches.push(PendingLaunch {
+                        before,
+                        options: SubscribeWindow {
+                            window_id: 0,
+                            target_fps: req.target_fps,
+                            max_bitrate_kbps: req.max_bitrate_kbps,
+                            follow_popups: req.follow_popups,
+                            capture_mode: req.capture_mode,
+                        },
+                        deadline: Instant::now() + Duration::from_secs(25),
+                    });
+                }
+                self.send(Payload::LaunchAppRes(LaunchAppResult {
+                    app_id: req.app_id,
+                    started: true,
+                    message: String::new(),
+                }))
+            }
+            Err(e) => self.send(Payload::LaunchAppRes(LaunchAppResult {
+                app_id: req.app_id,
+                started: false,
+                message: format!("{e:#}"),
+            })),
+        }
+    }
     async fn request(&mut self, msg: Payload) -> Result<()> {
         let target = match msg {
             Payload::Ping(p) => {
@@ -246,6 +314,14 @@ impl Session {
             }
             Payload::SubscribeWindow(req) => return self.subscribe(req).await,
             Payload::UnsubscribeWindow(req) => return self.remove(req.window_id, false),
+            Payload::ListAppsReq(req) => {
+                let (apps, paths) =
+                    tokio::task::spawn_blocking(move || win32::discover_apps(req.include_icons))
+                        .await?;
+                self.apps = paths;
+                return self.send(Payload::ListAppsRes(ListAppsResponse { apps }));
+            }
+            Payload::LaunchApp(req) => return self.launch(req).await,
             Payload::SetAudioConfig(cfg) => {
                 if cfg.enabled {
                     if self.audio.is_none() {
@@ -330,6 +406,8 @@ pub async fn run(
         codec,
         mux,
         windows: HashMap::new(),
+        apps: HashMap::new(),
+        pending_launches: Vec::new(),
         notices,
         replies,
         injector,
@@ -348,7 +426,7 @@ pub async fn run(
             Some(n)=reports.recv()=>session.notice(n)?,
             event=events_rx.recv()=>match event {
                 Some(win32::Event::Changed(id))=>{
-                    if session.windows.contains_key(&id) || session.windows.values().any(|s|s.options.follow_popups) {
+                    if session.windows.contains_key(&id) || session.windows.values().any(|s|s.options.follow_popups) || !session.pending_launches.is_empty() {
                         refresh_at.get_or_insert_with(||tokio::time::Instant::now()+Duration::from_millis(12));
                     }
                 }

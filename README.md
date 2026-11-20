@@ -38,6 +38,7 @@ Features:
 - Mouse, smooth trackpad scrolling, USB HID keyboard mapping, optional `Cmd → Ctrl`, and native macOS Chinese IME (`NSTextInputClient` → `TextInput`)
 - Cursor shape sync (standard + custom RGBA) and bidirectional text/PNG clipboard sync
 - Optional real-time LAN system audio streaming (Windows WASAPI loopback -> 16-bit PCM -> macOS `AVAudioEngine`) with live toggle and volume slider
+- Built-in Windows Start Menu & Desktop app launcher with search, Menu Bar pinning, automatic new-window takeover, and a one-click Full Windows Desktop fallback view
 
 ## Windows Host
 

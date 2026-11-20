@@ -245,6 +245,27 @@ impl State {
         }
     }
     fn apply(&mut self, target: &WindowInfo, payload: Payload) -> Result<Option<WindowUpdated>> {
+        if target.window_id == win32::DESKTOP_WINDOW_ID {
+            let desktop = win32::primary_desktop_info()?;
+            match payload {
+                Payload::MouseEvent(ev) => self.mouse(&desktop, ev)?,
+                Payload::KeyEvent(ev) => {
+                    send(&[key_input(ev.hid_usage, ev.is_down)?])?;
+                    if ev.is_down {
+                        self.keys.insert(ev.hid_usage);
+                    } else {
+                        self.keys.remove(&ev.hid_usage);
+                    }
+                }
+                Payload::TextInput(t) => text(&t.text)?,
+                Payload::ResizeWindow(_)
+                | Payload::FocusWindow(_)
+                | Payload::CloseWindow(_)
+                | Payload::WindowAction(_) => {}
+                _ => bail!("unsupported input command"),
+            }
+            return Ok(None);
+        }
         let current = win32::info(target.window_id)?;
         ensure!(current.pid == target.pid, "window handle has been reused");
         let hwnd = win32::checked_hwnd(current.window_id)?;

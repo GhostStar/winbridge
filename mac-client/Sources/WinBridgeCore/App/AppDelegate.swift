@@ -77,6 +77,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         state.toggleAudioEnabled()
     }
 
+    @objc private func toggleDesktopAction() {
+        state.toggleDesktopView()
+    }
+
+    @objc private func launchPinnedAppAction(_ sender: NSMenuItem) {
+        guard let appId = sender.representedObject as? String,
+              let app = state.availableApps.first(where: { $0.appId == appId }) else { return }
+        state.launchApp(app)
+    }
+
     private func setupMainMenu() {
         let mainMenu = NSMenu()
 
@@ -139,9 +149,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         menu.addItem(withTitle: "打开管理窗口…", action: #selector(showManager), keyEquivalent: "")
         if case .connected = state.connectionState {
+            let desktopItem = NSMenuItem(
+                title: state.isDesktopOpen ? "关闭 Windows 完整桌面" : "查看 Windows 完整桌面",
+                action: #selector(toggleDesktopAction),
+                keyEquivalent: ""
+            )
+            desktopItem.image = NSImage(systemSymbolName: "desktopcomputer", accessibilityDescription: nil)
+            menu.addItem(desktopItem)
+
             let audioItem = NSMenuItem(title: "开启 Windows 音频", action: #selector(toggleAudioAction), keyEquivalent: "")
             audioItem.state = state.settings.audioEnabled ? .on : .off
             menu.addItem(audioItem)
+
+            let pinned = state.pinnedApps
+            if !pinned.isEmpty {
+                menu.addItem(.separator())
+                let header = NSMenuItem(title: "快速启动 Windows 应用", action: nil, keyEquivalent: "")
+                header.isEnabled = false
+                menu.addItem(header)
+                for app in pinned {
+                    let item = NSMenuItem(title: app.name, action: #selector(launchPinnedAppAction(_:)), keyEquivalent: "")
+                    item.representedObject = app.appId
+                    if !app.iconPng.isEmpty, let img = NSImage(data: app.iconPng) {
+                        img.size = NSSize(width: 16, height: 16)
+                        item.image = img
+                    }
+                    menu.addItem(item)
+                }
+            }
+
+            menu.addItem(.separator())
             menu.addItem(withTitle: "刷新 Windows 窗口列表", action: #selector(refreshWindowsAction), keyEquivalent: "")
             menu.addItem(withTitle: "断开连接", action: #selector(disconnectAction), keyEquivalent: "")
         }

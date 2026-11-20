@@ -1,4 +1,5 @@
 use super::d3d11::Graphics;
+use crate::win32::DESKTOP_WINDOW_ID;
 use anyhow::{bail, ensure, Context, Result};
 use std::{
     mem::size_of,
@@ -14,13 +15,13 @@ use windows::{
     Foundation::{EventRegistrationToken, TypedEventHandler},
     Graphics::{Capture::*, DirectX::DirectXPixelFormat, SizeInt32},
     Win32::{
-        Foundation::{BOOL, HWND, LPARAM, RECT},
+        Foundation::{BOOL, HWND, LPARAM, POINT, RECT},
         Graphics::{
             Direct3D11::{ID3D11Texture2D, D3D11_BOX, D3D11_TEXTURE2D_DESC},
             Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS},
             Gdi::{
-                EnumDisplayMonitors, GetMonitorInfoW, MonitorFromWindow, HDC, HMONITOR,
-                MONITORINFO, MONITOR_DEFAULTTONEAREST,
+                EnumDisplayMonitors, GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, HDC,
+                HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY,
             },
         },
         System::WinRT::{
@@ -60,6 +61,7 @@ pub(super) struct Capture {
     size: SizeInt32,
     hwnd: HWND,
     monitor: Option<HMONITOR>,
+    is_desktop: bool,
     arrival: Receiver<()>,
     token: EventRegistrationToken,
     closed_token: EventRegistrationToken,
@@ -68,14 +70,19 @@ pub(super) struct Capture {
 }
 
 pub(super) fn minimized(id: u64) -> bool {
+    if id == DESKTOP_WINDOW_ID {
+        return false;
+    }
     unsafe { IsIconic(HWND(id as usize as _)).as_bool() }
 }
 
 pub(super) fn check_desktop(id: u64) -> Result<()> {
-    ensure!(
-        unsafe { IsWindow(HWND(id as usize as _)) }.as_bool(),
-        "WINDOW_NOT_FOUND: 0x{id:X}"
-    );
+    if id != DESKTOP_WINDOW_ID {
+        ensure!(
+            unsafe { IsWindow(HWND(id as usize as _)) }.as_bool(),
+            "WINDOW_NOT_FOUND: 0x{id:X}"
+        );
+    }
     ensure!(
         unsafe { GetSystemMetrics(SM_CMONITORS) } > 0,
         "DISPLAY_DISCONNECTED: Windows reports no active monitors; check the display connection"
@@ -140,10 +147,19 @@ impl Capture {
             GraphicsCaptureSession::IsSupported()?,
             "Windows Graphics Capture is unavailable on this desktop"
         );
+        let is_desktop = id == DESKTOP_WINDOW_ID;
         let hwnd = HWND(id as usize as _);
         let gpu = Graphics::new()?;
         let interop = factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
-        let (item, monitor): (GraphicsCaptureItem, Option<HMONITOR>) = if monitor_crop {
+        let (item, monitor): (GraphicsCaptureItem, Option<HMONITOR>) = if is_desktop {
+            let hmon = unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) };
+            ensure!(
+                !hmon.is_invalid(),
+                "DISPLAY_DISCONNECTED: no active primary monitor"
+            );
+            let item: GraphicsCaptureItem = unsafe { interop.CreateForMonitor(hmon) }?;
+            (item, Some(hmon))
+        } else if monitor_crop {
             let hmon = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
             ensure!(
                 !hmon.is_invalid(),
@@ -184,6 +200,7 @@ impl Capture {
             size,
             hwnd,
             monitor,
+            is_desktop,
             arrival,
             token,
             item,
@@ -197,6 +214,9 @@ impl Capture {
     }
 
     pub fn monitor_changed(&self) -> bool {
+        if self.is_desktop {
+            return false;
+        }
         let Some(current) = self.monitor else {
             return false;
         };
@@ -253,47 +273,56 @@ impl Capture {
         let surface: ID3D11Texture2D = unsafe { interop.GetInterface() }?;
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         unsafe { surface.GetDesc(&mut desc) };
-        let mut outer = RECT::default();
-        unsafe { GetWindowRect(self.hwnd, &mut outer)? };
-        let mut ext = RECT::default();
-        let got_ext = unsafe {
-            DwmGetWindowAttribute(
-                self.hwnd,
-                DWMWA_EXTENDED_FRAME_BOUNDS,
-                (&mut ext as *mut RECT).cast(),
-                size_of::<RECT>() as u32,
+        let (x, w, y, h) = if self.is_desktop {
+            (
+                0,
+                desc.Width.min(size.Width as u32),
+                0,
+                desc.Height.min(size.Height as u32),
             )
-        };
-        if got_ext.is_err() {
-            ext = outer;
-        }
-        let (x, w, y, h) = if let Some(mon) = self.monitor {
-            let mon_rect = monitor_rect(mon)?;
-            let (x, w) = crop_monitor_axis(
-                desc.Width.min(size.Width as u32),
-                mon_rect.left,
-                ext.left,
-                ext.right,
-            );
-            let (y, h) = crop_monitor_axis(
-                desc.Height.min(size.Height as u32),
-                mon_rect.top,
-                ext.top,
-                ext.bottom,
-            );
-            (x, w, y, h)
         } else {
-            let (x, w) = crop_axis(
-                desc.Width.min(size.Width as u32),
-                ext.right - ext.left,
-                ext.left - outer.left,
-            );
-            let (y, h) = crop_axis(
-                desc.Height.min(size.Height as u32),
-                ext.bottom - ext.top,
-                ext.top - outer.top,
-            );
-            (x, w, y, h)
+            let mut outer = RECT::default();
+            unsafe { GetWindowRect(self.hwnd, &mut outer)? };
+            let mut ext = RECT::default();
+            let got_ext = unsafe {
+                DwmGetWindowAttribute(
+                    self.hwnd,
+                    DWMWA_EXTENDED_FRAME_BOUNDS,
+                    (&mut ext as *mut RECT).cast(),
+                    size_of::<RECT>() as u32,
+                )
+            };
+            if got_ext.is_err() {
+                ext = outer;
+            }
+            if let Some(mon) = self.monitor {
+                let mon_rect = monitor_rect(mon)?;
+                let (x, w) = crop_monitor_axis(
+                    desc.Width.min(size.Width as u32),
+                    mon_rect.left,
+                    ext.left,
+                    ext.right,
+                );
+                let (y, h) = crop_monitor_axis(
+                    desc.Height.min(size.Height as u32),
+                    mon_rect.top,
+                    ext.top,
+                    ext.bottom,
+                );
+                (x, w, y, h)
+            } else {
+                let (x, w) = crop_axis(
+                    desc.Width.min(size.Width as u32),
+                    ext.right - ext.left,
+                    ext.left - outer.left,
+                );
+                let (y, h) = crop_axis(
+                    desc.Height.min(size.Height as u32),
+                    ext.bottom - ext.top,
+                    ext.top - outer.top,
+                );
+                (x, w, y, h)
+            }
         };
         if w == 0 || h == 0 {
             frame.Close()?;

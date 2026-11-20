@@ -79,6 +79,12 @@ pub(super) fn png(data: &[u8], w: u32, h: u32) -> Result<Vec<u8>> {
     encoder.write_header()?.write_image_data(data)?;
     Ok(result)
 }
+pub(super) fn icon_to_png(icon: HICON) -> Option<Vec<u8>> {
+    if icon.is_null() {
+        return None;
+    }
+    png(&rgba(icon, 32, 32).ok()?, 32, 32).ok()
+}
 pub(super) fn app_icon(hwnd: HWND) -> Option<Vec<u8>> {
     unsafe {
         let mut icon = GetClassLongPtrW(hwnd, GCLP_HICON);

@@ -5,6 +5,10 @@ import Foundation
 // Mirrors protocol/control.proto (package winbridge.v1) 1:1.
 // ============================================================================
 
+enum SyntheticWindow {
+    static let primaryDesktop: UInt64 = 0xFFFF_FFFF_FFFF_0001
+}
+
 enum VideoCodec: Int32, CaseIterable, Sendable {
     case unspecified = 0
     case h264AnnexB = 1
@@ -405,6 +409,151 @@ struct UnsubscribeWindow: Equatable, Sendable {
         while !r.isAtEnd {
             let (field, wire) = try r.readTag()
             if field == 1 { m.windowId = try r.readUInt64() } else { try r.skip(wireType: wire) }
+        }
+        return m
+    }
+}
+
+struct AppEntry: Equatable, Sendable {
+    var appId: String = ""
+    var name: String = ""
+    var source: String = ""
+    var iconPng: Data = Data()
+
+    func encode() -> Data {
+        var w = ProtoWriter()
+        w.writeString(field: 1, appId)
+        w.writeString(field: 2, name)
+        w.writeString(field: 3, source)
+        w.writeBytes(field: 4, iconPng)
+        return w.data
+    }
+
+    static func decode(from data: Data) throws -> AppEntry {
+        var r = ProtoReader(data: data)
+        var m = AppEntry()
+        while !r.isAtEnd {
+            let (field, wire) = try r.readTag()
+            switch field {
+            case 1: m.appId = try r.readString()
+            case 2: m.name = try r.readString()
+            case 3: m.source = try r.readString()
+            case 4: m.iconPng = try r.readBytes()
+            default: try r.skip(wireType: wire)
+            }
+        }
+        return m
+    }
+}
+
+struct ListAppsRequest: Equatable, Sendable {
+    var includeIcons: Bool = true
+
+    func encode() -> Data {
+        var w = ProtoWriter()
+        w.writeBool(field: 1, includeIcons)
+        return w.data
+    }
+
+    static func decode(from data: Data) throws -> ListAppsRequest {
+        var r = ProtoReader(data: data)
+        var m = ListAppsRequest(includeIcons: false)
+        while !r.isAtEnd {
+            let (field, wire) = try r.readTag()
+            if field == 1 { m.includeIcons = try r.readBool() } else { try r.skip(wireType: wire) }
+        }
+        return m
+    }
+}
+
+struct ListAppsResponse: Equatable, Sendable {
+    var apps: [AppEntry] = []
+
+    func encode() -> Data {
+        var w = ProtoWriter()
+        for app in apps {
+            w.writeMessage(field: 1, app.encode(), forceEmit: true)
+        }
+        return w.data
+    }
+
+    static func decode(from data: Data) throws -> ListAppsResponse {
+        var r = ProtoReader(data: data)
+        var m = ListAppsResponse()
+        while !r.isAtEnd {
+            let (field, wire) = try r.readTag()
+            if field == 1 {
+                m.apps.append(try AppEntry.decode(from: try r.readBytes()))
+            } else {
+                try r.skip(wireType: wire)
+            }
+        }
+        return m
+    }
+}
+
+struct LaunchApp: Equatable, Sendable {
+    var appId: String = ""
+    var autoSubscribe: Bool = true
+    var targetFps: UInt32 = 0
+    var maxBitrateKbps: UInt32 = 0
+    var followPopups: Bool = true
+    var captureMode: CaptureMode = .unspecified
+
+    func encode() -> Data {
+        var w = ProtoWriter()
+        w.writeString(field: 1, appId)
+        w.writeBool(field: 2, autoSubscribe)
+        w.writeUInt32(field: 3, targetFps)
+        w.writeUInt32(field: 4, maxBitrateKbps)
+        w.writeBool(field: 5, followPopups)
+        w.writeInt32(field: 6, captureMode.rawValue)
+        return w.data
+    }
+
+    static func decode(from data: Data) throws -> LaunchApp {
+        var r = ProtoReader(data: data)
+        var m = LaunchApp(autoSubscribe: false, followPopups: false)
+        while !r.isAtEnd {
+            let (field, wire) = try r.readTag()
+            switch field {
+            case 1: m.appId = try r.readString()
+            case 2: m.autoSubscribe = try r.readBool()
+            case 3: m.targetFps = try r.readUInt32()
+            case 4: m.maxBitrateKbps = try r.readUInt32()
+            case 5: m.followPopups = try r.readBool()
+            case 6: m.captureMode = CaptureMode(rawValue: try r.readInt32()) ?? .unspecified
+            default: try r.skip(wireType: wire)
+            }
+        }
+        return m
+    }
+}
+
+struct LaunchAppResult: Equatable, Sendable {
+    var appId: String = ""
+    var started: Bool = false
+    var message: String = ""
+
+    func encode() -> Data {
+        var w = ProtoWriter()
+        w.writeString(field: 1, appId)
+        w.writeBool(field: 2, started)
+        w.writeString(field: 3, message)
+        return w.data
+    }
+
+    static func decode(from data: Data) throws -> LaunchAppResult {
+        var r = ProtoReader(data: data)
+        var m = LaunchAppResult()
+        while !r.isAtEnd {
+            let (field, wire) = try r.readTag()
+            switch field {
+            case 1: m.appId = try r.readString()
+            case 2: m.started = try r.readBool()
+            case 3: m.message = try r.readString()
+            default: try r.skip(wireType: wire)
+            }
         }
         return m
     }
@@ -826,6 +975,10 @@ struct ControlMessage: Equatable, Sendable {
         case listWindowsRes(ListWindowsResponse)        // 21
         case subscribeWindow(SubscribeWindow)           // 22
         case unsubscribeWindow(UnsubscribeWindow)       // 23
+        case listAppsReq(ListAppsRequest)               // 24
+        case listAppsRes(ListAppsResponse)              // 25
+        case launchApp(LaunchApp)                       // 26
+        case launchAppRes(LaunchAppResult)              // 27
         case windowUpdated(WindowUpdated)               // 30
         case windowClosed(WindowClosed)                 // 31
         case cursorShape(CursorShape)                   // 32
@@ -859,6 +1012,10 @@ struct ControlMessage: Equatable, Sendable {
         case .listWindowsRes(let m): w.writeMessage(field: 21, m.encode(), forceEmit: true)
         case .subscribeWindow(let m): w.writeMessage(field: 22, m.encode(), forceEmit: true)
         case .unsubscribeWindow(let m): w.writeMessage(field: 23, m.encode(), forceEmit: true)
+        case .listAppsReq(let m): w.writeMessage(field: 24, m.encode(), forceEmit: true)
+        case .listAppsRes(let m): w.writeMessage(field: 25, m.encode(), forceEmit: true)
+        case .launchApp(let m): w.writeMessage(field: 26, m.encode(), forceEmit: true)
+        case .launchAppRes(let m): w.writeMessage(field: 27, m.encode(), forceEmit: true)
         case .windowUpdated(let m): w.writeMessage(field: 30, m.encode(), forceEmit: true)
         case .windowClosed(let m): w.writeMessage(field: 31, m.encode(), forceEmit: true)
         case .cursorShape(let m): w.writeMessage(field: 32, m.encode(), forceEmit: true)
@@ -895,6 +1052,10 @@ struct ControlMessage: Equatable, Sendable {
             case 21: payload = .listWindowsRes(try ListWindowsResponse.decode(from: try r.readBytes()))
             case 22: payload = .subscribeWindow(try SubscribeWindow.decode(from: try r.readBytes()))
             case 23: payload = .unsubscribeWindow(try UnsubscribeWindow.decode(from: try r.readBytes()))
+            case 24: payload = .listAppsReq(try ListAppsRequest.decode(from: try r.readBytes()))
+            case 25: payload = .listAppsRes(try ListAppsResponse.decode(from: try r.readBytes()))
+            case 26: payload = .launchApp(try LaunchApp.decode(from: try r.readBytes()))
+            case 27: payload = .launchAppRes(try LaunchAppResult.decode(from: try r.readBytes()))
             case 30: payload = .windowUpdated(try WindowUpdated.decode(from: try r.readBytes()))
             case 31: payload = .windowClosed(try WindowClosed.decode(from: try r.readBytes()))
             case 32: payload = .cursorShape(try CursorShape.decode(from: try r.readBytes()))

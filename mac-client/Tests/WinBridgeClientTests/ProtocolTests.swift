@@ -88,6 +88,12 @@ import Testing
         .subscribeWindow(SubscribeWindow(windowId: 100, targetFps: 60, maxBitrateKbps: 15000, followPopups: true, captureMode: .monitorCrop)),
         .setAudioConfig(SetAudioConfig(enabled: true)),
         .setAudioConfig(SetAudioConfig(enabled: false)),
+        .listAppsReq(ListAppsRequest(includeIcons: true)),
+        .listAppsRes(ListAppsResponse(apps: [
+            AppEntry(appId: "0123456789abcdef", name: "MuMu模拟器12", source: "Desktop", iconPng: Data([0x89, 0x50])),
+        ])),
+        .launchApp(LaunchApp(appId: "0123456789abcdef", autoSubscribe: true, targetFps: 60, maxBitrateKbps: 15000, followPopups: true, captureMode: .monitorCrop)),
+        .launchAppRes(LaunchAppResult(appId: "0123456789abcdef", started: true, message: "")),
         .hostError(HostError(windowId: 100, code: .displayDisconnected, message: "No monitor")),
     ]
     for (i, payload) in cases.enumerated() {

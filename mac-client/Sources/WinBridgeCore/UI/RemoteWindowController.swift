@@ -132,10 +132,19 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
 
     static func macContentSize(for info: WindowInfo) -> NSSize {
         let scale = dpiScale(for: info)
-        let w = max(16.0, round(CGFloat(max(info.width, 1)) / scale))
-        let h = max(16.0, round(CGFloat(max(info.height, 1)) / scale))
+        var w = max(16.0, round(CGFloat(max(info.width, 1)) / scale))
+        var h = max(16.0, round(CGFloat(max(info.height, 1)) / scale))
+        if info.windowId == SyntheticWindow.primaryDesktop, let screen = NSScreen.main?.visibleFrame {
+            let maxW = screen.width * 0.78
+            let maxH = screen.height * 0.78
+            let fit = min(1.0, min(maxW / w, maxH / h))
+            w = max(320.0, round(w * fit))
+            h = max(200.0, round(h * fit))
+        }
         return NSSize(width: w, height: h)
     }
+
+    private var isDesktop: Bool { windowId == SyntheticWindow.primaryDesktop }
 
     private var activeSourceSize: CGSize {
         if let (fw, fh) = lastFrameSize, fw > 0, fh > 0 {
@@ -157,7 +166,7 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
             remoteView.updateDisplayGeometry(sourceSize: src, preserveAspect: false)
             return
         }
-        let localScaleOnly = !syncWindowResize()
+        let localScaleOnly = isDesktop || !syncWindowResize()
         if localScaleOnly && src.width > 0 && src.height > 0 {
             window.contentAspectRatio = NSSize(width: src.width, height: src.height)
         } else {
@@ -214,9 +223,9 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
             updateResizeBehavior()
         }
 
-        // In Local Scale Mode, never override the user's chosen Mac window size unless Windows
-        // changed aspect ratio (e.g. emulator rotated portrait <-> landscape).
-        if !syncWindowResize() {
+        // In Local Scale Mode (and always for Full Desktop), never override the user's chosen Mac window size
+        // unless Windows changed aspect ratio (e.g. emulator rotated portrait <-> landscape).
+        if isDesktop || !syncWindowResize() {
             if dimsChanged && oldInfo.width > 0 && oldInfo.height > 0 && newInfo.width > 0 && newInfo.height > 0 {
                 let oldRatio = CGFloat(oldInfo.width) / CGFloat(oldInfo.height)
                 let newRatio = CGFloat(newInfo.width) / CGFloat(newInfo.height)
@@ -321,7 +330,7 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
     func windowDidResize(_ notification: Notification) {
         guard !isApplyingRemoteGeometry, info.kind != .popup else { return }
         onOwnerMovedOrResized?(windowId)
-        if syncWindowResize() {
+        if !isDesktop && syncWindowResize() {
             scheduleDebouncedResize()
         }
     }
@@ -336,7 +345,7 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
         guard !isApplyingRemoteGeometry, info.kind != .popup else { return }
         resizeDebounceTimer?.invalidate()
         resizeDebounceTimer = nil
-        if syncWindowResize() {
+        if !isDesktop && syncWindowResize() {
             sendCurrentSizeToHost()
         }
     }
@@ -349,6 +358,11 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         if allowImmediateClose {
             return true
+        }
+        // Full desktop view always detaches cleanly without closing anything on Windows.
+        if isDesktop {
+            onDetachRequested?(windowId)
+            return false
         }
         // Option+Click red button detaches without closing the Windows app.
         if NSEvent.modifierFlags.contains(.option) {

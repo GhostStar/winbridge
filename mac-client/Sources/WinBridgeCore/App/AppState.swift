@@ -28,9 +28,19 @@ final class AppState {
     private(set) var connectionState: ConnectionState = .disconnected
     private(set) var rttMs: Double?
     private(set) var availableWindows: [WindowInfo] = []
+    private(set) var availableApps: [AppEntry] = []
     private(set) var subscribedRootIds: Set<UInt64> = []
     private(set) var lastBannerMessage: String = ""
     private(set) var lastBannerIsError: Bool = false
+
+    var isDesktopOpen: Bool {
+        subscribedRootIds.contains(SyntheticWindow.primaryDesktop)
+    }
+
+    var pinnedApps: [AppEntry] {
+        let pinnedSet = Set(settings.pinnedAppIds)
+        return availableApps.filter { pinnedSet.contains($0.appId) }
+    }
 
     private var connection: WinBridgeConnection?
     private var controllers: [UInt64: RemoteWindowController] = [:]
@@ -132,6 +142,7 @@ final class AppState {
                     self.applyAudioSetting()
                 }
                 self.refreshWindowList()
+                self.refreshAppList()
                 self.onStateChanged?()
             } catch {
                 conn.disconnect()
@@ -156,6 +167,7 @@ final class AppState {
         connectionState = .disconnected
         rttMs = nil
         availableWindows.removeAll()
+        availableApps.removeAll()
         subscribedRootIds.removeAll()
 
         for (_, controller) in controllers {
@@ -176,6 +188,76 @@ final class AppState {
     func refreshWindowList() {
         guard case .connected = connectionState else { return }
         sendControl(.listWindowsReq(ListWindowsRequest(includeIcons: true)))
+    }
+
+    func refreshAppList() {
+        guard case .connected = connectionState else { return }
+        sendControl(.listAppsReq(ListAppsRequest(includeIcons: true)))
+    }
+
+    func toggleDesktopView() {
+        guard case .connected = connectionState else { return }
+        if isDesktopOpen {
+            unsubscribeWindow(SyntheticWindow.primaryDesktop)
+        } else {
+            subscribedRootIds.insert(SyntheticWindow.primaryDesktop)
+            sendControl(.subscribeWindow(SubscribeWindow(
+                windowId: SyntheticWindow.primaryDesktop,
+                targetFps: settings.targetFps,
+                maxBitrateKbps: 0,
+                followPopups: false,
+                captureMode: .monitorCrop
+            )))
+            onStateChanged?()
+        }
+    }
+
+    func isPinned(_ appId: String) -> Bool {
+        settings.pinnedAppIds.contains(appId)
+    }
+
+    func togglePin(_ appId: String) {
+        var s = settings
+        if let idx = s.pinnedAppIds.firstIndex(of: appId) {
+            s.pinnedAppIds.remove(at: idx)
+        } else {
+            s.pinnedAppIds.append(appId)
+        }
+        settings = s
+        onStateChanged?()
+    }
+
+    func captureMode(forApp app: AppEntry) -> CaptureMode {
+        if let saved = settings.appCaptureModes[app.appId] {
+            return saved
+        }
+        let lower = app.name.lowercased()
+        if lower.contains("mumu") || lower.contains("雷电") || lower.contains("bluestacks") || lower.contains("steam") {
+            return .monitorCrop
+        }
+        return .window
+    }
+
+    func setCaptureMode(_ mode: CaptureMode, forApp app: AppEntry) {
+        var s = settings
+        s.appCaptureModes[app.appId] = mode
+        settings = s
+        onStateChanged?()
+    }
+
+    func launchApp(_ app: AppEntry) {
+        guard case .connected = connectionState else { return }
+        let mode = captureMode(forApp: app)
+        setBanner("正在启动「\(app.name)」，等待新窗口自动弹出…", isError: false)
+        sendControl(.launchApp(LaunchApp(
+            appId: app.appId,
+            autoSubscribe: true,
+            targetFps: settings.targetFps,
+            maxBitrateKbps: 0,
+            followPopups: settings.followPopups,
+            captureMode: mode
+        )))
+        onStateChanged?()
     }
 
     func captureMode(for info: WindowInfo) -> CaptureMode {
@@ -258,6 +340,24 @@ final class AppState {
             availableWindows = res.windows
             onStateChanged?()
 
+        case .listAppsRes(let res):
+            availableApps = res.apps
+            onStateChanged?()
+
+        case .launchAppRes(let res):
+            if res.started {
+                let name = availableApps.first(where: { $0.appId == res.appId })?.name ?? "应用"
+                setBanner("已向 Windows 发送启动「\(name)」，正在等待主窗口出现…", isError: false)
+                // Also refresh window list after a short delay so newly launched apps appear.
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(nanoseconds: 2_500_000_000)
+                    self?.refreshWindowList()
+                }
+            } else {
+                setBanner("启动失败：\(res.message)", isError: true)
+            }
+            onStateChanged?()
+
         case .windowUpdated(let update):
             handleWindowUpdated(update)
 
@@ -302,6 +402,9 @@ final class AppState {
         wc.onOpenManager = { [weak self] in self?.onOpenManager?() }
 
         controllers[info.windowId] = wc
+        if info.kind == .normal {
+            subscribedRootIds.insert(info.windowId)
+        }
         wc.present(owner: ownerController)
         onStateChanged?()
     }

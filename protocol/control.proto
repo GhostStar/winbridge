@@ -31,6 +31,12 @@ message ControlMessage {
     SubscribeWindow subscribe_window = 22;       // Mac -> Win
     UnsubscribeWindow unsubscribe_window = 23;   // Mac -> Win
 
+    // --- App Launcher (Start Menu / Desktop shortcuts) ---
+    ListAppsRequest list_apps_req = 24;          // Mac -> Win
+    ListAppsResponse list_apps_res = 25;         // Win -> Mac
+    LaunchApp launch_app = 26;                   // Mac -> Win
+    LaunchAppResult launch_app_res = 27;         // Win -> Mac
+
     // --- Window State & Cursor (Win -> Mac) ---
     WindowUpdated window_updated = 30;           // Win -> Mac
     WindowClosed window_closed = 31;             // Win -> Mac
@@ -263,6 +269,41 @@ message SubscribeWindow {
 
 message UnsubscribeWindow {
   uint64 window_id = 1;
+}
+
+message AppEntry {
+  // Stable opaque ID derived from the host shortcut path (never an arbitrary shell command).
+  string app_id = 1;
+  // Display name (shortcut filename without .lnk/.url).
+  string name = 2;
+  // Discovery source label (e.g. "Desktop", "Start Menu").
+  string source = 3;
+  // Optional 32x32 PNG icon extracted by the host.
+  bytes icon_png = 4;
+}
+
+message ListAppsRequest {
+  bool include_icons = 1;
+}
+
+message ListAppsResponse {
+  repeated AppEntry apps = 1;
+}
+
+message LaunchApp {
+  string app_id = 1;
+  // If true, host watches for a newly opened top-level window (~25s) and auto-subscribes it.
+  bool auto_subscribe = 2;
+  uint32 target_fps = 3;
+  uint32 max_bitrate_kbps = 4;
+  bool follow_popups = 5;
+  CaptureMode capture_mode = 6;
+}
+
+message LaunchAppResult {
+  string app_id = 1;
+  bool started = 2;
+  string message = 3;
 }
 
 message WindowUpdated {

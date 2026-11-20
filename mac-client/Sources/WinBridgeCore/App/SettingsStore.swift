@@ -38,6 +38,8 @@ struct ClientSettings {
     var audioVolume: Float
     var targetFps: UInt32
     var processCaptureModes: [String: CaptureMode]
+    var appCaptureModes: [String: CaptureMode]
+    var pinnedAppIds: [String]
 }
 
 enum SettingsStore {
@@ -65,6 +67,14 @@ enum SettingsStore {
                 modes[proc] = mode
             }
         }
+        let rawAppModes = defaults.dictionary(forKey: "winbridge.appCaptureModes") as? [String: Int] ?? [:]
+        var appModes: [String: CaptureMode] = [:]
+        for (appId, raw) in rawAppModes {
+            if let mode = CaptureMode(rawValue: Int32(raw)), mode != .unspecified {
+                appModes[appId] = mode
+            }
+        }
+        let pinned = defaults.stringArray(forKey: "winbridge.pinnedAppIds") ?? []
 
         return ClientSettings(
             host: host,
@@ -78,7 +88,9 @@ enum SettingsStore {
             audioEnabled: audioEnabled,
             audioVolume: max(0, min(1, audioVolume)),
             targetFps: fps,
-            processCaptureModes: modes
+            processCaptureModes: modes,
+            appCaptureModes: appModes,
+            pinnedAppIds: pinned
         )
     }
 
@@ -94,7 +106,8 @@ enum SettingsStore {
         defaults.set(s.audioEnabled, forKey: "winbridge.audioEnabled")
         defaults.set(s.audioVolume, forKey: "winbridge.audioVolume")
         defaults.set(Int(s.targetFps), forKey: "winbridge.fps")
-        let rawModes = s.processCaptureModes.mapValues { Int($0.rawValue) }
-        defaults.set(rawModes, forKey: "winbridge.processCaptureModes")
+        defaults.set(s.processCaptureModes.mapValues { Int($0.rawValue) }, forKey: "winbridge.processCaptureModes")
+        defaults.set(s.appCaptureModes.mapValues { Int($0.rawValue) }, forKey: "winbridge.appCaptureModes")
+        defaults.set(s.pinnedAppIds, forKey: "winbridge.pinnedAppIds")
     }
 }
