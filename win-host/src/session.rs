@@ -251,8 +251,7 @@ impl Session {
     }
     async fn launch(&mut self, req: LaunchApp) -> Result<()> {
         if !self.apps.contains_key(&req.app_id) {
-            let (_, paths) =
-                tokio::task::spawn_blocking(|| win32::discover_apps(false)).await?;
+            let (_, paths) = tokio::task::spawn_blocking(|| win32::discover_apps(false)).await?;
             self.apps = paths;
         }
         let Some(path) = self.apps.get(&req.app_id).cloned() else {
@@ -327,7 +326,9 @@ impl Session {
                     if self.audio.is_none() {
                         match AudioWorker::start(self.mux.clone()) {
                             Ok(worker) => self.audio = Some(worker),
-                            Err(e) => return self.error(0, 0, format!("audio start failed: {e:#}")),
+                            Err(e) => {
+                                return self.error(0, 0, format!("audio start failed: {e:#}"))
+                            }
                         }
                     }
                 } else {

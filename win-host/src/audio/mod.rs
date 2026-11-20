@@ -67,14 +67,17 @@ impl Drop for MixFormatGuard {
 fn detect_format(ptr: *const WAVEFORMATEX) -> Result<(u16, usize, SampleFormat)> {
     ensure!(!ptr.is_null(), "WASAPI returned null mix format");
     let mix = unsafe { ptr::read_unaligned(ptr) };
-    let sample_rate = u16::try_from(mix.nSamplesPerSec)
-        .map_err(|_| anyhow::anyhow!("unsupported sample rate {} Hz", mix.nSamplesPerSec))?;
-    let channels = usize::from(mix.nChannels);
+    let sample_rate_raw = mix.nSamplesPerSec;
+    let bits = mix.wBitsPerSample;
+    let channels_raw = mix.nChannels;
+    let sample_rate = u16::try_from(sample_rate_raw)
+        .map_err(|_| anyhow::anyhow!("unsupported sample rate {} Hz", sample_rate_raw))?;
+    let channels = usize::from(channels_raw);
     ensure!(channels > 0, "WASAPI mix format has 0 channels");
 
     let format = match mix.wFormatTag {
-        WAVE_FORMAT_IEEE_FLOAT if mix.wBitsPerSample == 32 => SampleFormat::Float32,
-        WAVE_FORMAT_PCM => match mix.wBitsPerSample {
+        WAVE_FORMAT_IEEE_FLOAT if bits == 32 => SampleFormat::Float32,
+        WAVE_FORMAT_PCM => match bits {
             16 => SampleFormat::Int16,
             24 => SampleFormat::Int24,
             32 => SampleFormat::Int32,
@@ -83,10 +86,10 @@ fn detect_format(ptr: *const WAVEFORMATEX) -> Result<(u16, usize, SampleFormat)>
         WAVE_FORMAT_EXTENSIBLE => {
             let ext = ptr as *const WAVEFORMATEXTENSIBLE;
             let sub = unsafe { ptr::read_unaligned(ptr::addr_of!((*ext).SubFormat)) };
-            if sub == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT && mix.wBitsPerSample == 32 {
+            if sub == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT && bits == 32 {
                 SampleFormat::Float32
             } else if sub == KSDATAFORMAT_SUBTYPE_PCM {
-                match mix.wBitsPerSample {
+                match bits {
                     16 => SampleFormat::Int16,
                     24 => SampleFormat::Int24,
                     32 => SampleFormat::Int32,
@@ -96,10 +99,7 @@ fn detect_format(ptr: *const WAVEFORMATEX) -> Result<(u16, usize, SampleFormat)>
                 bail!("unsupported extensible audio subtype {sub:?}");
             }
         }
-        tag => bail!(
-            "unsupported WASAPI format tag 0x{tag:04x} ({} bits)",
-            mix.wBitsPerSample
-        ),
+        tag => bail!("unsupported WASAPI format tag 0x{tag:04x} ({} bits)", bits),
     };
     Ok((sample_rate, channels, format))
 }

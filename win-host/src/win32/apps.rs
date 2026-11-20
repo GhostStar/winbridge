@@ -56,7 +56,12 @@ fn is_noise_shortcut(name: &str) -> bool {
     .any(|kw| lower.contains(kw))
 }
 
-fn collect_shortcuts(dir: &Path, source: &str, depth: usize, out: &mut Vec<(String, String, PathBuf)>) {
+fn collect_shortcuts(
+    dir: &Path,
+    source: &str,
+    depth: usize,
+    out: &mut Vec<(String, String, PathBuf)>,
+) {
     if depth == 0 {
         return;
     }

@@ -6,9 +6,7 @@ mod event_hook;
 pub use event_hook::{Event, Observer};
 mod image;
 mod window;
-pub use window::{
-    candidates, foreground_id, info, list, primary_desktop_info, DESKTOP_WINDOW_ID,
-};
+pub use window::{candidates, foreground_id, info, list, primary_desktop_info, DESKTOP_WINDOW_ID};
 pub(crate) use window::{checked_hwnd, resize};
 
 pub fn init_dpi() {
