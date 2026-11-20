@@ -107,6 +107,7 @@ struct State {
 }
 impl Drop for State {
     fn drop(&mut self) {
+        let _ = win32::desktop::sync_thread_desktop();
         for &hid in &self.keys {
             if let Ok(key) = key_input(hid, false) {
                 let _ = send(&[key]);
@@ -245,8 +246,25 @@ impl State {
         }
     }
     fn apply(&mut self, target: &WindowInfo, payload: Payload) -> Result<Option<WindowUpdated>> {
+        // Keep input thread attached to whichever desktop currently receives user input
+        // (Default vs Winlogon UAC / Lock Screen when running as LocalSystem service).
+        let on_secure_desktop = win32::desktop::sync_thread_desktop()?;
         if target.window_id == win32::DESKTOP_WINDOW_ID {
-            let desktop = win32::primary_desktop_info()?;
+            let desktop = if on_secure_desktop {
+                // On Winlogon, primary screen metrics match the captured GDI desktop directly.
+                let w = unsafe { GetSystemMetrics(SM_CXSCREEN) }.max(1) as u32;
+                let h = unsafe { GetSystemMetrics(SM_CYSCREEN) }.max(1) as u32;
+                WindowInfo {
+                    window_id: win32::DESKTOP_WINDOW_ID,
+                    x: 0,
+                    y: 0,
+                    width: w,
+                    height: h,
+                    ..Default::default()
+                }
+            } else {
+                win32::primary_desktop_info()?
+            };
             match payload {
                 Payload::MouseEvent(ev) => self.mouse(&desktop, ev)?,
                 Payload::KeyEvent(ev) => {
@@ -265,6 +283,9 @@ impl State {
                 _ => bail!("unsupported input command"),
             }
             return Ok(None);
+        }
+        if on_secure_desktop {
+            bail!("UAC 安全桌面当前已激活，请在自动弹出的 Windows 桌面窗口中点击确认");
         }
         let current = win32::info(target.window_id)?;
         ensure!(current.pid == target.pid, "window handle has been reused");

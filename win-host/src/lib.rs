@@ -5,5 +5,6 @@ pub mod encode;
 pub mod input;
 pub mod net;
 pub mod proto;
+pub mod service;
 mod session;
 pub mod win32;

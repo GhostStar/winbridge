@@ -58,9 +58,17 @@ cargo build --release --locked
 # 查看当前可投射的窗口列表
 .\target\release\win-host.exe --list-windows
 
-# 启动服务（默认监听 9876 端口；将 --token 留空则进入开发模式免鉴权）
+# 前台直接运行（开发/普通模式；默认监听 9876 端口，--token 留空免鉴权）
 .\target\release\win-host.exe --bind 0.0.0.0 --port 9876 --token "your-LAN-secret"
+
+# 推荐：以管理员 PowerShell 安装为系统服务（开机自启，支持直接看到并点击 UAC 弹窗与锁屏界面！）
+.\target\release\win-host.exe --install-service --bind 0.0.0.0 --port 9876 --token "your-LAN-secret"
+
+# 停止并卸载系统服务
+.\target\release\win-host.exe --uninstall-service
 ```
+
+> **关于 UAC 弹窗与锁屏界面**：Windows 内核禁止普通进程操作 `Winlogon` 安全桌面上的 UAC 弹窗。通过 `--install-service` 安装为 `LocalSystem` 系统服务后，`win-host` 会在检测到 UAC 弹出时**自动在 Mac 上弹出安全桌面画面供你直接点击「是 / 否」**，确认完成后自动关闭恢复原有窗口；且通过「启动应用」打开的软件仍以当前登录用户的普通身份启动，不会错乱用户配置。
 
 常用启动参数：
 - `--bind <ADDR>` / `--port <PORT>`：监听地址与端口（控制信道与媒体信道共用单端口，默认 `0.0.0.0:9876`，防火墙只需放行这一个端口）。

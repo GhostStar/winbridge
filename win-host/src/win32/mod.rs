@@ -2,6 +2,7 @@ mod apps;
 pub use apps::{discover_apps, launch_shortcut};
 mod clipboard;
 mod cursor;
+pub mod desktop;
 mod event_hook;
 pub use event_hook::{Event, Observer};
 mod image;

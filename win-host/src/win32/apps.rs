@@ -7,12 +7,39 @@ use std::{
     ptr,
 };
 use windows_sys::Win32::{
-    System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED},
+    Foundation::{CloseHandle, HANDLE},
+    System::{
+        Com::{CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED},
+        Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock},
+        Threading::{
+            CreateProcessAsUserW, CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION, STARTUPINFOW,
+        },
+    },
     UI::{
-        Shell::{SHGetFileInfoW, ShellExecuteW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON},
+        Shell::{
+            FOLDERID_Desktop, FOLDERID_Programs, SHGetFileInfoW, SHGetKnownFolderPath,
+            ShellExecuteW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON,
+        },
         WindowsAndMessaging::{DestroyIcon, SW_SHOWNORMAL},
     },
 };
+
+unsafe fn known_folder(folder_id: *const windows_sys::core::GUID, token: HANDLE) -> Option<PathBuf> {
+    let mut raw: *mut u16 = ptr::null_mut();
+    let hr = SHGetKnownFolderPath(folder_id, 0, token, &mut raw);
+    if hr < 0 || raw.is_null() {
+        return None;
+    }
+    let mut len = 0usize;
+    while *raw.add(len) != 0 {
+        len += 1;
+    }
+    let path = PathBuf::from(String::from_utf16_lossy(std::slice::from_raw_parts(
+        raw, len,
+    )));
+    CoTaskMemFree(raw.cast_const().cast());
+    Some(path)
+}
 
 struct StaGuard(bool);
 impl StaGuard {
@@ -122,17 +149,30 @@ fn file_icon_png(path: &Path) -> Vec<u8> {
 pub fn discover_apps(include_icons: bool) -> (Vec<AppEntry>, HashMap<String, PathBuf>) {
     let _sta = StaGuard::init();
     let mut roots: Vec<(PathBuf, &str)> = Vec::new();
-    if let Ok(profile) = env::var("USERPROFILE") {
-        roots.push((PathBuf::from(&profile).join("Desktop"), "Desktop"));
+    if let Some(user_token) = super::desktop::active_console_user_token() {
+        // Running as LocalSystem service worker: resolve the logged-in user's real Desktop & Start Menu.
+        unsafe {
+            if let Some(desktop) = known_folder(&FOLDERID_Desktop, user_token) {
+                roots.push((desktop, "Desktop"));
+            }
+            if let Some(programs) = known_folder(&FOLDERID_Programs, user_token) {
+                roots.push((programs, "Start Menu"));
+            }
+            CloseHandle(user_token);
+        }
+    } else {
+        if let Ok(profile) = env::var("USERPROFILE") {
+            roots.push((PathBuf::from(&profile).join("Desktop"), "Desktop"));
+        }
+        if let Ok(appdata) = env::var("APPDATA") {
+            roots.push((
+                PathBuf::from(&appdata).join("Microsoft\\Windows\\Start Menu\\Programs"),
+                "Start Menu",
+            ));
+        }
     }
     if let Ok(public) = env::var("PUBLIC") {
         roots.push((PathBuf::from(&public).join("Desktop"), "Desktop"));
-    }
-    if let Ok(appdata) = env::var("APPDATA") {
-        roots.push((
-            PathBuf::from(&appdata).join("Microsoft\\Windows\\Start Menu\\Programs"),
-            "Start Menu",
-        ));
     }
     if let Ok(progdata) = env::var("PROGRAMDATA") {
         roots.push((
@@ -184,6 +224,62 @@ pub fn discover_apps(include_icons: bool) -> (Vec<AppEntry>, HashMap<String, Pat
 
 pub fn launch_shortcut(path: &Path) -> Result<()> {
     ensure!(path.exists(), "shortcut no longer exists");
+    // When running as LocalSystem service worker, launch via explorer.exe under the logged-in
+    // user's token so apps inherit the user's normal profile (Steam/MuMu/Chrome) instead of SYSTEM.
+    if let Some(user_token) = super::desktop::active_console_user_token() {
+        let win_dir = env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
+        let explorer = PathBuf::from(win_dir).join("explorer.exe");
+        let cmd_str = format!(
+            "\"{}\" \"{}\"",
+            explorer.to_string_lossy(),
+            path.to_string_lossy()
+        );
+        let mut cmd: Vec<u16> = cmd_str.encode_utf16().chain(Some(0)).collect();
+        let mut desktop: Vec<u16> = "winsta0\\default".encode_utf16().chain(Some(0)).collect();
+        unsafe {
+            let mut env_block: *mut std::ffi::c_void = ptr::null_mut();
+            let has_env = CreateEnvironmentBlock(&mut env_block, user_token, 0) != 0
+                && !env_block.is_null();
+            let flags = if has_env {
+                CREATE_UNICODE_ENVIRONMENT
+            } else {
+                0
+            };
+            let mut si: STARTUPINFOW = mem::zeroed();
+            si.cb = mem::size_of::<STARTUPINFOW>() as u32;
+            si.lpDesktop = desktop.as_mut_ptr();
+            let mut pi: PROCESS_INFORMATION = mem::zeroed();
+            let ok = CreateProcessAsUserW(
+                user_token,
+                ptr::null(),
+                cmd.as_mut_ptr(),
+                ptr::null(),
+                ptr::null(),
+                0,
+                flags,
+                if has_env { env_block as _ } else { ptr::null() },
+                ptr::null(),
+                &si,
+                &mut pi,
+            ) != 0;
+            let err = if ok {
+                None
+            } else {
+                Some(std::io::Error::last_os_error())
+            };
+            if has_env {
+                DestroyEnvironmentBlock(env_block as _);
+            }
+            CloseHandle(user_token);
+            if let Some(err) = err {
+                bail!("CreateProcessAsUserW(explorer.exe) failed: {err}");
+            }
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+        }
+        return Ok(());
+    }
+
     let _sta = StaGuard::init();
     let wide: Vec<u16> = path
         .as_os_str()

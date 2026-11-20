@@ -161,7 +161,10 @@ pub fn stream(
         matches!(codec, 1 | 3 | 4),
         "encoder: unsupported codec {codec}"
     );
+    let is_desktop = id == crate::win32::DESKTOP_WINDOW_ID;
     let mut reader: Option<Reader> = None;
+    let mut gdi_capturer: Option<crate::win32::desktop::SecureGdiCapturer> = None;
+    let mut gdi_gpu: Option<(u16, u16, d3d11::Graphics, ID3D11Texture2D)> = None;
     let mut h264: Option<((u16, u16), H264)> = None;
     let mut dirty = false;
     let mut paused = false;
@@ -189,6 +192,118 @@ pub fn stream(
     };
     while running.load(Ordering::Acquire) {
         wgc::check_desktop(id)?;
+
+        // When streaming the full primary desktop and Windows switches into a Secure Desktop
+        // (UAC consent prompt / Lock Screen), WGC pauses. Run GDI BitBlt on a dedicated clean
+        // thread bound to Winlogon while keeping D3D11 + Media Foundation H.264 on Default.
+        if is_desktop && crate::win32::desktop::is_secure_desktop() {
+            if gdi_capturer.is_none() {
+                reader = None;
+                h264 = None;
+                pending_capture.clear();
+                gdi_gpu = None;
+                dirty = false;
+                gdi_capturer = Some(crate::win32::desktop::SecureGdiCapturer::start()?);
+            }
+            if let Some((raw_w, raw_h, raw_pixels)) = gdi_capturer
+                .as_ref()
+                .and_then(|cap| cap.recv_timeout(Duration::from_millis(60)))
+            {
+                let frame_start = Instant::now();
+                let w = if codec == 1 { raw_w & !1 } else { raw_w };
+                let h = if codec == 1 { raw_h & !1 } else { raw_h };
+                if w >= 2 && h >= 2 {
+                    let pixels = if w == raw_w && h == raw_h {
+                        raw_pixels
+                    } else {
+                        let mut cropped = Vec::with_capacity(usize::from(w) * usize::from(h) * 4);
+                        for y in 0..usize::from(h) {
+                            let row_start = y * usize::from(raw_w) * 4;
+                            cropped.extend_from_slice(
+                                &raw_pixels[row_start..row_start + usize::from(w) * 4],
+                            );
+                        }
+                        cropped
+                    };
+                    let force = keyframe.swap(false, Ordering::AcqRel);
+                    if codec == 1 {
+                        let need_gpu = gdi_gpu
+                            .as_ref()
+                            .is_none_or(|(gw, gh, _, _)| *gw != w || *gh != h);
+                        if need_gpu {
+                            h264 = None;
+                            pending_capture.clear();
+                            let gpu = d3d11::Graphics::new()?;
+                            let tex = gpu.texture(w, h, false)?;
+                            gdi_gpu = Some((w, h, gpu, tex));
+                        }
+                        let (_, _, gpu, tex) = gdi_gpu.as_ref().unwrap();
+                        unsafe {
+                            gpu.ctx.UpdateSubresource(
+                                tex,
+                                0,
+                                None,
+                                pixels.as_ptr().cast(),
+                                u32::from(w) * 4,
+                                0,
+                            );
+                        }
+                        let resized = h264
+                            .as_ref()
+                            .is_none_or(|(dims, _)| *dims != (w, h));
+                        if resized {
+                            drop(h264.take());
+                            pending_capture.clear();
+                            let enc = H264::new(
+                                &gpu.device,
+                                &gpu.ctx,
+                                w,
+                                h,
+                                fps.min(30),
+                                bitrate_kbps,
+                            )
+                            .context("encoder: cannot initialize H.264 for secure desktop")?;
+                            h264 = Some(((w, h), enc));
+                        }
+                        let (_, enc) = h264.as_mut().unwrap();
+                        ensure!(
+                            pending_capture.len() < 64,
+                            "encoder: H.264 MFT has stopped returning frames"
+                        );
+                        pending_capture.push_back(frame_start);
+                        for (key, data) in enc
+                            .encode(tex, force || resized)
+                            .context("encoder: H.264 secure desktop encode failed")?
+                        {
+                            let captured = pending_capture
+                                .pop_front()
+                                .unwrap_or(frame_start);
+                            deliver(w, h, key, data, captured);
+                        }
+                    } else {
+                        let payload = if codec == 3 {
+                            let mut jpeg = Vec::new();
+                            jpeg_encoder::Encoder::new(&mut jpeg, 85)
+                                .encode(&pixels, w, h, jpeg_encoder::ColorType::Bgra)
+                                .context("encoder: JPEG compression failed")?;
+                            jpeg
+                        } else {
+                            pixels
+                        };
+                        deliver(w, h, true, payload, frame_start);
+                    }
+                }
+            }
+            continue;
+        } else if gdi_capturer.is_some() {
+            gdi_capturer = None;
+            h264 = None;
+            pending_capture.clear();
+            gdi_gpu = None;
+            dirty = false;
+            keyframe.store(true, Ordering::Release);
+        }
+
         if wgc::minimized(id) {
             if !paused {
                 report(

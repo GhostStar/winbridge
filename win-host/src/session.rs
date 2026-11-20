@@ -69,6 +69,8 @@ struct Session {
     injector: Injector,
     cursor: Option<CursorShape>,
     audio: Option<AudioWorker>,
+    auto_uac_desktop: bool,
+    last_desktop_state: win32::desktop::DesktopState,
 }
 impl Drop for Session {
     fn drop(&mut self) {
@@ -311,8 +313,18 @@ impl Session {
                     tokio::task::spawn_blocking(move || win32::list(req.include_icons)).await??;
                 return self.send(Payload::ListWindowsRes(ListWindowsResponse { windows }));
             }
-            Payload::SubscribeWindow(req) => return self.subscribe(req).await,
-            Payload::UnsubscribeWindow(req) => return self.remove(req.window_id, false),
+            Payload::SubscribeWindow(req) => {
+                if req.window_id == win32::DESKTOP_WINDOW_ID {
+                    self.auto_uac_desktop = false;
+                }
+                return self.subscribe(req).await;
+            }
+            Payload::UnsubscribeWindow(req) => {
+                if req.window_id == win32::DESKTOP_WINDOW_ID {
+                    self.auto_uac_desktop = false;
+                }
+                return self.remove(req.window_id, false);
+            }
             Payload::ListAppsReq(req) => {
                 let (apps, paths) =
                     tokio::task::spawn_blocking(move || win32::discover_apps(req.include_icons))
@@ -391,6 +403,43 @@ impl Session {
         }
         self.error(n.id, n.code, n.message)
     }
+
+    async fn poll_secure_desktop(&mut self) -> Result<()> {
+        let state = tokio::task::spawn_blocking(win32::desktop::probe_desktop_state).await?;
+        if state == self.last_desktop_state {
+            return Ok(());
+        }
+        self.last_desktop_state = state;
+        match state {
+            win32::desktop::DesktopState::SecureAccessible => {
+                if !self.windows.contains_key(&win32::DESKTOP_WINDOW_ID) {
+                    self.auto_uac_desktop = true;
+                    let req = SubscribeWindow {
+                        window_id: win32::DESKTOP_WINDOW_ID,
+                        target_fps: 30,
+                        max_bitrate_kbps: 0,
+                        follow_popups: false,
+                        capture_mode: 2,
+                    };
+                    let _ = self.subscribe(req).await;
+                }
+            }
+            win32::desktop::DesktopState::SecureDenied => {
+                let _ = self.error(
+                    0,
+                    6,
+                    "检测到 Windows UAC 安全桌面：请用管理员 PowerShell 运行 win-host.exe --install-service 安装为系统服务后即可在 Mac 上直接看到并点击 UAC",
+                );
+            }
+            win32::desktop::DesktopState::Default => {
+                if self.auto_uac_desktop {
+                    self.auto_uac_desktop = false;
+                    let _ = self.remove(win32::DESKTOP_WINDOW_ID, true);
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 pub async fn run(
@@ -414,11 +463,15 @@ pub async fn run(
         injector,
         cursor: None,
         audio: None,
+        auto_uac_desktop: false,
+        last_desktop_state: win32::desktop::DesktopState::Default,
     };
     let (events, mut events_rx) = mpsc::channel(128);
     let observer = win32::Observer::new(events)?;
     let mut sweep = tokio::time::interval(Duration::from_secs(1));
     sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut uac_poll = tokio::time::interval(Duration::from_millis(250));
+    uac_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut refresh_at = None;
     loop {
         let next =
@@ -444,6 +497,7 @@ pub async fn run(
                 None=>anyhow::bail!("desktop observer disconnected"),
             },
             _=tokio::time::sleep_until(next), if refresh_at.is_some()=>{refresh_at=None;session.refresh().await?;},
+            _=uac_poll.tick()=>{session.poll_secure_desktop().await?;},
             _=sweep.tick()=>{refresh_at=None;session.refresh().await?;},
             msg=rx.recv()=>match msg {
                 Some(Payload::ClipboardSync(sync))=>{

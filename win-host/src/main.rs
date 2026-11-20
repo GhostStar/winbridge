@@ -1,15 +1,52 @@
 use anyhow::Result;
 use clap::Parser;
 use std::time::Duration;
-use win_host::{capture, config::Config, input, win32};
+use win_host::{capture, config::Config, input, service, win32};
 
 fn main() -> Result<()> {
     win32::init_dpi();
     let config = Config::parse();
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_new(&config.log_level)?)
-        .with_writer(std::io::stderr)
-        .init();
+    let filter = tracing_subscriber::EnvFilter::try_new(&config.log_level)?;
+    let log_file = if config.service || config.session_worker {
+        let dir = std::env::var_os("ProgramData")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("C:\\ProgramData"))
+            .join("WinBridge");
+        let _ = std::fs::create_dir_all(&dir);
+        let name = if config.service {
+            "service.log"
+        } else {
+            "worker.log"
+        };
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join(name))
+            .ok()
+    } else {
+        None
+    };
+    if let Some(file) = log_file {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(file))
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .init();
+    }
+    if config.install_service {
+        return service::install(&config);
+    }
+    if config.uninstall_service {
+        return service::uninstall();
+    }
+    if config.service {
+        return service::run_service_dispatcher(config);
+    }
     if config.list_windows {
         for w in win32::list(false)? {
             println!(

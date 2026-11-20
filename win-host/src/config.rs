@@ -31,7 +31,15 @@ fn hwnd(arg: &str) -> Result<u64, String> {
     version,
     about = "Stream selected Windows application windows to a WinBridge client"
 )]
-#[command(group(ArgGroup::new("diagnostic").args(["list_windows", "test_capture", "test_input"])))]
+#[command(group(ArgGroup::new("diagnostic").args([
+    "list_windows",
+    "test_capture",
+    "test_input",
+    "install_service",
+    "uninstall_service",
+    "service",
+    "session_worker",
+])))]
 pub struct Config {
     #[arg(long, default_value = "0.0.0.0")]
     pub bind: IpAddr,
@@ -63,4 +71,16 @@ pub struct Config {
     pub frames: u32,
     #[arg(long, requires = "test_capture")]
     pub save: Option<PathBuf>,
+    /// Install and start WinBridge as a LocalSystem Windows Service (enables clicking UAC & Lock Screen).
+    #[arg(long)]
+    pub install_service: bool,
+    /// Stop and uninstall the WinBridge Windows Service.
+    #[arg(long)]
+    pub uninstall_service: bool,
+    /// Internal: run as Windows Service Control Manager entrypoint.
+    #[arg(long, hide = true)]
+    pub service: bool,
+    /// Internal: run as interactive session worker spawned by the WinBridge service.
+    #[arg(long, hide = true)]
+    pub session_worker: bool,
 }
