@@ -11,6 +11,8 @@ use tokio::{io::AsyncWriteExt, net::TcpStream, sync::Notify};
 use super::micros;
 
 pub const MAX_MEDIA: usize = 64 << 20;
+pub const AUDIO_PCM_S16LE: u8 = 10;
+const MAX_AUDIO_QUEUE: usize = 12;
 const KEY: u8 = 1;
 const EOS: u8 = 4;
 
@@ -56,6 +58,8 @@ struct Slots {
     by_id: HashMap<u64, Slot>,
     order: VecDeque<u64>,
     prefer_popup: bool,
+    audio: VecDeque<Frame>,
+    audio_seq: u16,
 }
 
 #[derive(Default)]
@@ -148,8 +152,37 @@ impl Mux {
         }
     }
 
+    pub fn push_audio(&self, sample_rate: u16, channels: u16, bytes: Vec<u8>) {
+        if bytes.is_empty() || bytes.len() > MAX_MEDIA {
+            return;
+        }
+        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        while slots.audio.len() >= MAX_AUDIO_QUEUE {
+            slots.audio.pop_front();
+        }
+        let seq = slots.audio_seq;
+        slots.audio_seq = seq.wrapping_add(1);
+        slots.audio.push_back(Frame {
+            id: 0,
+            time: micros(),
+            width: sample_rate,
+            height: channels,
+            codec: AUDIO_PCM_S16LE,
+            flags: KEY,
+            seq,
+            bytes,
+        });
+        self.wake.notify_one();
+    }
+
+    pub fn clear_audio(&self) {
+        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        slots.audio.clear();
+    }
+
     pub fn reset(&self) {
         let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        slots.audio.clear();
         for slot in slots.by_id.values_mut().filter(|s| !s.closed) {
             slot.queue.clear();
             slot.wait_idr = true;
@@ -159,6 +192,10 @@ impl Mux {
 
     fn pop(&self) -> Option<Frame> {
         let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        // Always prioritize tiny real-time audio packets ahead of large video frames.
+        if let Some(audio) = slots.audio.pop_front() {
+            return Some(audio);
+        }
         // Every second turn gives waiting popups priority. Other turns serve the oldest ready window.
         let ready =
             |id: &u64| slots.by_id[id].pending_end.is_some() || !slots.by_id[id].queue.is_empty();

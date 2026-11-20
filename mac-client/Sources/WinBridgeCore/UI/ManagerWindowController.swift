@@ -21,6 +21,10 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
     private let popupsCheck = NSButton(checkboxWithTitle: "追踪菜单 / 弹窗", target: nil, action: nil)
     private let syncResizeCheck = NSButton(checkboxWithTitle: "同步缩放 Windows", target: nil, action: nil)
 
+    private let audioCheck = NSButton(checkboxWithTitle: "开启音频", target: nil, action: nil)
+    private let volumeSlider = NSSlider(value: 0.85, minValue: 0.0, maxValue: 1.0, target: nil, action: nil)
+    private let volumeLabel = NSTextField(labelWithString: "85%")
+
     private let tableView = NSTableView()
     private let scrollView = NSScrollView()
 
@@ -112,6 +116,33 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         optionsRow.alignment = .centerY
         optionsRow.spacing = 10
 
+        // --- Row 2b: Audio Switch & Volume ---
+        audioCheck.target = self
+        audioCheck.action = #selector(settingsChanged)
+        audioCheck.toolTip = "开启后实时转发 Windows 系统音频到 Mac，可随时动态开关"
+
+        volumeSlider.isContinuous = true
+        volumeSlider.controlSize = .small
+        volumeSlider.widthAnchor.constraint(equalToConstant: 120).isActive = true
+        volumeSlider.target = self
+        volumeSlider.action = #selector(volumeChanged)
+
+        volumeLabel.font = .monospacedDigitSystemFont(ofSize: 11.5, weight: .regular)
+        volumeLabel.textColor = .secondaryLabelColor
+        volumeLabel.widthAnchor.constraint(equalToConstant: 36).isActive = true
+
+        let audioHint = NSTextField(labelWithString: "（需保持 Windows 声音未静音；随时可开关）")
+        audioHint.font = .systemFont(ofSize: 11)
+        audioHint.textColor = .tertiaryLabelColor
+
+        let audioSpacer = NSView()
+        audioSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        let audioRow = NSStackView(views: [audioCheck, NSTextField(labelWithString: "音量:"), volumeSlider, volumeLabel, audioHint, audioSpacer])
+        audioRow.orientation = .horizontal
+        audioRow.alignment = .centerY
+        audioRow.spacing = 8
+
         // --- Row 3: Status strip ---
         statusLabel.font = .systemFont(ofSize: 12, weight: .medium)
         rttLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
@@ -166,7 +197,7 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         bannerLabel.lineBreakMode = .byTruncatingTail
         bannerLabel.maximumNumberOfLines = 1
 
-        let mainStack = NSStackView(views: [connRow, optionsRow, statusRow, scrollView, bannerLabel])
+        let mainStack = NSStackView(views: [connRow, optionsRow, audioRow, statusRow, scrollView, bannerLabel])
         mainStack.orientation = .vertical
         mainStack.alignment = .leading
         mainStack.spacing = 10
@@ -180,6 +211,7 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
             mainStack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -12),
             connRow.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
             optionsRow.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
+            audioRow.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
             statusRow.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
             scrollView.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
             scrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 220),
@@ -198,6 +230,10 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         clipboardCheck.state = state.settings.syncClipboard ? .on : .off
         popupsCheck.state = state.settings.followPopups ? .on : .off
         syncResizeCheck.state = state.settings.syncWindowResize ? .on : .off
+        audioCheck.state = state.settings.audioEnabled ? .on : .off
+        volumeSlider.floatValue = state.settings.audioVolume
+        volumeSlider.isEnabled = state.settings.audioEnabled
+        volumeLabel.stringValue = "\(Int(round(state.settings.audioVolume * 100)))%"
     }
 
     private func persistInputsToSettings() {
@@ -215,6 +251,10 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         s.syncClipboard = (clipboardCheck.state == .on)
         s.followPopups = (popupsCheck.state == .on)
         s.syncWindowResize = (syncResizeCheck.state == .on)
+        s.audioEnabled = (audioCheck.state == .on)
+        s.audioVolume = volumeSlider.floatValue
+        volumeSlider.isEnabled = s.audioEnabled
+        volumeLabel.stringValue = "\(Int(round(s.audioVolume * 100)))%"
         state.settings = s
     }
 
@@ -261,12 +301,21 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
             }
         }
 
+        audioCheck.state = state.settings.audioEnabled ? .on : .off
+        volumeSlider.floatValue = state.settings.audioVolume
+        volumeSlider.isEnabled = state.settings.audioEnabled
+        volumeLabel.stringValue = "\(Int(round(state.settings.audioVolume * 100)))%"
+
         bannerLabel.stringValue = state.lastBannerMessage
         bannerLabel.textColor = state.lastBannerIsError ? .systemRed : .secondaryLabelColor
         tableView.reloadData()
     }
 
     // MARK: - Actions
+
+    @objc private func volumeChanged() {
+        persistInputsToSettings()
+    }
 
     @objc private func toggleConnect() {
         persistInputsToSettings()

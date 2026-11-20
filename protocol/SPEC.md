@@ -72,9 +72,9 @@ After the `WBRGMED\x01` + 16-byte `session_id` handshake returns `0x00`, Windows
 | `0` | 4 | `u32` | `magic` | Fixed `0x57424D46` (`"WBMF"`) |
 | `4` | 8 | `u64` | `window_id` | Windows `HWND` cast to `u64` |
 | `12` | 8 | `u64` | `timestamp_us` | Host monotonic capture timestamp (microseconds) |
-| `20` | 2 | `u16` | `width` | Frame width in physical pixels |
-| `22` | 2 | `u16` | `height` | Frame height in physical pixels |
-| `24` | 1 | `u8` | `codec` | Matches `VideoCodec` enum (`1`=H264, `2`=HEVC, `3`=JPEG, `4`=RAW_BGRA) |
+| `20` | 2 | `u16` | `width` | Frame width in physical pixels (for `codec = 10` audio: sample rate in Hz, e.g. `48000`) |
+| `22` | 2 | `u16` | `height` | Frame height in physical pixels (for `codec = 10` audio: channel count, e.g. `2`) |
+| `24` | 1 | `u8` | `codec` | `1`=H264, `2`=HEVC, `3`=JPEG, `4`=RAW_BGRA, `10`=AUDIO_PCM_S16LE |
 | `25` | 1 | `u8` | `flags` | Bitmask: `0x01`=KEYFRAME, `0x02`=CONFIG_ONLY, `0x04`=END_OF_STREAM |
 | `26` | 2 | `u16` | `frame_seq` | Per-window wrapping frame counter (`0..65535`) |
 | `28` | 4 | `u32` | `payload_len` | Byte length of the following payload (max **64 MiB**) |

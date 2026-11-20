@@ -13,10 +13,14 @@ final class AppState {
         didSet {
             SettingsStore.save(settings)
             clipboardMonitor.isEnabled = settings.syncClipboard
+            audioPlayer.volume = settings.audioVolume
             if oldValue.syncWindowResize != settings.syncWindowResize {
                 for (_, wc) in controllers {
                     wc.updateResizeBehavior()
                 }
+            }
+            if oldValue.audioEnabled != settings.audioEnabled {
+                applyAudioSetting()
             }
         }
     }
@@ -31,6 +35,7 @@ final class AppState {
     private var connection: WinBridgeConnection?
     private var controllers: [UInt64: RemoteWindowController] = [:]
     private let clipboardMonitor = ClipboardMonitor()
+    private let audioPlayer = AudioPlayer()
 
     var onStateChanged: (() -> Void)?
     var onOpenManager: (() -> Void)?
@@ -38,9 +43,26 @@ final class AppState {
     init() {
         self.settings = SettingsStore.load()
         clipboardMonitor.isEnabled = settings.syncClipboard
+        audioPlayer.volume = settings.audioVolume
         clipboardMonitor.onLocalChange = { [weak self] sync in
             self?.sendControl(.clipboardSync(sync))
         }
+    }
+
+    func toggleAudioEnabled() {
+        var s = settings
+        s.audioEnabled.toggle()
+        settings = s
+        onStateChanged?()
+    }
+
+    private func applyAudioSetting() {
+        guard case .connected = connectionState else {
+            audioPlayer.setEnabled(false)
+            return
+        }
+        audioPlayer.setEnabled(settings.audioEnabled)
+        sendControl(.setAudioConfig(SetAudioConfig(enabled: settings.audioEnabled)))
     }
 
     // MARK: - Connection Lifecycle
@@ -65,8 +87,14 @@ final class AppState {
                 self?.handleControlMessage(msg)
             }
         }
+        let player = self.audioPlayer
         conn.onMediaFrame = { [weak self] frame in
-            // Dispatch frame to its per-window decoder queue immediately (off main thread decode).
+            if frame.header.codec == .audioPcmS16Le {
+                // Feed CoreAudio directly from the Media TCP thread — zero main-thread jitter.
+                player.enqueue(frame: frame)
+                return
+            }
+            // Dispatch video frame to its per-window decoder queue.
             Task { @MainActor in
                 self?.controllers[frame.header.windowId]?.handleMediaFrame(frame)
             }
@@ -100,6 +128,9 @@ final class AppState {
                 self.rttMs = nil
                 self.setBanner("已连接到 \(ack.hostName)（\(ack.selectedCodec.displayName)）", isError: false)
                 self.clipboardMonitor.start()
+                if self.settings.audioEnabled {
+                    self.applyAudioSetting()
+                }
                 self.refreshWindowList()
                 self.onStateChanged?()
             } catch {
@@ -120,6 +151,7 @@ final class AppState {
 
     private func handleDisconnected(error: Error?) {
         clipboardMonitor.stop()
+        audioPlayer.stop()
         connection = nil
         connectionState = .disconnected
         rttMs = nil

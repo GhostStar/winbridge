@@ -11,6 +11,7 @@ enum VideoCodec: Int32, CaseIterable, Sendable {
     case hevcAnnexB = 2
     case jpeg = 3
     case rawBgra = 4
+    case audioPcmS16Le = 10
 
     var displayName: String {
         switch self {
@@ -19,6 +20,7 @@ enum VideoCodec: Int32, CaseIterable, Sendable {
         case .hevcAnnexB: return "HEVC"
         case .jpeg: return "JPEG"
         case .rawBgra: return "RAW BGRA"
+        case .audioPcmS16Le: return "PCM Audio"
         }
     }
 }
@@ -763,6 +765,26 @@ struct ClipboardSync: Equatable, Sendable {
     }
 }
 
+struct SetAudioConfig: Equatable, Sendable {
+    var enabled: Bool = false
+
+    func encode() -> Data {
+        var w = ProtoWriter()
+        w.writeBool(field: 1, enabled)
+        return w.data
+    }
+
+    static func decode(from data: Data) throws -> SetAudioConfig {
+        var r = ProtoReader(data: data)
+        var m = SetAudioConfig()
+        while !r.isAtEnd {
+            let (field, wire) = try r.readTag()
+            if field == 1 { m.enabled = try r.readBool() } else { try r.skip(wireType: wire) }
+        }
+        return m
+    }
+}
+
 struct HostError: Equatable, Sendable {
     var windowId: UInt64 = 0
     var code: HostErrorCode = .unspecified
@@ -816,6 +838,7 @@ struct ControlMessage: Equatable, Sendable {
         case keyEvent(KeyEvent)                         // 51
         case textInput(TextInput)                       // 52
         case clipboardSync(ClipboardSync)               // 60
+        case setAudioConfig(SetAudioConfig)             // 61
         case hostError(HostError)                       // 70
     }
 
@@ -848,6 +871,7 @@ struct ControlMessage: Equatable, Sendable {
         case .keyEvent(let m): w.writeMessage(field: 51, m.encode(), forceEmit: true)
         case .textInput(let m): w.writeMessage(field: 52, m.encode(), forceEmit: true)
         case .clipboardSync(let m): w.writeMessage(field: 60, m.encode(), forceEmit: true)
+        case .setAudioConfig(let m): w.writeMessage(field: 61, m.encode(), forceEmit: true)
         case .hostError(let m): w.writeMessage(field: 70, m.encode(), forceEmit: true)
         }
         return w.data
@@ -883,6 +907,7 @@ struct ControlMessage: Equatable, Sendable {
             case 51: payload = .keyEvent(try KeyEvent.decode(from: try r.readBytes()))
             case 52: payload = .textInput(try TextInput.decode(from: try r.readBytes()))
             case 60: payload = .clipboardSync(try ClipboardSync.decode(from: try r.readBytes()))
+            case 61: payload = .setAudioConfig(try SetAudioConfig.decode(from: try r.readBytes()))
             case 70: payload = .hostError(try HostError.decode(from: try r.readBytes()))
             default: try r.skip(wireType: wire)
             }

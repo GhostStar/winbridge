@@ -15,6 +15,7 @@ let package = Package(
             path: "Sources/WinBridgeCore",
             linkerSettings: [
                 .linkedFramework("AppKit"),
+                .linkedFramework("AVFoundation"),
                 .linkedFramework("CoreGraphics"),
                 .linkedFramework("CoreMedia"),
                 .linkedFramework("CoreVideo"),

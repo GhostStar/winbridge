@@ -73,6 +73,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         state.disconnect()
     }
 
+    @objc private func toggleAudioAction() {
+        state.toggleAudioEnabled()
+    }
+
     private func setupMainMenu() {
         let mainMenu = NSMenu()
 
@@ -135,6 +139,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         menu.addItem(withTitle: "打开管理窗口…", action: #selector(showManager), keyEquivalent: "")
         if case .connected = state.connectionState {
+            let audioItem = NSMenuItem(title: "开启 Windows 音频", action: #selector(toggleAudioAction), keyEquivalent: "")
+            audioItem.state = state.settings.audioEnabled ? .on : .off
+            menu.addItem(audioItem)
             menu.addItem(withTitle: "刷新 Windows 窗口列表", action: #selector(refreshWindowsAction), keyEquivalent: "")
             menu.addItem(withTitle: "断开连接", action: #selector(disconnectAction), keyEquivalent: "")
         }

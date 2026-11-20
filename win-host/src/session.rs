@@ -8,6 +8,7 @@ use std::{
 };
 mod tracking;
 use crate::{
+    audio::AudioWorker,
     capture,
     config::Config,
     input::Injector,
@@ -59,6 +60,7 @@ struct Session {
     replies: mpsc::Sender<Payload>,
     injector: Injector,
     cursor: Option<CursorShape>,
+    audio: Option<AudioWorker>,
 }
 impl Drop for Session {
     fn drop(&mut self) {
@@ -244,6 +246,19 @@ impl Session {
             }
             Payload::SubscribeWindow(req) => return self.subscribe(req).await,
             Payload::UnsubscribeWindow(req) => return self.remove(req.window_id, false),
+            Payload::SetAudioConfig(cfg) => {
+                if cfg.enabled {
+                    if self.audio.is_none() {
+                        match AudioWorker::start(self.mux.clone()) {
+                            Ok(worker) => self.audio = Some(worker),
+                            Err(e) => return self.error(0, 0, format!("audio start failed: {e:#}")),
+                        }
+                    }
+                } else {
+                    self.audio = None;
+                }
+                return Ok(());
+            }
             Payload::RequestKeyFrame(ref req) => req.window_id,
             Payload::ResizeWindow(ref req) => req.window_id,
             Payload::FocusWindow(ref req) => req.window_id,
@@ -319,6 +334,7 @@ pub async fn run(
         replies,
         injector,
         cursor: None,
+        audio: None,
     };
     let (events, mut events_rx) = mpsc::channel(128);
     let observer = win32::Observer::new(events)?;

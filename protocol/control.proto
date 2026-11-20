@@ -51,6 +51,9 @@ message ControlMessage {
     // --- Clipboard (Bidirectional) ---
     ClipboardSync clipboard_sync = 60;           // Bidirectional
 
+    // --- Audio Control (Mac -> Win) ---
+    SetAudioConfig set_audio_config = 61;        // Mac -> Win
+
     // --- Diagnostics / Errors (Win -> Mac) ---
     HostError host_error = 70;                   // Win -> Mac
   }
@@ -373,6 +376,12 @@ message ClipboardSync {
     string text_utf8 = 2;
     bytes image_png = 3;
   }
+}
+
+message SetAudioConfig {
+  // Enable or disable Windows system audio loopback streaming (48/44.1kHz stereo S16LE PCM
+  // delivered on the Media TCP channel with window_id = 0, codec = 10).
+  bool enabled = 1;
 }
 
 message HostError {

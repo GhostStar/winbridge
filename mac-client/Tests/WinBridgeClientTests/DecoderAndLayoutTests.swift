@@ -78,3 +78,35 @@ import Testing
     )
     #expect(exact == NSRect(x: 0, y: 0, width: 800, height: 450))
 }
+
+@Test func stereoAudioRingBufferConvertsPcmScalesVolumeAndTrimsDrift() {
+    let ring = StereoAudioRingBuffer(sampleRate: 1000, maxDurationMs: 200, highWaterMs: 90, trimTargetMs: 30)
+    ring.setVolume(0.5)
+
+    // 2 stereo frames of S16LE: (+16384, -32768) and (+32767, 0)
+    var pcm = Data()
+    for sample: Int16 in [16384, -32768, 32767, 0] {
+        var le = sample.littleEndian
+        withUnsafeBytes(of: &le) { pcm.append(contentsOf: $0) }
+    }
+    ring.pushPcmS16Le(pcm, channels: 2)
+    #expect(ring.bufferedFrames == 2)
+
+    var outL = [Float](repeating: -1, count: 4)
+    var outR = [Float](repeating: -1, count: 4)
+    outL.withUnsafeMutableBufferPointer { lBuf in
+        outR.withUnsafeMutableBufferPointer { rBuf in
+            ring.pull(intoLeft: lBuf.baseAddress!, right: rBuf.baseAddress!, frameCount: 4)
+        }
+    }
+    // Volume 0.5: +16384/32768 * 0.5 = 0.25; -32768/32768 * 0.5 = -0.5; underrun zero-filled
+    #expect(abs(outL[0] - 0.25) < 0.001)
+    #expect(abs(outR[0] - (-0.5)) < 0.001)
+    #expect(outL[2] == 0 && outR[2] == 0)
+    #expect(outL[3] == 0 && outR[3] == 0)
+
+    // Push 1200 frames (> highWaterFrames=256 floor) to confirm drift trimming keeps latency bounded
+    let burst = Data(repeating: 0, count: 1200 * 4)
+    ring.pushPcmS16Le(burst, channels: 2)
+    #expect(ring.bufferedFrames <= 256)
+}

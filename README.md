@@ -37,6 +37,7 @@ Features:
 - Seamless multi-window rendering (`NORMAL`, `DIALOG`, and non-activating borderless `POPUP` menus/tooltips)
 - Mouse, smooth trackpad scrolling, USB HID keyboard mapping, optional `Cmd → Ctrl`, and native macOS Chinese IME (`NSTextInputClient` → `TextInput`)
 - Cursor shape sync (standard + custom RGBA) and bidirectional text/PNG clipboard sync
+- Optional real-time LAN system audio streaming (Windows WASAPI loopback -> 16-bit PCM -> macOS `AVAudioEngine`) with live toggle and volume slider
 
 ## Windows Host
 

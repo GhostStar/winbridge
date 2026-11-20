@@ -86,6 +86,8 @@ import Testing
         .textInput(TextInput(windowId: 100, text: "你好 WinBridge 🚀")),
         .resizeWindow(ResizeWindow(windowId: 100, width: 1280, height: 720, resizeSeq: 3)),
         .subscribeWindow(SubscribeWindow(windowId: 100, targetFps: 60, maxBitrateKbps: 15000, followPopups: true, captureMode: .monitorCrop)),
+        .setAudioConfig(SetAudioConfig(enabled: true)),
+        .setAudioConfig(SetAudioConfig(enabled: false)),
         .hostError(HostError(windowId: 100, code: .displayDisconnected, message: "No monitor")),
     ]
     for (i, payload) in cases.enumerated() {
