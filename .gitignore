@@ -1,0 +1,26 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+*.swp
+
+# Rust (win-host)
+/win-host/target/
+target/
+**/*.rs.bk
+*.pdb
+
+# Swift / Xcode (mac-client)
+.build/
+.swiftpm/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+DerivedData/
+*.xcresult
+
+# Local test artifacts & secrets
+*.png
+*.h264
+*.mp4
+.env
+.env.local

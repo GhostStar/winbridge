@@ -1,0 +1,372 @@
+syntax = "proto3";
+
+package winbridge.v1;
+
+// ============================================================================
+// WinBridge Protocol v0.1 — Control Channel Schema
+//
+// Wire framing on the Control TCP connection (after 8-byte preface "WBRGCTL\x01"):
+//   [4-byte Big-Endian uint32 payload_len][Protobuf-encoded ControlMessage]
+//
+// Video frames do NOT use Protobuf; they flow on a separate Media TCP connection
+// using the fixed 32-byte binary header defined in protocol/SPEC.md.
+// ============================================================================
+
+message ControlMessage {
+  // Per-sender monotonically increasing sequence number (for tracing/logs).
+  uint64 seq = 1;
+  // Sender monotonic timestamp in microseconds (for latency diagnostics).
+  uint64 timestamp_us = 2;
+
+  oneof payload {
+    // --- Session & Keepalive ---
+    Hello hello = 10;                            // Mac -> Win
+    HelloAck hello_ack = 11;                     // Win -> Mac
+    Ping ping = 12;                              // Bidirectional
+    Pong pong = 13;                              // Bidirectional
+
+    // --- Window Discovery & Subscription ---
+    ListWindowsRequest list_windows_req = 20;    // Mac -> Win
+    ListWindowsResponse list_windows_res = 21;   // Win -> Mac
+    SubscribeWindow subscribe_window = 22;       // Mac -> Win
+    UnsubscribeWindow unsubscribe_window = 23;   // Mac -> Win
+
+    // --- Window State & Cursor (Win -> Mac) ---
+    WindowUpdated window_updated = 30;           // Win -> Mac
+    WindowClosed window_closed = 31;             // Win -> Mac
+    CursorShape cursor_shape = 32;               // Win -> Mac
+
+    // --- Window Control (Mac -> Win) ---
+    ResizeWindow resize_window = 40;             // Mac -> Win
+    FocusWindow focus_window = 41;               // Mac -> Win
+    CloseWindow close_window = 42;               // Mac -> Win
+    WindowAction window_action = 43;             // Mac -> Win
+    RequestKeyFrame request_key_frame = 44;      // Mac -> Win
+
+    // --- Input (Mac -> Win) ---
+    MouseEvent mouse_event = 50;                 // Mac -> Win
+    KeyEvent key_event = 51;                     // Mac -> Win
+    TextInput text_input = 52;                   // Mac -> Win
+
+    // --- Clipboard (Bidirectional) ---
+    ClipboardSync clipboard_sync = 60;           // Bidirectional
+
+    // --- Diagnostics / Errors (Win -> Mac) ---
+    HostError host_error = 70;                   // Win -> Mac
+  }
+}
+
+// ============================================================================
+// Common Enums
+// ============================================================================
+
+enum VideoCodec {
+  VIDEO_CODEC_UNSPECIFIED = 0;
+  // H.264 Annex-B byte stream (SPS+PPS MUST precede every IDR keyframe).
+  VIDEO_CODEC_H264_ANNEX_B = 1;
+  // HEVC / H.265 Annex-B byte stream (VPS+SPS+PPS MUST precede every IDR).
+  VIDEO_CODEC_HEVC_ANNEX_B = 2;
+  // Baseline JPEG frames (convenient for early MVP bring-up).
+  VIDEO_CODEC_JPEG = 3;
+  // Uncompressed tightly packed BGRA8888 (width * height * 4 bytes, debug/MVP).
+  VIDEO_CODEC_RAW_BGRA = 4;
+}
+
+enum WindowKind {
+  WINDOW_KIND_UNSPECIFIED = 0;
+  // Standard top-level application window.
+  WINDOW_KIND_NORMAL = 1;
+  // Owned dialog or modal window (e.g. Open/Save dialog, preferences).
+  WINDOW_KIND_DIALOG = 2;
+  // Override-Redirect style transient popup: context menu, dropdown, tooltip.
+  // Should be rendered borderless on macOS without stealing parent focus.
+  WINDOW_KIND_POPUP = 3;
+}
+
+enum MouseEventKind {
+  MOUSE_EVENT_KIND_UNSPECIFIED = 0;
+  MOUSE_EVENT_KIND_MOVE = 1;
+  MOUSE_EVENT_KIND_BUTTON_DOWN = 2;
+  MOUSE_EVENT_KIND_BUTTON_UP = 3;
+  MOUSE_EVENT_KIND_WHEEL = 4;
+}
+
+enum MouseButton {
+  MOUSE_BUTTON_UNSPECIFIED = 0;
+  MOUSE_BUTTON_LEFT = 1;
+  MOUSE_BUTTON_RIGHT = 2;
+  MOUSE_BUTTON_MIDDLE = 3;
+  MOUSE_BUTTON_X1 = 4;
+  MOUSE_BUTTON_X2 = 5;
+}
+
+// Modifier key bitmask shared by MouseEvent and KeyEvent.
+enum KeyModifierBit {
+  KEY_MODIFIER_NONE = 0;
+  KEY_MODIFIER_LSHIFT = 1;    // 0x01
+  KEY_MODIFIER_RSHIFT = 2;    // 0x02
+  KEY_MODIFIER_LCTRL = 4;     // 0x04
+  KEY_MODIFIER_RCTRL = 8;     // 0x08
+  KEY_MODIFIER_LALT = 16;     // 0x10
+  KEY_MODIFIER_RALT = 32;     // 0x20
+  KEY_MODIFIER_LWIN = 64;     // 0x40
+  KEY_MODIFIER_RWIN = 128;    // 0x80
+}
+
+enum WindowActionType {
+  WINDOW_ACTION_TYPE_UNSPECIFIED = 0;
+  WINDOW_ACTION_TYPE_MAXIMIZE = 1;
+  WINDOW_ACTION_TYPE_RESTORE = 2;
+  WINDOW_ACTION_TYPE_BRING_TO_FRONT = 3;
+}
+
+enum CursorType {
+  CURSOR_TYPE_UNSPECIFIED = 0;
+  CURSOR_TYPE_ARROW = 1;
+  CURSOR_TYPE_IBEAM = 2;
+  CURSOR_TYPE_HAND = 3;
+  CURSOR_TYPE_CROSSHAIR = 4;
+  CURSOR_TYPE_WAIT = 5;
+  CURSOR_TYPE_APP_STARTING = 6;
+  CURSOR_TYPE_SIZE_NS = 7;
+  CURSOR_TYPE_SIZE_WE = 8;
+  CURSOR_TYPE_SIZE_NWSE = 9;
+  CURSOR_TYPE_SIZE_NESW = 10;
+  CURSOR_TYPE_SIZE_ALL = 11;
+  CURSOR_TYPE_NO = 12;
+  CURSOR_TYPE_HIDDEN = 13;
+  CURSOR_TYPE_CUSTOM = 14;
+}
+
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+  ERROR_CODE_WINDOW_NOT_FOUND = 1;
+  ERROR_CODE_CAPTURE_FAILED = 2;
+  // WGC pauses frames when a Windows HWND is minimized.
+  ERROR_CODE_CAPTURE_PAUSED_MINIMIZED = 3;
+  // Monitor was disconnected (e.g. DisplayPort input switched away without VDD).
+  ERROR_CODE_DISPLAY_DISCONNECTED = 4;
+  ERROR_CODE_ENCODER_ERROR = 5;
+  // Target window runs elevated (Admin/UAC) while win-host runs unprivileged.
+  ERROR_CODE_ACCESS_DENIED_ELEVATED = 6;
+}
+
+// ============================================================================
+// Session & Keepalive
+// ============================================================================
+
+message Hello {
+  // Protocol major version. Must be 1 for v0.1.
+  uint32 protocol_version = 1;
+  string client_name = 2;
+  // Pre-shared LAN token (may be empty if host disabled auth in dev mode).
+  string auth_token = 3;
+  // macOS display backingScaleFactor (e.g. 2.0 on Retina).
+  float display_scale = 4;
+  // Client-supported codecs ordered by preference (first = most preferred).
+  repeated VideoCodec supported_codecs = 5;
+}
+
+message HelloAck {
+  bool accepted = 1;
+  string reject_reason = 2;
+  // 16-byte random session UUID used to bind the Media TCP connection.
+  bytes session_id = 3;
+  string host_name = 4;
+  // Codec selected by the host from Hello.supported_codecs.
+  VideoCodec selected_codec = 5;
+  uint32 default_fps = 6;
+}
+
+message Ping {
+  uint64 echo_timestamp_us = 1;
+}
+
+message Pong {
+  uint64 echo_timestamp_us = 1;
+}
+
+// ============================================================================
+// Window Discovery, Subscription & Metadata
+// ============================================================================
+
+message WindowInfo {
+  // Windows HWND cast to uint64.
+  uint64 window_id = 1;
+  // Owner/parent HWND (0 for independent top-level windows).
+  uint64 owner_window_id = 2;
+  uint32 pid = 3;
+  string process_name = 4;
+  string title = 5;
+  WindowKind kind = 6;
+
+  // Visible window bounds in Windows virtual desktop physical pixels,
+  // obtained via DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS).
+  int32 x = 7;
+  int32 y = 8;
+  uint32 width = 9;
+  uint32 height = 10;
+
+  // For DIALOG / POPUP windows: offset relative to owner's visible (x, y)
+  // in Windows physical pixels (popup.x - owner.x, popup.y - owner.y).
+  int32 offset_x = 11;
+  int32 offset_y = 12;
+
+  // Window DPI from GetDpiForWindow (96 = 100%, 144 = 150%, 192 = 200%).
+  uint32 dpi = 13;
+
+  bool is_minimized = 14;
+  bool is_maximized = 15;
+  bool is_resizable = 16;
+  bool has_alpha = 17;
+
+  // Relative z-order hint among active windows (higher = closer to front).
+  uint32 z_order = 18;
+
+  // Optional PNG-encoded app icon (typically populated in ListWindowsResponse
+  // or first WindowUpdated; empty when unchanged).
+  bytes icon_png = 19;
+}
+
+message ListWindowsRequest {
+  bool include_icons = 1;
+}
+
+message ListWindowsResponse {
+  repeated WindowInfo windows = 1;
+}
+
+message SubscribeWindow {
+  uint64 window_id = 1;
+  // 0 = use host default (e.g. 60).
+  uint32 target_fps = 2;
+  // 0 = use host default (e.g. 15000 kbps for LAN H.264).
+  uint32 max_bitrate_kbps = 3;
+  // If true, host automatically tracks and streams owned dialogs & popups
+  // (menus, dropdowns, tooltips) associated with this window/process.
+  bool follow_popups = 4;
+}
+
+message UnsubscribeWindow {
+  uint64 window_id = 1;
+}
+
+message WindowUpdated {
+  WindowInfo window = 1;
+  // Last ResizeWindow.resize_seq applied by the host for this window.
+  // Helps macOS ignore stale intermediate geometry updates during live resize.
+  uint32 ack_resize_seq = 2;
+}
+
+message WindowClosed {
+  uint64 window_id = 1;
+}
+
+message CursorShape {
+  uint64 window_id = 1;
+  CursorType cursor_type = 2;
+  // Populated only when cursor_type == CURSOR_TYPE_CUSTOM.
+  bytes custom_rgba = 3;
+  uint32 width = 4;
+  uint32 height = 5;
+  uint32 hotspot_x = 6;
+  uint32 hotspot_y = 7;
+}
+
+// ============================================================================
+// Window Control (Mac -> Win)
+// ============================================================================
+
+message ResizeWindow {
+  uint64 window_id = 1;
+  // Desired visible width and height in Windows physical pixels.
+  uint32 width = 2;
+  uint32 height = 3;
+  // Per-window monotonically increasing sequence number for loop prevention.
+  uint32 resize_seq = 4;
+}
+
+message FocusWindow {
+  uint64 window_id = 1;
+  bool focused = 2;
+}
+
+message CloseWindow {
+  // Host sends WM_CLOSE (graceful close, allowing "Save changes?" dialogs).
+  uint64 window_id = 1;
+}
+
+message WindowAction {
+  uint64 window_id = 1;
+  WindowActionType action = 2;
+}
+
+message RequestKeyFrame {
+  uint64 window_id = 1;
+}
+
+// ============================================================================
+// Input Events (Mac -> Win)
+// ============================================================================
+
+message MouseEvent {
+  uint64 window_id = 1;
+  MouseEventKind kind = 2;
+
+  // Position normalized against the window's visible rect:
+  //   0.0 = left/top edge, 1.0 = right/bottom edge.
+  // Values outside [0.0, 1.0] are allowed during click-drag outside the window.
+  float norm_x = 3;
+  float norm_y = 4;
+
+  // Used for BUTTON_DOWN / BUTTON_UP.
+  MouseButton button = 5;
+
+  // Used for WHEEL. Units match Windows WHEEL_DELTA (120.0 = 1 detent).
+  // Fractional values are supported for smooth macOS trackpad scrolling.
+  // Positive wheel_delta_y = scroll up; positive wheel_delta_x = scroll right.
+  float wheel_delta_x = 6;
+  float wheel_delta_y = 7;
+
+  // Bitmask of KeyModifierBit.
+  uint32 modifiers = 8;
+}
+
+message KeyEvent {
+  uint64 window_id = 1;
+  bool is_down = 2;
+  bool is_repeat = 3;
+  // Platform-neutral USB HID Usage Page 0x07 (Keyboard/Keypad) code.
+  // Examples: 0x04='A', 0x28=Enter, 0x29=Escape, 0x2A=Backspace, 0x2C=Space.
+  // Host maps HID usage -> PS/2 Set-1 ScanCode for SendInput(KEYEVENTF_SCANCODE).
+  uint32 hid_usage = 4;
+  // Bitmask of KeyModifierBit.
+  uint32 modifiers = 5;
+}
+
+message TextInput {
+  uint64 window_id = 1;
+  // Committed UTF-8 text (e.g. from macOS Chinese IME).
+  // Host encodes as UTF-16 code units and injects via SendInput(KEYEVENTF_UNICODE).
+  string text = 2;
+}
+
+// ============================================================================
+// Clipboard & Diagnostics
+// ============================================================================
+
+message ClipboardSync {
+  // Sender-side monotonic ID or content hash to prevent echo loops.
+  uint64 change_id = 1;
+  oneof content {
+    string text_utf8 = 2;
+    bytes image_png = 3;
+  }
+}
+
+message HostError {
+  // 0 if session-level error; otherwise target HWND.
+  uint64 window_id = 1;
+  ErrorCode code = 2;
+  string message = 3;
+}
