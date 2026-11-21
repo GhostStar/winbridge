@@ -103,6 +103,8 @@ import Testing
         .launchApp(LaunchApp(appId: "0123456789abcdef", autoSubscribe: true, targetFps: 60, maxBitrateKbps: 15000, followPopups: true, captureMode: .monitorCrop)),
         .launchAppRes(LaunchAppResult(appId: "0123456789abcdef", started: true, message: "")),
         .hostError(HostError(windowId: 100, code: .displayDisconnected, message: "No monitor")),
+        .micChunk(MicChunk(sampleRate: 48_000, channels: 2, pcmS16le: Data([1, 2, 3, 4]), enabled: true)),
+        .micChunk(MicChunk(enabled: false)),
     ]
     for (i, payload) in cases.enumerated() {
         let msg = ControlMessage(seq: UInt64(i + 1), timestampUs: 500, payload: payload)

@@ -74,6 +74,7 @@ struct ClientSettings {
     var audioEnabled: Bool
     var audioQuality: AudioQualityPreference
     var audioVolume: Float
+    var micEnabled: Bool
     var mouseSensitivity: Float
     var targetFps: UInt32
     var processCaptureModes: [String: CaptureMode]
@@ -126,6 +127,7 @@ enum SettingsStore {
         let audioQualityRaw = defaults.string(forKey: "winbridge.audioQuality") ?? AudioQualityPreference.opus128.rawValue
         let audioQuality = AudioQualityPreference(rawValue: audioQualityRaw) ?? .opus128
         let audioVolume = defaults.object(forKey: "winbridge.audioVolume") as? Float ?? 0.85
+        let micEnabled = defaults.object(forKey: "winbridge.micEnabled") as? Bool ?? false
         let mouseSensitivity = defaults.object(forKey: "winbridge.mouseSensitivity") as? Float ?? 1.0
         let fpsInt = defaults.integer(forKey: "winbridge.fps")
         let fps = (fpsInt >= 1 && fpsInt <= 240) ? UInt32(fpsInt) : 60
@@ -168,6 +170,7 @@ enum SettingsStore {
             audioEnabled: audioEnabled,
             audioQuality: audioQuality,
             audioVolume: max(0, min(1, audioVolume)),
+            micEnabled: micEnabled,
             mouseSensitivity: max(0.1, min(4.0, mouseSensitivity)),
             targetFps: fps,
             processCaptureModes: modes,
@@ -200,6 +203,7 @@ enum SettingsStore {
         defaults.set(s.audioEnabled, forKey: "winbridge.audioEnabled")
         defaults.set(s.audioQuality.rawValue, forKey: "winbridge.audioQuality")
         defaults.set(s.audioVolume, forKey: "winbridge.audioVolume")
+        defaults.set(s.micEnabled, forKey: "winbridge.micEnabled")
         defaults.set(s.mouseSensitivity, forKey: "winbridge.mouseSensitivity")
         defaults.set(Int(s.targetFps), forKey: "winbridge.fps")
         defaults.set(s.processCaptureModes.mapValues { Int($0.rawValue) }, forKey: "winbridge.processCaptureModes")
