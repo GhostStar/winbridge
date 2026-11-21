@@ -148,6 +148,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         state.setTransportPreference(pref)
     }
 
+    @objc private func toggleAutoWanOptimizeAction() {
+        state.toggleAutoWanOptimize()
+    }
+
+    @objc private func saveWorkspacePresetAction() {
+        let alert = NSAlert()
+        alert.messageText = "保存当前工作区布局"
+        alert.informativeText = "将当前所有已投射 Windows 窗口的位置、尺寸、置顶与静音状态保存为一键预设："
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        input.placeholderString = "例如：开发模式 / 挂机双开 / 办公"
+        alert.accessoryView = input
+        alert.addButton(withTitle: "保存")
+        alert.addButton(withTitle: "取消")
+        if alert.runModal() == .alertFirstButtonReturn {
+            state.saveCurrentWorkspacePreset(named: input.stringValue)
+        }
+    }
+
+    @objc private func applyWorkspacePresetAction(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        state.applyWorkspacePreset(id: id)
+    }
+
+    @objc private func deleteWorkspacePresetAction(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        state.deleteWorkspacePreset(id: id)
+    }
+
+    @objc private func clearSavedWindowLayoutsAction() {
+        state.clearSavedWindowLayouts()
+    }
+
     @objc private func disconnectAction() {
         state.disconnect()
     }
@@ -302,6 +334,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         winMenu.addItem(autoPullItem)
         appendVideoQualityItems(to: winMenu, includeProcess: true)
         winMenu.addItem(.separator())
+        winMenu.addItem(makeWorkspacePresetsMenuItem())
         winMenu.addItem(withTitle: "快捷键设置…", action: #selector(showShortcutsAction), keyEquivalent: "")
         let transportItem = NSMenuItem(title: "传输通道", action: nil, keyEquivalent: "")
         let transportMenu = NSMenu()
@@ -315,6 +348,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             item.state = state.settings.transportPreference == pref ? .on : .off
             transportMenu.addItem(item)
         }
+        transportMenu.addItem(.separator())
+        let wanItem = NSMenuItem(
+            title: "外网自动弱网优化 (备用地址 / RTT≥30ms)",
+            action: #selector(toggleAutoWanOptimizeAction),
+            keyEquivalent: ""
+        )
+        wanItem.state = state.settings.autoWanOptimize ? .on : .off
+        transportMenu.addItem(wanItem)
         transportItem.submenu = transportMenu
         winMenu.addItem(transportItem)
         winMenu.addItem(.separator())
@@ -343,7 +384,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(withTitle: "状态：连接中…", action: nil, keyEquivalent: "")
         case .connected(let host, let codec):
             let transport = state.activeTransport.map { " · \($0.rawValue)" } ?? ""
-            menu.addItem(withTitle: "已连接：\(host) (\(codec.displayName)\(transport))", action: nil, keyEquivalent: "")
+            let fb = state.connectedViaFallback ? " · 备用" : ""
+            menu.addItem(withTitle: "已连接：\(host) (\(codec.displayName)\(transport)\(fb))", action: nil, keyEquivalent: "")
         }
         menu.addItem(.separator())
         let launcherStatusItem = NSMenuItem(
@@ -393,6 +435,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             autoPullStatus.state = state.settings.autoPullClipboardFiles ? .on : .off
             menu.addItem(autoPullStatus)
             appendVideoQualityItems(to: menu, includeProcess: true)
+            menu.addItem(.separator())
+            menu.addItem(makeWorkspacePresetsMenuItem())
 
             let pinned = state.pinnedApps
             if !pinned.isEmpty {
@@ -449,5 +493,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             sub.submenu = subMenu
             menu.addItem(sub)
         }
+    }
+
+    private func makeWorkspacePresetsMenuItem() -> NSMenuItem {
+        let root = NSMenuItem(title: "工作区布局", action: nil, keyEquivalent: "")
+        let sub = NSMenu()
+        let saveItem = NSMenuItem(
+            title: "保存当前窗口布局为预设…",
+            action: #selector(saveWorkspacePresetAction),
+            keyEquivalent: ""
+        )
+        sub.addItem(saveItem)
+        let presets = state.settings.workspacePresets
+        if !presets.isEmpty {
+            sub.addItem(.separator())
+            for preset in presets {
+                let item = NSMenuItem(
+                    title: "恢复「\(preset.name)」(\(preset.entries.count) 窗)",
+                    action: #selector(applyWorkspacePresetAction(_:)),
+                    keyEquivalent: ""
+                )
+                item.representedObject = preset.id
+                sub.addItem(item)
+            }
+            let delRoot = NSMenuItem(title: "删除布局预设", action: nil, keyEquivalent: "")
+            let delMenu = NSMenu()
+            for preset in presets {
+                let item = NSMenuItem(
+                    title: preset.name,
+                    action: #selector(deleteWorkspacePresetAction(_:)),
+                    keyEquivalent: ""
+                )
+                item.representedObject = preset.id
+                delMenu.addItem(item)
+            }
+            delRoot.submenu = delMenu
+            sub.addItem(delRoot)
+        }
+        sub.addItem(.separator())
+        let clearItem = NSMenuItem(
+            title: "清除已记忆的窗口位置 (\(state.settings.savedWindowLayouts.count))",
+            action: #selector(clearSavedWindowLayoutsAction),
+            keyEquivalent: ""
+        )
+        clearItem.isEnabled = !state.settings.savedWindowLayouts.isEmpty
+        sub.addItem(clearItem)
+        root.submenu = sub
+        return root
     }
 }

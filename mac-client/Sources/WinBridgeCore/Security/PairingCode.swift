@@ -2,6 +2,7 @@ import Foundation
 
 struct ParsedPairingCode: Equatable, Sendable {
     let host: String
+    let fallbackHost: String?
     let port: UInt16
     let token: String?
     let fingerprint: String?
@@ -42,6 +43,7 @@ enum PairingCode {
             port = 9876
         }
 
+        var fallbackHost: String?
         var token: String?
         var fingerprint: String?
         var macAddress: String?
@@ -53,6 +55,8 @@ enum PairingCode {
             let val = (item.value ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             guard !val.isEmpty else { continue }
             switch key {
+            case "fallback", "backup":
+                fallbackHost = val
             case "token":
                 token = val
             case "fp", "fingerprint":
@@ -71,6 +75,7 @@ enum PairingCode {
 
         return ParsedPairingCode(
             host: rawHost,
+            fallbackHost: fallbackHost,
             port: port,
             token: token,
             fingerprint: fingerprint,

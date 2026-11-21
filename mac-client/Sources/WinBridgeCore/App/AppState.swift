@@ -57,6 +57,16 @@ final class AppState {
             if oldValue.videoProfile != settings.videoProfile || oldValue.adaptiveBitrate != settings.adaptiveBitrate {
                 pushVideoConfig(windowId: 0)
             }
+            if oldValue.autoWanOptimize != settings.autoWanOptimize {
+                let nextWan = settings.autoWanOptimize && (connectedViaFallback || highRttConsecutiveCount >= 2)
+                if nextWan != wanOptimizationActive {
+                    wanOptimizationActive = nextWan
+                    if settings.audioEnabled {
+                        applyAudioSetting()
+                    }
+                    pushVideoConfig(windowId: 0)
+                }
+            }
             if !settings.autoReconnect && oldValue.autoReconnect {
                 cancelReconnect()
             }
@@ -76,12 +86,17 @@ final class AppState {
     private(set) var connectedHostVersion: String = ""
     private(set) var connectedHostCapabilities: UInt32 = 0
     private(set) var activeTransport: ActiveTransport?
+    private(set) var connectedViaFallback: Bool = false
+    private(set) var connectedEndpointHost: String = ""
+    private(set) var wanOptimizationActive: Bool = false
     private(set) var lastBannerMessage: String = ""
     private(set) var lastBannerIsError: Bool = false
 
     var isReconnecting: Bool { reconnectTask != nil }
     private var isWakeConnecting = false
     private var wakeDeadline: Date?
+    private var highRttConsecutiveCount = 0
+    private var pendingPresetLayouts: [String: SavedWindowLayout] = [:]
 
     var isDesktopOpen: Bool {
         subscribedRootIds.contains(SyntheticWindow.primaryDesktop)
@@ -167,6 +182,7 @@ final class AppState {
     func syncSelectedProfileFields(in s: inout ClientSettings) {
         if let idx = s.hostProfiles.firstIndex(where: { $0.id == s.selectedHostProfileId }) {
             s.hostProfiles[idx].host = s.host
+            s.hostProfiles[idx].fallbackHost = s.fallbackHost
             s.hostProfiles[idx].port = s.port
             s.hostProfiles[idx].useTls = s.useTls
             s.hostProfiles[idx].macAddress = s.macAddress
@@ -177,6 +193,7 @@ final class AppState {
                 id: id,
                 name: s.host.isEmpty ? "默认主机" : s.host,
                 host: s.host,
+                fallbackHost: s.fallbackHost,
                 port: s.port,
                 useTls: s.useTls,
                 macAddress: s.macAddress
@@ -194,6 +211,7 @@ final class AppState {
         var s = settings
         s.selectedHostProfileId = profile.id
         s.host = profile.host
+        s.fallbackHost = profile.fallbackHost
         s.port = profile.port
         s.useTls = profile.useTls
         s.macAddress = profile.macAddress
@@ -212,6 +230,7 @@ final class AppState {
             id: newId,
             name: finalName,
             host: s.host.trimmingCharacters(in: .whitespacesAndNewlines),
+            fallbackHost: s.fallbackHost.trimmingCharacters(in: .whitespacesAndNewlines),
             port: s.port,
             useTls: s.useTls,
             macAddress: WakeOnLan.normalizeMac(s.macAddress) ?? s.macAddress.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -242,6 +261,7 @@ final class AppState {
         let next = s.hostProfiles[0]
         s.selectedHostProfileId = next.id
         s.host = next.host
+        s.fallbackHost = next.fallbackHost
         s.port = next.port
         s.useTls = next.useTls
         s.macAddress = next.macAddress
@@ -272,6 +292,9 @@ final class AppState {
                 s.hostProfiles[existingIdx].name = explicitName
             }
             s.hostProfiles[existingIdx].host = parsed.host
+            if let fb = parsed.fallbackHost {
+                s.hostProfiles[existingIdx].fallbackHost = fb
+            }
             s.hostProfiles[existingIdx].port = parsed.port
             s.hostProfiles[existingIdx].useTls = parsed.useTls
             if let mac = parsed.macAddress {
@@ -283,6 +306,7 @@ final class AppState {
                 id: targetId,
                 name: displayName,
                 host: parsed.host,
+                fallbackHost: parsed.fallbackHost ?? "",
                 port: parsed.port,
                 useTls: parsed.useTls,
                 macAddress: parsed.macAddress ?? ""
@@ -290,6 +314,11 @@ final class AppState {
         }
         s.selectedHostProfileId = targetId
         s.host = parsed.host
+        if let fb = parsed.fallbackHost {
+            s.fallbackHost = fb
+        } else if let prof = s.hostProfiles.first(where: { $0.id == targetId }) {
+            s.fallbackHost = prof.fallbackHost
+        }
         s.port = parsed.port
         s.useTls = parsed.useTls
         if let mac = parsed.macAddress {
@@ -305,6 +334,11 @@ final class AppState {
         if let fp = parsed.fingerprint {
             let key = CertificateFingerprint.hostKey(host: parsed.host, port: parsed.port)
             s.trustedFingerprints[key] = fp
+            let fbTrimmed = s.fallbackHost.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !fbTrimmed.isEmpty {
+                let fbKey = CertificateFingerprint.hostKey(host: fbTrimmed, port: parsed.port)
+                s.trustedFingerprints[fbKey] = fp
+            }
         }
         settings = s
 
@@ -312,6 +346,7 @@ final class AppState {
         if parsed.token != nil { notes.append("Token") }
         if parsed.fingerprint != nil { notes.append("TLS 指纹") }
         if parsed.macAddress != nil { notes.append("WoL MAC") }
+        if parsed.fallbackHost != nil { notes.append("备用地址") }
         let suffix = notes.isEmpty ? "" : "（已填入 \(notes.joined(separator: " / "))）"
         ClientLogger.shared.info("Imported pairing code for \(displayName) (\(parsed.host):\(parsed.port))")
         setBanner("✓ 已导入配对配置「\(displayName)」\(suffix)，点击连接即可", isError: false)
@@ -417,6 +452,51 @@ final class AppState {
         settings = s
         setBanner("传输通道已设为：\(pref.title)（重新连接后生效）", isError: false)
         onStateChanged?()
+    }
+
+    func toggleAutoWanOptimize() {
+        var s = settings
+        s.autoWanOptimize.toggle()
+        settings = s
+        setBanner(
+            s.autoWanOptimize
+                ? "已开启外网自动弱网优化（备用地址或 RTT ≥ 30 ms 时自动启用自适应码率 + Opus 64k）"
+                : "已关闭外网自动弱网优化",
+            isError: false
+        )
+        onStateChanged?()
+    }
+
+    var effectiveAudioQuality: AudioQualityPreference {
+        if wanOptimizationActive && settings.autoWanOptimize {
+            return .opus64
+        }
+        return settings.audioQuality
+    }
+
+    var effectiveAdaptiveBitrate: Bool {
+        settings.adaptiveBitrate || (wanOptimizationActive && settings.autoWanOptimize)
+    }
+
+    private func evaluateWanOptimization(rttMs rtt: Double) {
+        guard settings.autoWanOptimize, !wanOptimizationActive, case .connected = connectionState else { return }
+        if rtt >= 30.0 {
+            highRttConsecutiveCount += 1
+            if highRttConsecutiveCount >= 2 {
+                wanOptimizationActive = true
+                if settings.audioEnabled {
+                    applyAudioSetting()
+                }
+                pushVideoConfig(windowId: 0)
+                setBanner(
+                    "🌐 检测到较高延迟（RTT \(Int(rtt.rounded())) ms），已自动启用弱网优化（自适应码率 + Opus 64k）",
+                    isError: false
+                )
+                onStateChanged?()
+            }
+        } else {
+            highRttConsecutiveCount = 0
+        }
     }
 
     func toggleAudioEnabled() {
@@ -530,10 +610,11 @@ final class AppState {
             return
         }
         audioPlayer.setEnabled(settings.audioEnabled)
+        let quality = effectiveAudioQuality
         sendControl(.setAudioConfig(SetAudioConfig(
             enabled: settings.audioEnabled,
-            codec: settings.audioQuality.audioCodec,
-            bitrateKbps: settings.audioQuality.bitrateKbps,
+            codec: quality.audioCodec,
+            bitrateKbps: quality.bitrateKbps,
             scope: settings.audioProcessOnly ? 1 : 0,
             mutedWindowIds: Array(mutedWindowIds).sorted()
         )))
@@ -568,13 +649,13 @@ final class AppState {
             profile: profile,
             targetFps: 0,
             maxBitrateKbps: 0,
-            adaptive: settings.adaptiveBitrate,
+            adaptive: effectiveAdaptiveBitrate,
             rttMs: rtt
         )))
     }
 
     private func pushAdaptiveRttIfNeeded() {
-        guard settings.adaptiveBitrate, case .connected = connectionState else { return }
+        guard effectiveAdaptiveBitrate, case .connected = connectionState else { return }
         let now = Date()
         guard now.timeIntervalSince(lastAdaptivePush) >= 2 else { return }
         lastAdaptivePush = now
@@ -599,17 +680,23 @@ final class AppState {
             pendingRestoreTargets.removeAll()
         }
         let host = settings.host.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !host.isEmpty else {
+        let fallbackHost = settings.fallbackHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !host.isEmpty || !fallbackHost.isEmpty else {
             setBanner("请输入 Windows 主机内网 IP 或从局域网发现中选择", isError: true)
             return
         }
+        let primaryHost = host.isEmpty ? fallbackHost : host
+        let secondaryHost = host.isEmpty ? "" : fallbackHost
 
         connectionState = .connecting
-        ClientLogger.shared.info("Connecting to \(host):\(settings.port) tls=\(settings.useTls) auto=\(isAutoReconnect)")
+        ClientLogger.shared.info(
+            "Connecting to \(primaryHost):\(settings.port) fallback=\(secondaryHost) tls=\(settings.useTls) auto=\(isAutoReconnect)"
+        )
+        let fbHint = secondaryHost.isEmpty ? "" : "（备用 \(secondaryHost)）"
         setBanner(
             isAutoReconnect
-                ? "正在自动重连 \(host):\(settings.port)（第 \(reconnectAttempt) 次）…"
-                : "正在连接 \(host):\(settings.port)…",
+                ? "正在自动重连 \(primaryHost):\(settings.port)\(fbHint)（第 \(reconnectAttempt) 次）…"
+                : "正在连接 \(primaryHost):\(settings.port)\(fbHint)…",
             isError: false
         )
         onStateChanged?()
@@ -635,6 +722,7 @@ final class AppState {
         conn.onRttUpdated = { [weak self] rtt in
             Task { @MainActor in
                 self?.rttMs = rtt
+                self?.evaluateWanOptimization(rttMs: rtt)
                 self?.onStateChanged?()
                 self?.pushAdaptiveRttIfNeeded()
             }
@@ -645,15 +733,20 @@ final class AppState {
             }
         }
 
-        let hostKey = CertificateFingerprint.hostKey(host: host, port: settings.port)
+        let primaryKey = CertificateFingerprint.hostKey(host: primaryHost, port: settings.port)
+        let fallbackKey = secondaryHost.isEmpty ? nil : CertificateFingerprint.hostKey(host: secondaryHost, port: settings.port)
+        let primaryExpectedFp = settings.trustedFingerprints[primaryKey] ?? fallbackKey.flatMap { settings.trustedFingerprints[$0] }
+        let fallbackExpectedFp = fallbackKey.flatMap { settings.trustedFingerprints[$0] } ?? settings.trustedFingerprints[primaryKey]
         let displayScale = Float(NSScreen.main?.backingScaleFactor ?? 2.0)
         let config = ConnectionConfig(
-            host: host,
+            host: primaryHost,
+            fallbackHost: secondaryHost,
             port: settings.port,
             authToken: settings.authToken.trimmingCharacters(in: .whitespacesAndNewlines),
             useTls: settings.useTls,
             transport: settings.transportPreference,
-            expectedFingerprint: settings.trustedFingerprints[hostKey],
+            expectedFingerprint: primaryExpectedFp,
+            fallbackExpectedFingerprint: fallbackExpectedFp,
             clientName: Host.current().localizedName ?? "macOS",
             displayScale: displayScale,
             supportedCodecs: settings.codecPreference.offeredCodecs
@@ -666,7 +759,12 @@ final class AppState {
                 var updatedSettings = self.settings
                 var settingsModified = false
                 if let fp = outcome.tlsFingerprint {
-                    updatedSettings.trustedFingerprints[hostKey] = fp
+                    let connectedKey = CertificateFingerprint.hostKey(host: outcome.connectedHost, port: self.settings.port)
+                    updatedSettings.trustedFingerprints[connectedKey] = fp
+                    updatedSettings.trustedFingerprints[primaryKey] = fp
+                    if let fbKey = fallbackKey {
+                        updatedSettings.trustedFingerprints[fbKey] = fp
+                    }
                     settingsModified = true
                 }
                 if let detectedMac = WakeOnLan.normalizeMac(ack.macAddress),
@@ -686,6 +784,10 @@ final class AppState {
                 self.connectedHostVersion = ack.hostVersion
                 self.connectedHostCapabilities = ack.capabilities
                 self.activeTransport = outcome.transport
+                self.connectedViaFallback = outcome.usedFallbackHost
+                self.connectedEndpointHost = outcome.connectedHost
+                self.highRttConsecutiveCount = 0
+                self.wanOptimizationActive = outcome.usedFallbackHost && self.settings.autoWanOptimize
                 self.connectionState = .connected(hostName: ack.hostName, codec: ack.selectedCodec)
                 self.rttMs = nil
                 let transportNote: String
@@ -695,6 +797,8 @@ final class AppState {
                 case .tcp:
                     transportNote = outcome.fellBackToTcp ? " · TCP (QUIC 回退)" : " · TCP"
                 }
+                let fallbackNote = outcome.usedFallbackHost ? " · 备用地址(\(outcome.connectedHost))" : ""
+                let wanNote = self.wanOptimizationActive ? " · 弱网优化" : ""
                 let tlsNote: String
                 if let fp = outcome.tlsFingerprint {
                     let shortFp = CertificateFingerprint.shortDisplay(fp)
@@ -710,10 +814,10 @@ final class AppState {
                     versionNotice = " · v\(ack.hostVersion)"
                 }
                 ClientLogger.shared.info(
-                    "Connected to \(ack.hostName) transport=\(outcome.transport.rawValue) fellBack=\(outcome.fellBackToTcp) v=\(ack.hostVersion) caps=\(ack.capabilities) mac=\(ack.macAddress) codec=\(ack.selectedCodec.displayName)\(tlsNote)"
+                    "Connected to \(ack.hostName) endpoint=\(outcome.connectedHost) fallback=\(outcome.usedFallbackHost) wanOpt=\(self.wanOptimizationActive) transport=\(outcome.transport.rawValue) fellBack=\(outcome.fellBackToTcp) v=\(ack.hostVersion) caps=\(ack.capabilities) mac=\(ack.macAddress) codec=\(ack.selectedCodec.displayName)\(tlsNote)"
                 )
                 self.setBanner(
-                    "已连接到 \(ack.hostName)（\(ack.selectedCodec.displayName)\(transportNote)\(tlsNote)\(versionNotice)）",
+                    "已连接到 \(ack.hostName)（\(ack.selectedCodec.displayName)\(transportNote)\(fallbackNote)\(wanNote)\(tlsNote)\(versionNotice)）",
                     isError: false
                 )
                 self.clipboardMonitor.start()
@@ -766,14 +870,27 @@ final class AppState {
 
     func resetTrustedFingerprintForCurrentHost() {
         let host = settings.host.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !host.isEmpty else { return }
-        let key = CertificateFingerprint.hostKey(host: host, port: settings.port)
+        let fallback = settings.fallbackHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !host.isEmpty || !fallback.isEmpty else { return }
         var s = settings
-        if s.trustedFingerprints.removeValue(forKey: key) != nil {
+        var removed: [String] = []
+        if !host.isEmpty {
+            let key = CertificateFingerprint.hostKey(host: host, port: settings.port)
+            if s.trustedFingerprints.removeValue(forKey: key) != nil {
+                removed.append(key)
+            }
+        }
+        if !fallback.isEmpty {
+            let fbKey = CertificateFingerprint.hostKey(host: fallback, port: settings.port)
+            if s.trustedFingerprints.removeValue(forKey: fbKey) != nil {
+                removed.append(fbKey)
+            }
+        }
+        if !removed.isEmpty {
             settings = s
-            setBanner("已清除 \(key) 的已信任 TLS 指纹，下次连接将重新校验并记住", isError: false)
+            setBanner("已清除 \(removed.joined(separator: "、")) 的已信任 TLS 指纹，下次连接将重新校验并记住", isError: false)
         } else {
-            setBanner("\(key) 尚未保存过 TLS 证书指纹", isError: false)
+            setBanner("当前主机尚未保存过 TLS 证书指纹", isError: false)
         }
         onStateChanged?()
     }
@@ -925,6 +1042,11 @@ final class AppState {
         connectedHostVersion = ""
         connectedHostCapabilities = 0
         activeTransport = nil
+        connectedViaFallback = false
+        connectedEndpointHost = ""
+        wanOptimizationActive = false
+        highRttConsecutiveCount = 0
+        pendingPresetLayouts.removeAll()
         activeTransferNames.removeAll()
         activeTransferTargetWindow.removeAll()
         for (_, pending) in pendingPullTargets {
@@ -1101,6 +1223,174 @@ final class AppState {
         } else {
             subscribeWindow(info)
         }
+    }
+
+    // MARK: - Window Layout Memory & Workspace Presets
+
+    nonisolated static func layoutKey(for info: WindowInfo) -> String? {
+        if info.windowId == SyntheticWindow.primaryDesktop {
+            return "__desktop__"
+        }
+        guard info.kind != .popup else { return nil }
+        let proc = info.processName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return proc.isEmpty ? nil : "proc:\(proc)"
+    }
+
+    private func recordWindowLayout(for windowId: UInt64) {
+        guard let wc = controllers[windowId],
+              let key = Self.layoutKey(for: wc.info),
+              let snap = wc.snapshotLayout() else { return }
+        if settings.savedWindowLayouts[key] == snap {
+            return
+        }
+        var s = settings
+        s.savedWindowLayouts[key] = snap
+        settings = s
+    }
+
+    @discardableResult
+    func saveCurrentWorkspacePreset(named rawName: String) -> Bool {
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else {
+            setBanner("请输入工作区预设名称", isError: true)
+            onStateChanged?()
+            return false
+        }
+        let openControllers = controllers.values
+            .filter { $0.info.kind != .popup }
+            .sorted { a, b in
+                let aDesk = a.windowId == SyntheticWindow.primaryDesktop
+                let bDesk = b.windowId == SyntheticWindow.primaryDesktop
+                if aDesk != bDesk { return aDesk }
+                if a.info.processName != b.info.processName {
+                    return a.info.processName.localizedCaseInsensitiveCompare(b.info.processName) == .orderedAscending
+                }
+                return a.info.title.localizedCaseInsensitiveCompare(b.info.title) == .orderedAscending
+            }
+        var entries: [WorkspacePresetEntry] = []
+        for wc in openControllers {
+            guard let layout = wc.snapshotLayout() else { continue }
+            let isDesktop = wc.windowId == SyntheticWindow.primaryDesktop
+            entries.append(WorkspacePresetEntry(
+                isDesktop: isDesktop,
+                processName: isDesktop ? "" : wc.info.processName,
+                titleHint: isDesktop ? "" : wc.info.title,
+                layout: layout
+            ))
+        }
+        guard !entries.isEmpty else {
+            setBanner("当前没有正在投射的 Windows 窗口可保存为布局预设", isError: true)
+            onStateChanged?()
+            return false
+        }
+        var s = settings
+        if let idx = s.workspacePresets.firstIndex(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
+            s.workspacePresets[idx].name = name
+            s.workspacePresets[idx].entries = entries
+        } else {
+            s.workspacePresets.append(WorkspacePreset(
+                id: UUID().uuidString.lowercased(),
+                name: name,
+                entries: entries
+            ))
+        }
+        settings = s
+        setBanner("✓ 已保存工作区布局「\(name)」（共 \(entries.count) 个窗口）", isError: false)
+        onStateChanged?()
+        return true
+    }
+
+    func applyWorkspacePreset(id: String) {
+        guard case .connected = connectionState else {
+            setBanner("请先连接 Windows 主机再恢复工作区布局", isError: true)
+            onStateChanged?()
+            return
+        }
+        guard let preset = settings.workspacePresets.first(where: { $0.id == id }) else { return }
+        var matchedIds = Set<UInt64>()
+        var restoredCount = 0
+        var missingCount = 0
+        var audioMuteChanged = false
+
+        for entry in preset.entries {
+            if entry.isDesktop {
+                if let existing = controllers[SyntheticWindow.primaryDesktop] {
+                    existing.applySavedLayout(entry.layout)
+                    existing.present(owner: nil)
+                    if syncMuteState(windowId: SyntheticWindow.primaryDesktop, muted: entry.layout.isAudioMuted) {
+                        audioMuteChanged = true
+                    }
+                } else {
+                    pendingPresetLayouts["__desktop__"] = entry.layout
+                    toggleDesktopView()
+                }
+                restoredCount += 1
+                continue
+            }
+            let exact = availableWindows.first {
+                !matchedIds.contains($0.windowId)
+                    && $0.processName.caseInsensitiveCompare(entry.processName) == .orderedSame
+                    && $0.title == entry.titleHint
+            }
+            let byProc = exact ?? availableWindows.first {
+                !matchedIds.contains($0.windowId)
+                    && !entry.processName.isEmpty
+                    && $0.processName.caseInsensitiveCompare(entry.processName) == .orderedSame
+            }
+            guard let target = byProc else {
+                missingCount += 1
+                continue
+            }
+            matchedIds.insert(target.windowId)
+            restoredCount += 1
+            if let existing = controllers[target.windowId] {
+                existing.applySavedLayout(entry.layout)
+                existing.present(owner: nil)
+                if syncMuteState(windowId: target.windowId, muted: entry.layout.isAudioMuted) {
+                    audioMuteChanged = true
+                }
+            } else {
+                if let key = Self.layoutKey(for: target) {
+                    pendingPresetLayouts[key] = entry.layout
+                }
+                subscribeWindow(target)
+            }
+        }
+        if audioMuteChanged && settings.audioEnabled {
+            applyAudioSetting()
+        }
+        if missingCount > 0 {
+            setBanner("已恢复工作区「\(preset.name)」：\(restoredCount) 个窗口就绪，\(missingCount) 个未在 Windows 运行", isError: false)
+        } else {
+            setBanner("✓ 已恢复工作区「\(preset.name)」（\(restoredCount) 个窗口）", isError: false)
+        }
+        onStateChanged?()
+    }
+
+    private func syncMuteState(windowId: UInt64, muted: Bool) -> Bool {
+        if muted {
+            return mutedWindowIds.insert(windowId).inserted
+        } else {
+            return mutedWindowIds.remove(windowId) != nil
+        }
+    }
+
+    func deleteWorkspacePreset(id: String) {
+        var s = settings
+        guard let idx = s.workspacePresets.firstIndex(where: { $0.id == id }) else { return }
+        let removed = s.workspacePresets.remove(at: idx)
+        settings = s
+        setBanner("已删除工作区布局「\(removed.name)」", isError: false)
+        onStateChanged?()
+    }
+
+    func clearSavedWindowLayouts() {
+        var s = settings
+        let count = s.savedWindowLayouts.count
+        s.savedWindowLayouts.removeAll()
+        settings = s
+        setBanner("已清除 \(count) 条已记忆的窗口位置记录", isError: false)
+        onStateChanged?()
     }
 
     func requestKeyFrameForActiveWindow() {
@@ -1762,6 +2052,7 @@ final class AppState {
         wc.onToggleHud = { [weak self] in self?.togglePerformanceHud() }
         wc.onToggleMuteWindow = { [weak self] id in self?.toggleMute(windowId: id) }
         wc.onPinOnTopChanged = { [weak self] in self?.onStateChanged?() }
+        wc.onLayoutChanged = { [weak self] id in self?.recordWindowLayout(for: id) }
         wc.onPullClipboardFiles = { [weak self] in self?.pullClipboardFilesToPasteboard(isAuto: false) }
         wc.onFilesDropped = { [weak self] winId, urls in self?.sendDroppedFiles(urls, toWindowId: winId) }
 
@@ -1775,6 +2066,16 @@ final class AppState {
             }
         }
         wc.present(owner: ownerController)
+        if let layoutKey = Self.layoutKey(for: info),
+           let savedLayout = pendingPresetLayouts.removeValue(forKey: layoutKey) ?? settings.savedWindowLayouts[layoutKey] {
+            wc.applySavedLayout(savedLayout)
+            if savedLayout.isAudioMuted && !mutedWindowIds.contains(info.windowId) {
+                mutedWindowIds.insert(info.windowId)
+                if settings.audioEnabled {
+                    applyAudioSetting()
+                }
+            }
+        }
         wc.updateHudVisibility()
         if info.kind == .normal && isAutoGameLockEnabled(forProcess: info.processName) {
             wc.setPointerLock(true)

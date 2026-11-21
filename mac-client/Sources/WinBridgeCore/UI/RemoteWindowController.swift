@@ -36,6 +36,7 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
     var onToggleHud: (() -> Void)?
     var onToggleMuteWindow: ((UInt64) -> Void)?
     var onPinOnTopChanged: (() -> Void)?
+    var onLayoutChanged: ((UInt64) -> Void)?
     var onPullClipboardFiles: (() -> Void)?
     var onFilesDropped: ((UInt64, [URL]) -> Void)?
     var cmdMapsToCtrl: () -> Bool = { true }
@@ -54,6 +55,7 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
     private var localResizeSeq: UInt32 = 0
     private var lastResizeSentAt: Date?
     private var resizeDebounceTimer: Timer?
+    private var layoutSaveTimer: Timer?
     private var lastCloseAttemptAt: Date?
     private var allowImmediateClose = false
     private var lastFrameSize: (UInt16, UInt16)?
@@ -416,22 +418,25 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func togglePinOnTop() {
-        setPinnedOnTop(!isPinnedOnTop)
+        setPinnedOnTop(!isPinnedOnTop, silent: false)
     }
 
-    func setPinnedOnTop(_ pinned: Bool) {
+    func setPinnedOnTop(_ pinned: Bool, silent: Bool = false) {
         guard info.kind != .popup, let window else { return }
         guard pinned != isPinnedOnTop else { return }
         isPinnedOnTop = pinned
         // Keep floating window pinned on the current macOS Desktop/Space only (do not add .canJoinAllSpaces).
         window.level = pinned ? .floating : .normal
         updateWindowTitle()
-        showToast(
-            pinned ? "📌 窗口已置顶（当前桌面）" : "窗口已取消置顶",
-            style: .progress,
-            autoHideSeconds: 1.8
-        )
+        if !silent {
+            showToast(
+                pinned ? "📌 窗口已置顶（当前桌面）" : "窗口已取消置顶",
+                style: .progress,
+                autoHideSeconds: 1.8
+            )
+        }
         onPinOnTopChanged?()
+        onLayoutChanged?(windowId)
     }
 
     func setAudioMuted(_ muted: Bool) {
@@ -439,6 +444,37 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
         guard muted != isAudioMuted else { return }
         isAudioMuted = muted
         updateWindowTitle()
+        onLayoutChanged?(windowId)
+    }
+
+    func snapshotLayout() -> SavedWindowLayout? {
+        guard info.kind != .popup, let window else { return nil }
+        return SavedWindowLayout(
+            rect: window.frame,
+            isPinnedOnTop: isPinnedOnTop,
+            isAudioMuted: isAudioMuted
+        )
+    }
+
+    func applySavedLayout(_ layout: SavedWindowLayout) {
+        guard info.kind != .popup, let window else { return }
+        let clamped = SavedWindowLayout.clampToActiveScreens(layout.rect)
+        isApplyingRemoteGeometry = true
+        window.setFrame(clamped, display: true)
+        isApplyingRemoteGeometry = false
+        setPinnedOnTop(layout.isPinnedOnTop, silent: true)
+        setAudioMuted(layout.isAudioMuted)
+    }
+
+    private func scheduleLayoutSave() {
+        guard info.kind != .popup else { return }
+        layoutSaveTimer?.invalidate()
+        layoutSaveTimer = Timer.scheduledTimer(withTimeInterval: 0.35, repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.onLayoutChanged?(self.windowId)
+            }
+        }
     }
 
     private func updateWindowTitle() {
@@ -468,6 +504,8 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
     func forceCloseLocally() {
         resizeDebounceTimer?.invalidate()
         resizeDebounceTimer = nil
+        layoutSaveTimer?.invalidate()
+        layoutSaveTimer = nil
         hudTimer?.invalidate()
         hudTimer = nil
         unlockPointerIfNeeded()
@@ -507,6 +545,7 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
     func windowDidResize(_ notification: Notification) {
         guard !isApplyingRemoteGeometry, info.kind != .popup else { return }
         onOwnerMovedOrResized?(windowId)
+        scheduleLayoutSave()
         if !isDesktop && syncWindowResize() {
             scheduleDebouncedResize()
         }
@@ -515,6 +554,7 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
     func windowDidMove(_ notification: Notification) {
         guard !isApplyingRemoteGeometry, info.kind != .popup else { return }
         onOwnerMovedOrResized?(windowId)
+        scheduleLayoutSave()
     }
 
     func windowDidEndLiveResize(_ notification: Notification) {
@@ -522,6 +562,7 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
         guard !isApplyingRemoteGeometry, info.kind != .popup else { return }
         resizeDebounceTimer?.invalidate()
         resizeDebounceTimer = nil
+        scheduleLayoutSave()
         if !isDesktop && syncWindowResize() {
             sendCurrentSizeToHost()
         }

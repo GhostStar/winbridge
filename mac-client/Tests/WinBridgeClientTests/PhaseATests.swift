@@ -37,6 +37,7 @@ struct PhaseATests {
         let parsed = PairingCode.parse(raw)
         #expect(parsed == ParsedPairingCode(
             host: "192.168.1.10",
+            fallbackHost: nil,
             port: 9876,
             token: "tok+1/2",
             fingerprint: "AA:BB:CC",

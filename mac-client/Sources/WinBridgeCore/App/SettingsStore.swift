@@ -102,17 +102,53 @@ struct HostProfile: Codable, Equatable, Sendable {
     var id: String
     var name: String
     var host: String
+    var fallbackHost: String
     var port: UInt16
     var useTls: Bool
     var macAddress: String
+
+    init(
+        id: String,
+        name: String,
+        host: String,
+        fallbackHost: String = "",
+        port: UInt16,
+        useTls: Bool,
+        macAddress: String
+    ) {
+        self.id = id
+        self.name = name
+        self.host = host
+        self.fallbackHost = fallbackHost
+        self.port = port
+        self.useTls = useTls
+        self.macAddress = macAddress
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, host, fallbackHost, port, useTls, macAddress
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        host = try c.decode(String.self, forKey: .host)
+        fallbackHost = try c.decodeIfPresent(String.self, forKey: .fallbackHost) ?? ""
+        port = try c.decode(UInt16.self, forKey: .port)
+        useTls = try c.decode(Bool.self, forKey: .useTls)
+        macAddress = try c.decodeIfPresent(String.self, forKey: .macAddress) ?? ""
+    }
 }
 
 struct ClientSettings {
     var host: String
+    var fallbackHost: String
     var port: UInt16
     var authToken: String
     var useTls: Bool
     var transportPreference: TransportPreference
+    var autoWanOptimize: Bool
     var macAddress: String
     var hostProfiles: [HostProfile]
     var selectedHostProfileId: String
@@ -141,6 +177,8 @@ struct ClientSettings {
     var appCaptureModes: [String: CaptureMode]
     var pinnedAppIds: [String]
     var shortcuts: ShortcutBindings
+    var savedWindowLayouts: [String: SavedWindowLayout]
+    var workspacePresets: [WorkspacePreset]
 }
 
 enum SettingsStore {
@@ -151,6 +189,7 @@ enum SettingsStore {
 
     static func load() -> ClientSettings {
         var host = defaults.string(forKey: "winbridge.host") ?? "192.168.1.100"
+        var fallbackHost = defaults.string(forKey: "winbridge.fallbackHost") ?? ""
         let portInt = defaults.integer(forKey: "winbridge.port")
         var port = (portInt > 0 && portInt <= 65535) ? UInt16(portInt) : 9876
         var useTls = defaults.object(forKey: "winbridge.useTls") as? Bool ?? true
@@ -170,6 +209,7 @@ enum SettingsStore {
                     id: KeychainStore.defaultAccount,
                     name: defaultName,
                     host: host,
+                    fallbackHost: fallbackHost,
                     port: port,
                     useTls: useTls,
                     macAddress: macAddress
@@ -178,6 +218,7 @@ enum SettingsStore {
             selectedProfileId = KeychainStore.defaultAccount
         } else if let selected = hostProfiles.first(where: { $0.id == selectedProfileId }) {
             host = selected.host
+            fallbackHost = selected.fallbackHost
             port = selected.port
             useTls = selected.useTls
             macAddress = selected.macAddress
@@ -185,6 +226,7 @@ enum SettingsStore {
             let first = hostProfiles[0]
             selectedProfileId = first.id
             host = first.host
+            fallbackHost = first.fallbackHost
             port = first.port
             useTls = first.useTls
             macAddress = first.macAddress
@@ -213,6 +255,7 @@ enum SettingsStore {
         let trustedFingerprints = defaults.dictionary(forKey: "winbridge.trustedFingerprints") as? [String: String] ?? [:]
         let transportRaw = defaults.string(forKey: "winbridge.transport") ?? TransportPreference.auto.rawValue
         let transportPreference = TransportPreference(rawValue: transportRaw) ?? .auto
+        let autoWanOptimize = defaults.object(forKey: "winbridge.autoWanOptimize") as? Bool ?? true
         let autoReconnect = defaults.object(forKey: "winbridge.autoReconnect") as? Bool ?? true
         let showPerformanceHud = defaults.object(forKey: "winbridge.showPerformanceHud") as? Bool ?? false
         let suppressInactiveHover = defaults.object(forKey: "winbridge.suppressInactiveHover") as? Bool ?? false
@@ -270,13 +313,29 @@ enum SettingsStore {
         } else {
             shortcuts = .defaults
         }
+        let savedWindowLayouts: [String: SavedWindowLayout]
+        if let rawLayouts = defaults.data(forKey: "winbridge.savedWindowLayouts"),
+           let decoded = try? JSONDecoder().decode([String: SavedWindowLayout].self, from: rawLayouts) {
+            savedWindowLayouts = decoded
+        } else {
+            savedWindowLayouts = [:]
+        }
+        let workspacePresets: [WorkspacePreset]
+        if let rawPresets = defaults.data(forKey: "winbridge.workspacePresets"),
+           let decoded = try? JSONDecoder().decode([WorkspacePreset].self, from: rawPresets) {
+            workspacePresets = decoded
+        } else {
+            workspacePresets = []
+        }
 
         return ClientSettings(
             host: host,
+            fallbackHost: fallbackHost,
             port: port,
             authToken: token,
             useTls: useTls,
             transportPreference: transportPreference,
+            autoWanOptimize: autoWanOptimize,
             macAddress: macAddress,
             hostProfiles: hostProfiles,
             selectedHostProfileId: selectedProfileId,
@@ -304,12 +363,15 @@ enum SettingsStore {
             processAutoGameLock: procAutoLock,
             appCaptureModes: appModes,
             pinnedAppIds: pinned,
-            shortcuts: shortcuts
+            shortcuts: shortcuts,
+            savedWindowLayouts: savedWindowLayouts,
+            workspacePresets: workspacePresets
         )
     }
 
     static func save(_ s: ClientSettings) {
         defaults.set(s.host, forKey: "winbridge.host")
+        defaults.set(s.fallbackHost, forKey: "winbridge.fallbackHost")
         defaults.set(Int(s.port), forKey: "winbridge.port")
         defaults.set(s.macAddress, forKey: "winbridge.macAddress")
         defaults.set(s.selectedHostProfileId, forKey: selectedProfileKey)
@@ -327,6 +389,7 @@ enum SettingsStore {
         }
         defaults.set(s.useTls, forKey: "winbridge.useTls")
         defaults.set(s.transportPreference.rawValue, forKey: "winbridge.transport")
+        defaults.set(s.autoWanOptimize, forKey: "winbridge.autoWanOptimize")
         defaults.set(s.trustedFingerprints, forKey: "winbridge.trustedFingerprints")
         defaults.set(s.autoReconnect, forKey: "winbridge.autoReconnect")
         defaults.set(s.showPerformanceHud, forKey: "winbridge.showPerformanceHud")
@@ -353,6 +416,12 @@ enum SettingsStore {
         defaults.set(s.pinnedAppIds, forKey: "winbridge.pinnedAppIds")
         if let encodedShortcuts = try? JSONEncoder().encode(s.shortcuts) {
             defaults.set(encodedShortcuts, forKey: "winbridge.shortcuts")
+        }
+        if let encodedLayouts = try? JSONEncoder().encode(s.savedWindowLayouts) {
+            defaults.set(encodedLayouts, forKey: "winbridge.savedWindowLayouts")
+        }
+        if let encodedPresets = try? JSONEncoder().encode(s.workspacePresets) {
+            defaults.set(encodedPresets, forKey: "winbridge.workspacePresets")
         }
     }
 }

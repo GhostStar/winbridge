@@ -9,6 +9,7 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
     private let saveProfileButton = NSButton(title: "另存配置", target: nil, action: nil)
     private let deleteProfileButton = NSButton(title: "删除", target: nil, action: nil)
     private let pastePairingButton = NSButton(title: "粘贴配对码", target: nil, action: nil)
+    private let fallbackHostField = NSTextField()
     private let macField = NSTextField()
     private let wolButton = NSButton(title: "唤醒并连接", target: nil, action: nil)
 
@@ -20,6 +21,7 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
     private let connectButton = NSButton(title: "连接", target: nil, action: nil)
     private var lastSyncedProfileId: String = ""
     private var lastSyncedMac: String = ""
+    private var lastSyncedFallbackHost: String = ""
 
     private let cmdCtrlCheck = NSButton(checkboxWithTitle: "Cmd → Ctrl", target: nil, action: nil)
     private let clipboardCheck = NSButton(checkboxWithTitle: "剪贴板同步", target: nil, action: nil)
@@ -55,13 +57,13 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
     init(state: AppState) {
         self.state = state
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 880, height: 590),
+            contentRect: NSRect(x: 0, y: 0, width: 920, height: 590),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = "WinBridge — Windows 窗口投射"
-        window.minSize = NSSize(width: 800, height: 480)
+        window.minSize = NSSize(width: 860, height: 480)
         window.isReleasedWhenClosed = false
         window.center()
         super.init(window: window)
@@ -81,18 +83,18 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         root.translatesAutoresizingMaskIntoConstraints = false
         window.contentView = root
 
-        // --- Row 0: Multi-Host Profiles, Pairing Code & Wake-on-LAN ---
+        // --- Row 0: Multi-Host Profiles, Pairing Code, Fallback/Tailscale & Wake-on-LAN ---
         profilePopup.controlSize = .small
-        profilePopup.widthAnchor.constraint(equalToConstant: 152).isActive = true
+        profilePopup.widthAnchor.constraint(equalToConstant: 132).isActive = true
         profilePopup.target = self
         profilePopup.action = #selector(profilePicked)
-        profilePopup.toolTip = "切换已保存的 Windows 主机配置（每台主机独立保存 Token 与 MAC）"
+        profilePopup.toolTip = "切换已保存的 Windows 主机配置（每台主机独立保存主/备用地址、Token 与 MAC）"
 
         saveProfileButton.bezelStyle = .rounded
         saveProfileButton.controlSize = .small
         saveProfileButton.target = self
         saveProfileButton.action = #selector(saveNewProfileClicked)
-        saveProfileButton.toolTip = "将当前主机地址、Token 与 MAC 另存为一个新的配置项"
+        saveProfileButton.toolTip = "将当前主机地址、备用地址、Token 与 MAC 另存为一个新的配置项"
 
         deleteProfileButton.bezelStyle = .rounded
         deleteProfileButton.controlSize = .small
@@ -108,10 +110,16 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         pastePairingButton.action = #selector(pastePairingCodeClicked)
         pastePairingButton.toolTip = "从剪贴板或对话框导入 Windows 端 --print-pairing-code 生成的 winbridge:// 配对码"
 
+        fallbackHostField.controlSize = .small
+        fallbackHostField.font = .monospacedSystemFont(ofSize: 11.5, weight: .regular)
+        fallbackHostField.placeholderString = "备用/Tailscale IP"
+        fallbackHostField.widthAnchor.constraint(equalToConstant: 134).isActive = true
+        fallbackHostField.toolTip = "局域网主地址不可达时自动秒切此备用地址（如 Tailscale 100.x.x.x / 公网域名），并共享 TLS 指纹与自动开启弱网优化"
+
         macField.controlSize = .small
         macField.font = .monospacedSystemFont(ofSize: 11.5, weight: .regular)
         macField.placeholderString = "自动获取 MAC (WoL)"
-        macField.widthAnchor.constraint(equalToConstant: 138).isActive = true
+        macField.widthAnchor.constraint(equalToConstant: 126).isActive = true
         macField.toolTip = "Windows 主机有线/无线网卡 MAC 地址：首次连接后自动获取，用于远程唤醒"
 
         wolButton.bezelStyle = .rounded
@@ -132,6 +140,8 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
             deleteProfileButton,
             pastePairingButton,
             profileSpacer,
+            NSTextField(labelWithString: "备用:"),
+            fallbackHostField,
             NSTextField(labelWithString: "MAC:"),
             macField,
             wolButton,
@@ -446,11 +456,13 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
 
     private func loadFromSettings() {
         hostField.stringValue = state.settings.host
+        fallbackHostField.stringValue = state.settings.fallbackHost
         portField.stringValue = String(state.settings.port)
         tokenField.stringValue = state.settings.authToken
         macField.stringValue = state.settings.macAddress
         lastSyncedProfileId = state.settings.selectedHostProfileId
         lastSyncedMac = state.settings.macAddress
+        lastSyncedFallbackHost = state.settings.fallbackHost
         rebuildProfilesMenu()
         if let idx = CodecPreference.allCases.firstIndex(of: state.settings.codecPreference) {
             codecPopup.selectItem(at: idx)
@@ -478,6 +490,8 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
     private func persistInputsToSettings() {
         var s = state.settings
         s.host = hostField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        s.fallbackHost = fallbackHostField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        lastSyncedFallbackHost = s.fallbackHost
         if let p = UInt16(portField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)), p > 0 {
             s.port = p
         }
@@ -569,20 +583,29 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         rebuildDiscoveredHostsMenu()
         if state.settings.selectedHostProfileId != lastSyncedProfileId {
             hostField.stringValue = state.settings.host
+            fallbackHostField.stringValue = state.settings.fallbackHost
             portField.stringValue = String(state.settings.port)
             tokenField.stringValue = state.settings.authToken
             macField.stringValue = state.settings.macAddress
             lastSyncedProfileId = state.settings.selectedHostProfileId
             lastSyncedMac = state.settings.macAddress
-        } else if state.settings.macAddress != lastSyncedMac {
-            macField.stringValue = state.settings.macAddress
-            lastSyncedMac = state.settings.macAddress
+            lastSyncedFallbackHost = state.settings.fallbackHost
+        } else {
+            if state.settings.macAddress != lastSyncedMac {
+                macField.stringValue = state.settings.macAddress
+                lastSyncedMac = state.settings.macAddress
+            }
+            if state.settings.fallbackHost != lastSyncedFallbackHost {
+                fallbackHostField.stringValue = state.settings.fallbackHost
+                lastSyncedFallbackHost = state.settings.fallbackHost
+            }
         }
         let isDisconnectedIdle = state.connectionState == .disconnected && !state.isReconnecting
         profilePopup.isEnabled = isDisconnectedIdle
         saveProfileButton.isEnabled = isDisconnectedIdle
         deleteProfileButton.isEnabled = isDisconnectedIdle && state.settings.hostProfiles.count > 1
         pastePairingButton.isEnabled = isDisconnectedIdle
+        fallbackHostField.isEnabled = isDisconnectedIdle
         macField.isEnabled = isDisconnectedIdle
         wolButton.isEnabled = isDisconnectedIdle
         switch state.connectionState {
@@ -630,7 +653,9 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
             desktopButton.isEnabled = true
             desktopButton.title = state.isDesktopOpen ? "关闭桌面窗口" : "查看完整桌面"
             let transportTag = state.activeTransport.map { " · \($0.rawValue)" } ?? ""
-            statusLabel.stringValue = "● \(hostName)（\(codec.displayName)\(transportTag)）"
+            let fallbackTag = state.connectedViaFallback ? " · 备用" : ""
+            let wanTag = state.wanOptimizationActive ? " · WAN" : ""
+            statusLabel.stringValue = "● \(hostName)（\(codec.displayName)\(transportTag)\(fallbackTag)\(wanTag)）"
             statusLabel.textColor = .systemGreen
             if let rtt = state.rttMs {
                 rttLabel.stringValue = String(format: "%.1f ms", rtt)

@@ -285,11 +285,13 @@ private final class BufferedNWStream: @unchecked Sendable {
 
 struct ConnectionConfig: Sendable {
     var host: String
+    var fallbackHost: String = ""
     var port: UInt16
     var authToken: String
     var useTls: Bool = true
     var transport: TransportPreference = .auto
     var expectedFingerprint: String? = nil
+    var fallbackExpectedFingerprint: String? = nil
     var clientName: String
     var displayScale: Float
     var supportedCodecs: [VideoCodec]
@@ -301,6 +303,8 @@ struct ConnectOutcome: Sendable {
     let isFirstTrust: Bool
     let transport: ActiveTransport
     let fellBackToTcp: Bool
+    let connectedHost: String
+    let usedFallbackHost: Bool
 }
 
 final class WinBridgeConnection: @unchecked Sendable {
@@ -349,26 +353,112 @@ final class WinBridgeConnection: @unchecked Sendable {
         return true
     }
 
+    static func shouldFailoverToFallbackHost(
+        primaryHost: String,
+        fallbackHost: String,
+        error: Error
+    ) -> Bool {
+        let fb = fallbackHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        let primary = primaryHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !fb.isEmpty, fb.caseInsensitiveCompare(primary) != .orderedSame else {
+            return false
+        }
+        if let ce = error as? ConnectionError {
+            switch ce {
+            case .handshakeRejected, .certificateMismatch, .localNetworkProhibited:
+                return false
+            default:
+                return true
+            }
+        }
+        return true
+    }
+
     func connect(config: ConnectionConfig) async throws -> ConnectOutcome {
-        if config.useTls && config.transport != .tcp {
+        let primary = config.host.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fallback = config.fallbackHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasFallback = !fallback.isEmpty && fallback.caseInsensitiveCompare(primary) != .orderedSame
+
+        do {
+            return try await connectHost(
+                host: primary,
+                expectedFingerprint: config.expectedFingerprint,
+                config: config,
+                usedFallbackHost: false,
+                fastTimeout: hasFallback
+            )
+        } catch {
+            cleanupResourcesWithoutNotifying()
+            if Self.shouldFailoverToFallbackHost(primaryHost: primary, fallbackHost: fallback, error: error) {
+                ClientLogger.shared.info(
+                    "Primary host \(primary) unreachable (\(error.localizedDescription)); failing over to fallback host \(fallback)"
+                )
+                return try await connectHost(
+                    host: fallback,
+                    expectedFingerprint: config.fallbackExpectedFingerprint ?? config.expectedFingerprint,
+                    config: config,
+                    usedFallbackHost: true,
+                    fastTimeout: false
+                )
+            }
+            throw error
+        }
+    }
+
+    private func connectHost(
+        host: String,
+        expectedFingerprint: String?,
+        config: ConnectionConfig,
+        usedFallbackHost: Bool,
+        fastTimeout: Bool
+    ) async throws -> ConnectOutcome {
+        var hostConfig = config
+        hostConfig.host = host
+        hostConfig.expectedFingerprint = expectedFingerprint
+        let tcpTimeout = fastTimeout ? 2.5 : 8.0
+
+        if hostConfig.useTls && hostConfig.transport != .tcp {
             do {
-                let timeoutSecs = config.transport == .auto ? 2.5 : 8.0
-                return try await connectQUIC(config: config, timeoutSeconds: timeoutSecs)
+                let quicTimeout: Double
+                if hostConfig.transport == .auto {
+                    quicTimeout = fastTimeout ? 1.8 : 2.5
+                } else {
+                    quicTimeout = fastTimeout ? 3.0 : 8.0
+                }
+                return try await connectQUIC(
+                    config: hostConfig,
+                    timeoutSeconds: quicTimeout,
+                    usedFallbackHost: usedFallbackHost
+                )
             } catch {
                 cleanupResourcesWithoutNotifying()
-                if Self.shouldFallbackToTCP(transport: config.transport, error: error) {
+                if Self.shouldFallbackToTCP(transport: hostConfig.transport, error: error) {
                     ClientLogger.shared.info(
-                        "QUIC unavailable (\(error.localizedDescription)); falling back to TCP+TLS"
+                        "QUIC unavailable on \(host) (\(error.localizedDescription)); falling back to TCP+TLS"
                     )
-                    return try await connectTCP(config: config, fellBackFromQuic: true)
+                    return try await connectTCP(
+                        config: hostConfig,
+                        timeoutSeconds: tcpTimeout,
+                        fellBackFromQuic: true,
+                        usedFallbackHost: usedFallbackHost
+                    )
                 }
                 throw error
             }
         }
-        return try await connectTCP(config: config, fellBackFromQuic: false)
+        return try await connectTCP(
+            config: hostConfig,
+            timeoutSeconds: tcpTimeout,
+            fellBackFromQuic: false,
+            usedFallbackHost: usedFallbackHost
+        )
     }
 
-    private func connectQUIC(config: ConnectionConfig, timeoutSeconds: Double) async throws -> ConnectOutcome {
+    private func connectQUIC(
+        config: ConnectionConfig,
+        timeoutSeconds: Double,
+        usedFallbackHost: Bool
+    ) async throws -> ConnectOutcome {
         guard let nwPort = NWEndpoint.Port(rawValue: config.port) else {
             throw ConnectionError.invalidEndpoint(config.host, config.port)
         }
@@ -474,7 +564,9 @@ final class WinBridgeConnection: @unchecked Sendable {
             tlsFingerprint: verifyState.verifiedFingerprint,
             isFirstTrust: verifyState.isFirstTrust,
             transport: .quic,
-            fellBackToTcp: false
+            fellBackToTcp: false,
+            connectedHost: config.host,
+            usedFallbackHost: usedFallbackHost
         )
     }
 
@@ -593,7 +685,12 @@ final class WinBridgeConnection: @unchecked Sendable {
         streamTasksLock.unlock()
     }
 
-    private func connectTCP(config: ConnectionConfig, fellBackFromQuic: Bool) async throws -> ConnectOutcome {
+    private func connectTCP(
+        config: ConnectionConfig,
+        timeoutSeconds: Double,
+        fellBackFromQuic: Bool,
+        usedFallbackHost: Bool
+    ) async throws -> ConnectOutcome {
         let control = try BufferedNWStream(
             host: config.host,
             port: config.port,
@@ -601,7 +698,7 @@ final class WinBridgeConnection: @unchecked Sendable {
             useTls: config.useTls,
             expectedFingerprint: config.expectedFingerprint
         )
-        try await control.connect()
+        try await control.connect(timeoutSeconds: timeoutSeconds)
         self.controlStream = control
 
         // 1. Control preface + Hello
@@ -633,7 +730,7 @@ final class WinBridgeConnection: @unchecked Sendable {
             expectedFingerprint: control.verifiedFingerprint ?? config.expectedFingerprint
         )
         do {
-            try await media.connect()
+            try await media.connect(timeoutSeconds: timeoutSeconds)
             var bindPacket = Data(capacity: 24)
             bindPacket.append(WireConstants.mediaPreface)
             bindPacket.append(ack.sessionId)
@@ -662,7 +759,9 @@ final class WinBridgeConnection: @unchecked Sendable {
             tlsFingerprint: control.verifiedFingerprint,
             isFirstTrust: control.isFirstTrust,
             transport: .tcp,
-            fellBackToTcp: fellBackFromQuic
+            fellBackToTcp: fellBackFromQuic,
+            connectedHost: config.host,
+            usedFallbackHost: usedFallbackHost
         )
     }
 
