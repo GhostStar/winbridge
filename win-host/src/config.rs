@@ -16,6 +16,24 @@ pub enum CaptureMode {
     MonitorCrop,
 }
 
+fn display_mode(arg: &str) -> Result<(u32, u32), String> {
+    let (w, h) = arg
+        .split_once('x')
+        .or_else(|| arg.split_once('X'))
+        .or_else(|| arg.split_once('×'))
+        .ok_or_else(|| "expected WIDTHxHEIGHT, for example 2560x1440".to_owned())?;
+    let width: u32 = w
+        .parse()
+        .map_err(|_| "width is not an integer".to_owned())?;
+    let height: u32 = h
+        .parse()
+        .map_err(|_| "height is not an integer".to_owned())?;
+    if !(640..=7680).contains(&width) || !(480..=4320).contains(&height) {
+        return Err("mode must be between 640x480 and 7680x4320".to_owned());
+    }
+    Ok((width, height))
+}
+
 fn hwnd(arg: &str) -> Result<u64, String> {
     let value = match arg.strip_prefix("0x").or_else(|| arg.strip_prefix("0X")) {
         Some(hex) => u64::from_str_radix(hex, 16),
@@ -80,6 +98,10 @@ pub struct Config {
     pub capture_cursor: bool,
     #[arg(long, default_value = "info")]
     pub log_level: String,
+    /// If an indirect/virtual display adapter is already installed, switch it to this mode
+    /// at startup (for example 2560x1440). Does not install a driver.
+    #[arg(long, value_name = "WIDTHxHEIGHT", value_parser = display_mode)]
+    pub virtual_display: Option<(u32, u32)>,
     #[arg(long)]
     pub list_windows: bool,
     #[arg(long, value_parser = hwnd)]

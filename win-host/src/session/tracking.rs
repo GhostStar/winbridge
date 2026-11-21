@@ -35,6 +35,7 @@ impl Session {
             .iter()
             .filter(|(id, s)| {
                 **id != win32::DESKTOP_WINDOW_ID
+                    && !win32::is_monitor_id(**id)
                     && !by_id.get(id).is_some_and(|w| w.pid == s.info.pid)
             })
             .map(|(id, _)| *id)
