@@ -161,6 +161,7 @@ After the `WBRGMED\x01` + 16-byte `session_id` handshake returns `0x00`, Windows
   - **mDNS / Bonjour** LAN auto-discovery (`_winbridge._tcp.local.`), exponential-backoff auto-reconnect with window restoration.
   - **HEVC (`VIDEO_CODEC_HEVC_ANNEX_B = 2`)** hardware encode/decode and **Opus (`AUDIO_CODEC_OPUS = 11`)** 48 kHz stereo 20 ms low-bandwidth audio alongside PCM lossless (`10`).
   - **Smart 3D Game Relative Mouse Lock** (`MOUSE_EVENT_KIND_RELATIVE_MOVE = 5`), **Gamepad passthrough** (`GamepadState`), and **chunked Drag-and-Drop File Transfer** (`FileTransferStart` / `FileTransferChunk` / `FileTransferResult`).
+  - **Monitor list and virtual-display mode** (`ListMonitors` fields 28/29, `SetVirtualDisplay` field 46). Extra monitors use synthetic ids `0xFFFFFFFFFFFF0100+index`; `0xFFFFFFFFFFFF0001` stays the primary desktop. Setting a mode only calls `ChangeDisplaySettingsEx` on an adapter whose name already contains Virtual / Indirect / Idd / usbmmid / Parsec. No driver is bundled; if none is installed the host returns `DISPLAY_DISCONNECTED`.
 - **Future (v0.3+)**:
   - Optional **QUIC** transport (`quinn` + `NWProtocolQUIC`) for per-window stream multiplexing without head-of-line blocking on lossy Wi-Fi / WAN links.
   - Per-process WASAPI audio loopback (`ActivateAudioInterfaceAsync` on Win10 20348+ / Win11).
