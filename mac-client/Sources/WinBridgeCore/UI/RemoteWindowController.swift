@@ -6,6 +6,21 @@ private final class PopupPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+enum PerformanceHUDFormatter {
+    static func format(
+        codecName: String,
+        fps: Double,
+        mbps: Double,
+        rttMs: Double?,
+        width: UInt16,
+        height: UInt16
+    ) -> String {
+        let rttStr = rttMs.map { String(format: "%.1fms", $0) } ?? "--"
+        let dims = (width > 0 && height > 0) ? " · \(width)×\(height)" : ""
+        return String(format: "%@ · %.0f FPS · %.1f Mbps · RTT %@%@", codecName, fps, mbps, rttStr, dims)
+    }
+}
+
 @MainActor
 final class RemoteWindowController: NSWindowController, NSWindowDelegate {
     let windowId: UInt64
@@ -18,9 +33,14 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
     var onOwnerMovedOrResized: ((UInt64) -> Void)?
     var onRequestQuit: (() -> Void)?
     var onOpenManager: (() -> Void)?
+    var onToggleHud: (() -> Void)?
+    var onFilesDropped: ((UInt64, [URL]) -> Void)?
     var cmdMapsToCtrl: () -> Bool = { true }
     var syncWindowResize: () -> Bool = { false }
     var mouseSensitivity: () -> Float = { 1.0 }
+    var suppressInactiveHover: () -> Bool = { false }
+    var currentRttMs: () -> Double? = { nil }
+    var showPerformanceHud: () -> Bool = { false }
 
     private var baseTitle: String = ""
     private var isApplyingRemoteGeometry = false
@@ -31,6 +51,13 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
     private var lastCloseAttemptAt: Date?
     private var allowImmediateClose = false
     private var lastFrameSize: (UInt16, UInt16)?
+
+    // Rolling Performance HUD counters
+    private var hudTimer: Timer?
+    private var hudWindowStart = Date()
+    private var hudFramesInWindow: Int = 0
+    private var hudBytesInWindow: Int = 0
+    private var hudLastCodec: String = "—"
 
     init(info: WindowInfo, owner: RemoteWindowController?, syncWindowResize: @escaping () -> Bool) {
         self.windowId = info.windowId
@@ -93,9 +120,15 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
 
         remoteView.cmdMapsToCtrl = { [weak self] in self?.cmdMapsToCtrl() ?? true }
         remoteView.mouseSensitivity = { [weak self] in self?.mouseSensitivity() ?? 1.0 }
+        remoteView.suppressInactiveHover = { [weak self] in self?.suppressInactiveHover() ?? false }
         remoteView.onSendControl = { [weak self] payload in self?.onSendControl?(payload) }
         remoteView.onRequestQuit = { [weak self] in self?.onRequestQuit?() }
         remoteView.onOpenManager = { [weak self] in self?.onOpenManager?() }
+        remoteView.onToggleHud = { [weak self] in self?.onToggleHud?() }
+        remoteView.onFilesDropped = { [weak self] urls in
+            guard let self else { return }
+            self.onFilesDropped?(self.windowId, urls)
+        }
         remoteView.onGameLockStateChanged = { [weak self] _ in self?.updateWindowTitle() }
 
         updateResizeBehavior()
@@ -295,11 +328,62 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func handleMediaFrame(_ frame: MediaFrame) {
+        if !frame.header.flags.contains(.endOfStream) && !frame.payload.isEmpty {
+            hudFramesInWindow += 1
+            hudBytesInWindow += frame.payload.count
+            hudLastCodec = frame.header.codec.displayName
+        }
         decoder.decode(frame)
+    }
+
+    func updateHudVisibility() {
+        let visible = info.kind != .popup && showPerformanceHud()
+        remoteView.setHudVisible(visible)
+        if visible {
+            if hudTimer == nil {
+                hudWindowStart = Date()
+                hudFramesInWindow = 0
+                hudBytesInWindow = 0
+                hudTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+                    Task { @MainActor in
+                        self?.refreshHudStats()
+                    }
+                }
+            }
+            refreshHudStats()
+        } else {
+            hudTimer?.invalidate()
+            hudTimer = nil
+        }
+    }
+
+    private func refreshHudStats() {
+        let now = Date()
+        let elapsed = max(0.05, now.timeIntervalSince(hudWindowStart))
+        let fps = Double(hudFramesInWindow) / elapsed
+        let mbps = (Double(hudBytesInWindow) * 8.0) / (elapsed * 1_000_000.0)
+        hudWindowStart = now
+        hudFramesInWindow = 0
+        hudBytesInWindow = 0
+        let w = lastFrameSize?.0 ?? UInt16(min(info.width, UInt32(UInt16.max)))
+        let h = lastFrameSize?.1 ?? UInt16(min(info.height, UInt32(UInt16.max)))
+        remoteView.updateHudText(PerformanceHUDFormatter.format(
+            codecName: hudLastCodec,
+            fps: fps,
+            mbps: mbps,
+            rttMs: currentRttMs(),
+            width: w,
+            height: h
+        ))
     }
 
     func applyCursor(_ shape: CursorShape) {
         remoteView.applyCursorShape(shape)
+    }
+
+    func setPointerLock(_ enabled: Bool) {
+        guard info.kind != .popup else { return }
+        remoteView.setGameLockEnabled(enabled)
     }
 
     func togglePointerLock() {
@@ -328,6 +412,8 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
     func forceCloseLocally() {
         resizeDebounceTimer?.invalidate()
         resizeDebounceTimer = nil
+        hudTimer?.invalidate()
+        hudTimer = nil
         unlockPointerIfNeeded()
         remoteView.releaseAllHeldKeys()
         decoder.invalidate()

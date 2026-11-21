@@ -23,9 +23,12 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
     let windowId: UInt64
     var cmdMapsToCtrl: () -> Bool = { true }
     var mouseSensitivity: () -> Float = { 1.0 }
+    var suppressInactiveHover: () -> Bool = { false }
     var onSendControl: ((ControlMessage.Payload) -> Void)?
     var onRequestQuit: (() -> Void)?
     var onOpenManager: (() -> Void)?
+    var onToggleHud: (() -> Void)?
+    var onFilesDropped: (([URL]) -> Void)?
     var onGameLockStateChanged: ((GameLockState) -> Void)?
 
     private(set) var gameLockEnabled = false
@@ -35,6 +38,8 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
     private var pointerLockedAt: Date?
 
     private let videoLayer = CALayer()
+    private let hudContainer = NSView()
+    private let hudLabel = NSTextField(labelWithString: "")
     private var retainedFrame: DecodedImage?
     private var sourceSize: CGSize = .zero
     private var preserveAspectRatio: Bool = true
@@ -69,6 +74,47 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
         videoLayer.minificationFilter = .linear
         videoLayer.isOpaque = false
         layer?.addSublayer(videoLayer)
+
+        setupHudOverlay()
+        registerForDraggedTypes([.fileURL])
+    }
+
+    private func setupHudOverlay() {
+        hudContainer.wantsLayer = true
+        hudContainer.layer?.backgroundColor = NSColor(calibratedWhite: 0.06, alpha: 0.72).cgColor
+        hudContainer.layer?.cornerRadius = 6
+        hudContainer.layer?.borderWidth = 0.5
+        hudContainer.layer?.borderColor = NSColor(calibratedWhite: 1.0, alpha: 0.18).cgColor
+        hudContainer.translatesAutoresizingMaskIntoConstraints = false
+        hudContainer.isHidden = true
+
+        hudLabel.font = .monospacedSystemFont(ofSize: 11, weight: .medium)
+        hudLabel.textColor = NSColor(calibratedRed: 0.62, green: 0.98, blue: 0.72, alpha: 1.0)
+        hudLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        hudContainer.addSubview(hudLabel)
+        addSubview(hudContainer)
+        NSLayoutConstraint.activate([
+            hudLabel.leadingAnchor.constraint(equalTo: hudContainer.leadingAnchor, constant: 8),
+            hudLabel.trailingAnchor.constraint(equalTo: hudContainer.trailingAnchor, constant: -8),
+            hudLabel.topAnchor.constraint(equalTo: hudContainer.topAnchor, constant: 4),
+            hudLabel.bottomAnchor.constraint(equalTo: hudContainer.bottomAnchor, constant: -4),
+            hudContainer.topAnchor.constraint(equalTo: topAnchor, constant: 10),
+            hudContainer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+        ])
+    }
+
+    func setHudVisible(_ visible: Bool) {
+        hudContainer.isHidden = !visible
+    }
+
+    func updateHudText(_ text: String) {
+        hudLabel.stringValue = text
+    }
+
+    // Ensure HUD badge is strictly click-through and never steals mouse events from the remote app.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        bounds.contains(convert(point, from: superview)) ? self : nil
     }
 
     static func computeVideoRect(in bounds: NSRect, sourceSize: CGSize, preserveAspect: Bool) -> NSRect {
@@ -334,6 +380,9 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
         if gameLockState == .relativeLocked {
             sendRelativeMove(event: event)
         } else {
+            if suppressInactiveHover() && window?.isKeyWindow != true {
+                return
+            }
             confineCursorIfNeeded()
             sendMouse(event: event, kind: .move, button: .unspecified)
         }
@@ -505,6 +554,11 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
         // Cmd+Shift+L toggles Smart 3D Game Mouse Lock locally on the focused remote window.
         if flags == [.command, .shift], event.keyCode == UInt16(kVK_ANSI_L) {
             setGameLockEnabled(!gameLockEnabled)
+            return true
+        }
+        // Cmd+Shift+H toggles the Performance HUD overlay across remote windows.
+        if flags == [.command, .shift], event.keyCode == UInt16(kVK_ANSI_H) {
+            onToggleHud?()
             return true
         }
 
@@ -726,5 +780,42 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
         markedText = NSMutableAttributedString()
         markedRangeStorage = NSRange(location: NSNotFound, length: 0)
         selectedRangeStorage = NSRange(location: 0, length: 0)
+    }
+
+    // MARK: - Drag & Drop File Transfer (Mac -> Windows Downloads\WinBridge)
+
+    private func extractDroppedFileURLs(from info: NSDraggingInfo) -> [URL] {
+        guard let items = info.draggingPasteboard.readObjects(
+            forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]
+        ) as? [URL] else {
+            return []
+        }
+        return items.filter { url in
+            var isDir: ObjCBool = false
+            return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) && !isDir.boolValue
+        }
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        let urls = extractDroppedFileURLs(from: sender)
+        guard !urls.isEmpty else { return [] }
+        layer?.borderWidth = 2.5
+        layer?.borderColor = NSColor.controlAccentColor.cgColor
+        return .copy
+    }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        layer?.borderWidth = 0
+        layer?.borderColor = nil
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        layer?.borderWidth = 0
+        layer?.borderColor = nil
+        let urls = extractDroppedFileURLs(from: sender)
+        guard !urls.isEmpty else { return false }
+        onFilesDropped?(urls)
+        return true
     }
 }

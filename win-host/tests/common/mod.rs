@@ -33,6 +33,7 @@ impl Host {
             TOKEN,
             "--codec",
             codec,
+            "--no-discovery",
         ])
         .args(extra);
         let child = cmd

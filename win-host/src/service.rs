@@ -111,6 +111,9 @@ fn non_secret_worker_args(config: &Config) -> Vec<String> {
     if config.allow_insecure_no_auth {
         args.push("--allow-insecure-no-auth".into());
     }
+    if config.no_discovery {
+        args.push("--no-discovery".into());
+    }
     for cidr in &config.allow_cidr {
         args.push("--allow-cidr".into());
         args.push(cidr.clone());
@@ -154,6 +157,7 @@ pub fn install(config: &Config) -> Result<()> {
         no_tls: config.no_tls,
         tls_dir: config.tls_dir.clone(),
         allow_cidr: config.allow_cidr.clone(),
+        no_discovery: config.no_discovery,
         fps: config.fps,
         bitrate: config.bitrate,
         codec: config.codec,
@@ -189,6 +193,7 @@ pub fn install(config: &Config) -> Result<()> {
             no_tls: false,
             tls_dir: None,
             allow_cidr: Vec::new(),
+            no_discovery: effective.no_discovery,
             fps: effective.fps,
             bitrate: effective.bitrate,
             codec: effective.codec,

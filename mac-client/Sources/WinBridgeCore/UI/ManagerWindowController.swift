@@ -6,6 +6,7 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
     private let state: AppState
 
     private let hostField = NSTextField()
+    private let discoveredPopup = NSPopUpButton()
     private let portField = NSTextField()
     private let tokenField = NSSecureTextField()
     private let codecPopup = NSPopUpButton()
@@ -14,8 +15,11 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
     private let cmdCtrlCheck = NSButton(checkboxWithTitle: "Cmd → Ctrl", target: nil, action: nil)
     private let clipboardCheck = NSButton(checkboxWithTitle: "剪贴板同步", target: nil, action: nil)
     private let popupsCheck = NSButton(checkboxWithTitle: "追踪弹窗", target: nil, action: nil)
-    private let syncResizeCheck = NSButton(checkboxWithTitle: "同步缩放 Windows", target: nil, action: nil)
+    private let syncResizeCheck = NSButton(checkboxWithTitle: "同步缩放", target: nil, action: nil)
     private let tlsCheck = NSButton(checkboxWithTitle: "TLS 加密", target: nil, action: nil)
+    private let autoReconnectCheck = NSButton(checkboxWithTitle: "自动重连", target: nil, action: nil)
+    private let hudCheck = NSButton(checkboxWithTitle: "性能 HUD", target: nil, action: nil)
+    private let suppressHoverCheck = NSButton(checkboxWithTitle: "背景禁悬停", target: nil, action: nil)
     private let desktopButton = NSButton(title: "查看完整桌面", target: nil, action: nil)
 
     private let audioCheck = NSButton(checkboxWithTitle: "开启音频", target: nil, action: nil)
@@ -41,13 +45,13 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
     init(state: AppState) {
         self.state = state
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 780, height: 540),
+            contentRect: NSRect(x: 0, y: 0, width: 860, height: 560),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = "WinBridge — Windows 窗口投射"
-        window.minSize = NSSize(width: 700, height: 440)
+        window.minSize = NSSize(width: 780, height: 460)
         window.isReleasedWhenClosed = false
         window.center()
         super.init(window: window)
@@ -71,11 +75,19 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         hostField.placeholderString = "Windows IP (如 192.168.1.100)"
         hostField.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
-        portField.placeholderString = "9876"
-        portField.widthAnchor.constraint(equalToConstant: 64).isActive = true
+        discoveredPopup.pullsDown = true
+        discoveredPopup.controlSize = .regular
+        discoveredPopup.widthAnchor.constraint(equalToConstant: 112).isActive = true
+        discoveredPopup.target = self
+        discoveredPopup.action = #selector(discoveredHostPicked)
+        discoveredPopup.toolTip = "自动发现局域网内运行的 WinBridge Windows 主机 (mDNS/Bonjour)"
+        rebuildDiscoveredHostsMenu()
 
-        tokenField.placeholderString = "Token (开发模式可留空)"
-        tokenField.widthAnchor.constraint(equalToConstant: 140).isActive = true
+        portField.placeholderString = "9876"
+        portField.widthAnchor.constraint(equalToConstant: 58).isActive = true
+
+        tokenField.placeholderString = "Token (Keychain 保存)"
+        tokenField.widthAnchor.constraint(equalToConstant: 135).isActive = true
 
         for pref in CodecPreference.allCases {
             codecPopup.addItem(withTitle: pref.title)
@@ -88,11 +100,12 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         connectButton.keyEquivalent = "\r"
         connectButton.target = self
         connectButton.action = #selector(toggleConnect)
-        connectButton.widthAnchor.constraint(equalToConstant: 74).isActive = true
+        connectButton.widthAnchor.constraint(equalToConstant: 82).isActive = true
 
         let connRow = NSStackView(views: [
             NSTextField(labelWithString: "主机:"),
             hostField,
+            discoveredPopup,
             NSTextField(labelWithString: "端口:"),
             portField,
             tokenField,
@@ -116,6 +129,15 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         tlsCheck.target = self
         tlsCheck.action = #selector(settingsChanged)
         tlsCheck.toolTip = "使用 TLS 1.3 + TOFU 证书指纹锁定加密控制与媒体通道（需 Windows 端未开启 --no-tls）"
+        autoReconnectCheck.target = self
+        autoReconnectCheck.action = #selector(settingsChanged)
+        autoReconnectCheck.toolTip = "网络抖动或 Windows 唤醒断开时指数退避自动重连并恢复已打开窗口"
+        hudCheck.target = self
+        hudCheck.action = #selector(settingsChanged)
+        hudCheck.toolTip = "在远端窗口右上角显示实时 FPS / 码率 / RTT 性能浮层（快捷键 ⇧⌘H）"
+        suppressHoverCheck.target = self
+        suppressHoverCheck.action = #selector(settingsChanged)
+        suppressHoverCheck.toolTip = "多窗并行时，屏蔽非激活远端窗口上的鼠标悬停事件，避免误触背景窗口"
 
         desktopButton.bezelStyle = .rounded
         desktopButton.image = NSImage(systemSymbolName: "desktopcomputer", accessibilityDescription: nil)
@@ -127,7 +149,18 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         let optionsSpacer = NSView()
         optionsSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
-        let optionsRow = NSStackView(views: [cmdCtrlCheck, clipboardCheck, popupsCheck, syncResizeCheck, tlsCheck, optionsSpacer, desktopButton])
+        let optionsRow = NSStackView(views: [
+            cmdCtrlCheck,
+            clipboardCheck,
+            popupsCheck,
+            syncResizeCheck,
+            tlsCheck,
+            autoReconnectCheck,
+            hudCheck,
+            suppressHoverCheck,
+            optionsSpacer,
+            desktopButton,
+        ])
         optionsRow.orientation = .horizontal
         optionsRow.alignment = .centerY
         optionsRow.spacing = 10
@@ -343,6 +376,9 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         popupsCheck.state = state.settings.followPopups ? .on : .off
         syncResizeCheck.state = state.settings.syncWindowResize ? .on : .off
         tlsCheck.state = state.settings.useTls ? .on : .off
+        autoReconnectCheck.state = state.settings.autoReconnect ? .on : .off
+        hudCheck.state = state.settings.showPerformanceHud ? .on : .off
+        suppressHoverCheck.state = state.settings.suppressInactiveHover ? .on : .off
         audioCheck.state = state.settings.audioEnabled ? .on : .off
         volumeSlider.floatValue = state.settings.audioVolume
         volumeSlider.isEnabled = state.settings.audioEnabled
@@ -367,9 +403,15 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         s.followPopups = (popupsCheck.state == .on)
         s.syncWindowResize = (syncResizeCheck.state == .on)
         s.useTls = (tlsCheck.state == .on)
+        s.autoReconnect = (autoReconnectCheck.state == .on)
+        s.showPerformanceHud = (hudCheck.state == .on)
+        s.suppressInactiveHover = (suppressHoverCheck.state == .on)
         s.audioEnabled = (audioCheck.state == .on)
         s.audioVolume = volumeSlider.floatValue
         s.mouseSensitivity = sensSlider.floatValue
+        if let proc = state.activeRemoteProcessName()?.lowercased() {
+            s.processMouseSensitivity[proc] = s.mouseSensitivity
+        }
         volumeSlider.isEnabled = s.audioEnabled
         volumeLabel.stringValue = "\(Int(round(s.audioVolume * 100)))%"
         sensLabel.stringValue = String(format: "%.1fx", s.mouseSensitivity)
@@ -392,27 +434,47 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         }
     }
 
+    private func rebuildDiscoveredHostsMenu() {
+        discoveredPopup.removeAllItems()
+        let count = state.discoveredHosts.count
+        discoveredPopup.addItem(withTitle: count > 0 ? "发现主机 (\(count))" : "局域网扫描…")
+        if count == 0 {
+            let empty = NSMenuItem(title: "未发现 _winbridge._tcp 主机", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            discoveredPopup.menu?.addItem(empty)
+        } else {
+            for (idx, host) in state.discoveredHosts.enumerated() {
+                let item = NSMenuItem(title: host.displayLabel, action: nil, keyEquivalent: "")
+                item.tag = idx
+                discoveredPopup.menu?.addItem(item)
+            }
+        }
+    }
+
     func refreshUI() {
+        rebuildDiscoveredHostsMenu()
         switch state.connectionState {
         case .disconnected:
-            connectButton.title = "连接"
+            connectButton.title = state.isReconnecting ? "停止重连" : "连接"
             connectButton.isEnabled = true
-            hostField.isEnabled = true
-            portField.isEnabled = true
-            tokenField.isEnabled = true
-            codecPopup.isEnabled = true
-            tlsCheck.isEnabled = true
+            hostField.isEnabled = !state.isReconnecting
+            discoveredPopup.isEnabled = !state.isReconnecting
+            portField.isEnabled = !state.isReconnecting
+            tokenField.isEnabled = !state.isReconnecting
+            codecPopup.isEnabled = !state.isReconnecting
+            tlsCheck.isEnabled = !state.isReconnecting
             refreshButton.isEnabled = false
             desktopButton.isEnabled = false
             desktopButton.title = "查看完整桌面"
-            statusLabel.stringValue = "● 未连接"
-            statusLabel.textColor = .secondaryLabelColor
+            statusLabel.stringValue = state.isReconnecting ? "● 等待重连…" : "● 未连接"
+            statusLabel.textColor = state.isReconnecting ? .systemOrange : .secondaryLabelColor
             rttLabel.stringValue = ""
 
         case .connecting:
-            connectButton.title = "连接中"
-            connectButton.isEnabled = false
+            connectButton.title = "取消"
+            connectButton.isEnabled = true
             hostField.isEnabled = false
+            discoveredPopup.isEnabled = false
             portField.isEnabled = false
             tokenField.isEnabled = false
             codecPopup.isEnabled = false
@@ -427,6 +489,7 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
             connectButton.title = "断开"
             connectButton.isEnabled = true
             hostField.isEnabled = false
+            discoveredPopup.isEnabled = false
             portField.isEnabled = false
             tokenField.isEnabled = false
             codecPopup.isEnabled = false
@@ -443,6 +506,10 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
             }
         }
 
+        hudCheck.state = state.settings.showPerformanceHud ? .on : .off
+        autoReconnectCheck.state = state.settings.autoReconnect ? .on : .off
+        suppressHoverCheck.state = state.settings.suppressInactiveHover ? .on : .off
+        tlsCheck.state = state.settings.useTls ? .on : .off
         audioCheck.state = state.settings.audioEnabled ? .on : .off
         volumeSlider.floatValue = state.settings.audioVolume
         volumeSlider.isEnabled = state.settings.audioEnabled
@@ -467,10 +534,25 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         persistInputsToSettings()
         switch state.connectionState {
         case .disconnected:
-            state.connect()
+            if state.isReconnecting {
+                state.disconnect()
+            } else {
+                state.connect()
+            }
         case .connected, .connecting:
             state.disconnect()
         }
+    }
+
+    @objc private func discoveredHostPicked() {
+        guard let item = discoveredPopup.selectedItem else { return }
+        let idx = item.tag
+        guard idx >= 0 && idx < state.discoveredHosts.count else { return }
+        let host = state.discoveredHosts[idx]
+        hostField.stringValue = host.host
+        portField.stringValue = String(host.port)
+        tlsCheck.state = host.tlsEnabled ? .on : .off
+        state.selectDiscoveredHost(host)
     }
 
     @objc private func settingsChanged() {

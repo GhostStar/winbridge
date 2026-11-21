@@ -19,6 +19,7 @@ let package = Package(
                 .linkedFramework("CoreGraphics"),
                 .linkedFramework("CoreMedia"),
                 .linkedFramework("CoreVideo"),
+                .linkedFramework("GameController"),
                 .linkedFramework("IOSurface"),
                 .linkedFramework("Network"),
                 .linkedFramework("QuartzCore"),

@@ -38,18 +38,40 @@ cat > "$APP_DIR/Contents/Info.plist" << 'EOF'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>0.2.0</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>2</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSLocalNetworkUsageDescription</key>
-    <string>WinBridge 需要访问局域网以连接您的 Windows 主机并投射应用窗口。</string>
+    <string>WinBridge 需要访问局域网以发现并连接您的 Windows 主机，投射应用窗口。</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_winbridge._tcp</string>
+    </array>
 </dict>
 </plist>
 EOF
+
+# Sign with a stable local certificate when available so macOS 15/26 preserves Local Network &
+# Keychain permissions across rebuilds (preventing CDHash resets on ad-hoc binaries).
+SIGN_IDENTITY="${WINBRIDGE_SIGN_IDENTITY:-}"
+if [[ -z "$SIGN_IDENTITY" ]] && command -v security >/dev/null 2>&1; then
+    if security find-identity -v -p codesigning 2>/dev/null | grep -Fq '"WinBridge Local Dev"'; then
+        SIGN_IDENTITY="WinBridge Local Dev"
+    fi
+fi
+
+if [[ -n "$SIGN_IDENTITY" ]]; then
+    echo "Signing $APP_DIR with persistent identity: $SIGN_IDENTITY"
+    codesign --force --deep --sign "$SIGN_IDENTITY" --identifier "com.winbridge.client" "$APP_DIR"
+else
+    echo "No persistent code-signing identity found; applying ad-hoc signature."
+    echo "Tip: run ./scripts/setup_codesign.sh once to keep macOS Local Network permissions across rebuilds."
+    codesign --force --deep --sign - --identifier "com.winbridge.client" "$APP_DIR"
+fi
 
 echo "Built app bundle at: $APP_DIR"
 echo "Run with: open \"$APP_DIR\""

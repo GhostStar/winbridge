@@ -53,12 +53,14 @@ message ControlMessage {
     MouseEvent mouse_event = 50;                 // Mac -> Win
     KeyEvent key_event = 51;                     // Mac -> Win
     TextInput text_input = 52;                   // Mac -> Win
+    GamepadState gamepad_state = 53;             // Mac -> Win
 
-    // --- Clipboard (Bidirectional) ---
+    // --- Clipboard, Audio & File Transfer ---
     ClipboardSync clipboard_sync = 60;           // Bidirectional
-
-    // --- Audio Control (Mac -> Win) ---
     SetAudioConfig set_audio_config = 61;        // Mac -> Win
+    FileTransferStart file_transfer_start = 62;  // Mac -> Win
+    FileTransferChunk file_transfer_chunk = 63;  // Mac -> Win
+    FileTransferResult file_transfer_res = 64;   // Win -> Mac
 
     // --- Diagnostics / Errors (Win -> Mac) ---
     HostError host_error = 70;                   // Win -> Mac
@@ -415,9 +417,47 @@ message TextInput {
   string text = 2;
 }
 
+message GamepadState {
+  // Logical controller slot 0..3.
+  uint32 index = 1;
+  // False when controller disconnects so host can unplug virtual controller.
+  bool connected = 2;
+  // XInput XUSB_GAMEPAD_* bitmask (A=0x1000, B=0x2000, X=0x4000, Y=0x8000, etc.).
+  uint32 buttons = 3;
+  // Triggers 0..255.
+  uint32 left_trigger = 4;
+  uint32 right_trigger = 5;
+  // Signed 16-bit stick axes -32768..32767.
+  int32 thumb_lx = 6;
+  int32 thumb_ly = 7;
+  int32 thumb_rx = 8;
+  int32 thumb_ry = 9;
+}
+
 // ============================================================================
-// Clipboard & Diagnostics
+// Clipboard, Audio, File Transfer & Diagnostics
 // ============================================================================
+
+message FileTransferStart {
+  uint64 transfer_id = 1;
+  uint64 target_window_id = 2;
+  string file_name = 3;
+  uint64 total_bytes = 4;
+}
+
+message FileTransferChunk {
+  uint64 transfer_id = 1;
+  uint64 offset = 2;
+  bytes data = 3;
+  bool is_last = 4;
+}
+
+message FileTransferResult {
+  uint64 transfer_id = 1;
+  bool success = 2;
+  string saved_path = 3;
+  string message = 4;
+}
 
 message ClipboardSync {
   // Sender-side monotonic ID or content hash to prevent echo loops.

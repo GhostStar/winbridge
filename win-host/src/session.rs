@@ -12,10 +12,10 @@ use crate::{
     audio::AudioWorker,
     capture,
     config::Config,
-    input::Injector,
+    input::{GamepadManager, Injector},
     net::Mux,
     proto::{control_message::Payload, *},
-    win32,
+    win32::{self, files::FileReceiver},
 };
 use anyhow::{anyhow, Result};
 use tokio::sync::mpsc;
@@ -67,6 +67,8 @@ struct Session {
     notices: mpsc::UnboundedSender<Notice>,
     replies: mpsc::Sender<Payload>,
     injector: Injector,
+    gamepad: GamepadManager,
+    files: FileReceiver,
     cursor: Option<CursorShape>,
     audio: Option<AudioWorker>,
     auto_uac_desktop: bool,
@@ -348,6 +350,30 @@ impl Session {
                 }
                 return Ok(());
             }
+            Payload::GamepadState(state) => {
+                if let Err(e) = self.gamepad.apply(&state) {
+                    let _ = self.error(0, 0, format!("手柄透传提示: {e:#}"));
+                }
+                return Ok(());
+            }
+            Payload::FileTransferStart(req) => {
+                let id = req.transfer_id;
+                if let Err(e) = self.files.start(req) {
+                    return self.send(Payload::FileTransferRes(FileTransferResult {
+                        transfer_id: id,
+                        success: false,
+                        saved_path: String::new(),
+                        message: format!("{e:#}"),
+                    }));
+                }
+                return Ok(());
+            }
+            Payload::FileTransferChunk(chunk) => {
+                if let Some(res) = self.files.chunk(chunk) {
+                    return self.send(Payload::FileTransferRes(res));
+                }
+                return Ok(());
+            }
             Payload::RequestKeyFrame(ref req) => req.window_id,
             Payload::ResizeWindow(ref req) => req.window_id,
             Payload::FocusWindow(ref req) => req.window_id,
@@ -465,6 +491,8 @@ pub async fn run(
         notices,
         replies,
         injector,
+        gamepad: GamepadManager::default(),
+        files: FileReceiver::default(),
         cursor: None,
         audio: None,
         auto_uac_desktop: false,

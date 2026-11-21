@@ -887,6 +887,149 @@ struct TextInput: Equatable, Sendable {
     }
 }
 
+struct GamepadState: Equatable, Sendable {
+    var index: UInt32 = 0
+    var connected: Bool = false
+    var buttons: UInt32 = 0
+    var leftTrigger: UInt32 = 0
+    var rightTrigger: UInt32 = 0
+    var thumbLX: Int32 = 0
+    var thumbLY: Int32 = 0
+    var thumbRX: Int32 = 0
+    var thumbRY: Int32 = 0
+
+    func encode() -> Data {
+        var w = ProtoWriter()
+        w.writeUInt32(field: 1, index)
+        w.writeBool(field: 2, connected)
+        w.writeUInt32(field: 3, buttons)
+        w.writeUInt32(field: 4, leftTrigger)
+        w.writeUInt32(field: 5, rightTrigger)
+        w.writeInt32(field: 6, thumbLX)
+        w.writeInt32(field: 7, thumbLY)
+        w.writeInt32(field: 8, thumbRX)
+        w.writeInt32(field: 9, thumbRY)
+        return w.data
+    }
+
+    static func decode(from data: Data) throws -> GamepadState {
+        var r = ProtoReader(data: data)
+        var m = GamepadState()
+        while !r.isAtEnd {
+            let (field, wire) = try r.readTag()
+            switch field {
+            case 1: m.index = try r.readUInt32()
+            case 2: m.connected = try r.readBool()
+            case 3: m.buttons = try r.readUInt32()
+            case 4: m.leftTrigger = try r.readUInt32()
+            case 5: m.rightTrigger = try r.readUInt32()
+            case 6: m.thumbLX = try r.readInt32()
+            case 7: m.thumbLY = try r.readInt32()
+            case 8: m.thumbRX = try r.readInt32()
+            case 9: m.thumbRY = try r.readInt32()
+            default: try r.skip(wireType: wire)
+            }
+        }
+        return m
+    }
+}
+
+struct FileTransferStart: Equatable, Sendable {
+    var transferId: UInt64 = 0
+    var targetWindowId: UInt64 = 0
+    var fileName: String = ""
+    var totalBytes: UInt64 = 0
+
+    func encode() -> Data {
+        var w = ProtoWriter()
+        w.writeUInt64(field: 1, transferId)
+        w.writeUInt64(field: 2, targetWindowId)
+        w.writeString(field: 3, fileName)
+        w.writeUInt64(field: 4, totalBytes)
+        return w.data
+    }
+
+    static func decode(from data: Data) throws -> FileTransferStart {
+        var r = ProtoReader(data: data)
+        var m = FileTransferStart()
+        while !r.isAtEnd {
+            let (field, wire) = try r.readTag()
+            switch field {
+            case 1: m.transferId = try r.readUInt64()
+            case 2: m.targetWindowId = try r.readUInt64()
+            case 3: m.fileName = try r.readString()
+            case 4: m.totalBytes = try r.readUInt64()
+            default: try r.skip(wireType: wire)
+            }
+        }
+        return m
+    }
+}
+
+struct FileTransferChunk: Equatable, Sendable {
+    var transferId: UInt64 = 0
+    var offset: UInt64 = 0
+    var data: Data = Data()
+    var isLast: Bool = false
+
+    func encode() -> Data {
+        var w = ProtoWriter()
+        w.writeUInt64(field: 1, transferId)
+        w.writeUInt64(field: 2, offset)
+        w.writeBytes(field: 3, data)
+        w.writeBool(field: 4, isLast)
+        return w.data
+    }
+
+    static func decode(from data: Data) throws -> FileTransferChunk {
+        var r = ProtoReader(data: data)
+        var m = FileTransferChunk()
+        while !r.isAtEnd {
+            let (field, wire) = try r.readTag()
+            switch field {
+            case 1: m.transferId = try r.readUInt64()
+            case 2: m.offset = try r.readUInt64()
+            case 3: m.data = try r.readBytes()
+            case 4: m.isLast = try r.readBool()
+            default: try r.skip(wireType: wire)
+            }
+        }
+        return m
+    }
+}
+
+struct FileTransferResult: Equatable, Sendable {
+    var transferId: UInt64 = 0
+    var success: Bool = false
+    var savedPath: String = ""
+    var message: String = ""
+
+    func encode() -> Data {
+        var w = ProtoWriter()
+        w.writeUInt64(field: 1, transferId)
+        w.writeBool(field: 2, success)
+        w.writeString(field: 3, savedPath)
+        w.writeString(field: 4, message)
+        return w.data
+    }
+
+    static func decode(from data: Data) throws -> FileTransferResult {
+        var r = ProtoReader(data: data)
+        var m = FileTransferResult()
+        while !r.isAtEnd {
+            let (field, wire) = try r.readTag()
+            switch field {
+            case 1: m.transferId = try r.readUInt64()
+            case 2: m.success = try r.readBool()
+            case 3: m.savedPath = try r.readString()
+            case 4: m.message = try r.readString()
+            default: try r.skip(wireType: wire)
+            }
+        }
+        return m
+    }
+}
+
 struct ClipboardSync: Equatable, Sendable {
     enum Content: Equatable, Sendable {
         case textUtf8(String)
@@ -1000,8 +1143,12 @@ struct ControlMessage: Equatable, Sendable {
         case mouseEvent(MouseEvent)                     // 50
         case keyEvent(KeyEvent)                         // 51
         case textInput(TextInput)                       // 52
+        case gamepadState(GamepadState)                 // 53
         case clipboardSync(ClipboardSync)               // 60
         case setAudioConfig(SetAudioConfig)             // 61
+        case fileTransferStart(FileTransferStart)       // 62
+        case fileTransferChunk(FileTransferChunk)       // 63
+        case fileTransferRes(FileTransferResult)        // 64
         case hostError(HostError)                       // 70
     }
 
@@ -1037,8 +1184,12 @@ struct ControlMessage: Equatable, Sendable {
         case .mouseEvent(let m): w.writeMessage(field: 50, m.encode(), forceEmit: true)
         case .keyEvent(let m): w.writeMessage(field: 51, m.encode(), forceEmit: true)
         case .textInput(let m): w.writeMessage(field: 52, m.encode(), forceEmit: true)
+        case .gamepadState(let m): w.writeMessage(field: 53, m.encode(), forceEmit: true)
         case .clipboardSync(let m): w.writeMessage(field: 60, m.encode(), forceEmit: true)
         case .setAudioConfig(let m): w.writeMessage(field: 61, m.encode(), forceEmit: true)
+        case .fileTransferStart(let m): w.writeMessage(field: 62, m.encode(), forceEmit: true)
+        case .fileTransferChunk(let m): w.writeMessage(field: 63, m.encode(), forceEmit: true)
+        case .fileTransferRes(let m): w.writeMessage(field: 64, m.encode(), forceEmit: true)
         case .hostError(let m): w.writeMessage(field: 70, m.encode(), forceEmit: true)
         }
         return w.data
@@ -1077,8 +1228,12 @@ struct ControlMessage: Equatable, Sendable {
             case 50: payload = .mouseEvent(try MouseEvent.decode(from: try r.readBytes()))
             case 51: payload = .keyEvent(try KeyEvent.decode(from: try r.readBytes()))
             case 52: payload = .textInput(try TextInput.decode(from: try r.readBytes()))
+            case 53: payload = .gamepadState(try GamepadState.decode(from: try r.readBytes()))
             case 60: payload = .clipboardSync(try ClipboardSync.decode(from: try r.readBytes()))
             case 61: payload = .setAudioConfig(try SetAudioConfig.decode(from: try r.readBytes()))
+            case 62: payload = .fileTransferStart(try FileTransferStart.decode(from: try r.readBytes()))
+            case 63: payload = .fileTransferChunk(try FileTransferChunk.decode(from: try r.readBytes()))
+            case 64: payload = .fileTransferRes(try FileTransferResult.decode(from: try r.readBytes()))
             case 70: payload = .hostError(try HostError.decode(from: try r.readBytes()))
             default: try r.skip(wireType: wire)
             }

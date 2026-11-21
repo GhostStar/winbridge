@@ -64,6 +64,9 @@ pub struct Config {
     /// Optional client IP/CIDR allowlist (repeatable, e.g. --allow-cidr 192.168.1.0/24).
     #[arg(long)]
     pub allow_cidr: Vec<String>,
+    /// Disable LAN mDNS/Bonjour service discovery advertisement (_winbridge._tcp.local.).
+    #[arg(long)]
+    pub no_discovery: bool,
     #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u32).range(1..=240))]
     pub fps: u32,
     #[arg(long, default_value_t = 15000, value_parser = clap::value_parser!(u32).range(1..=4294967))]

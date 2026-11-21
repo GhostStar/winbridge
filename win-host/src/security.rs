@@ -176,6 +176,7 @@ pub fn serialize_service_config(config: &Config) -> String {
             "allow_insecure_no_auth={}",
             config.allow_insecure_no_auth
         ),
+        format!("no_discovery={}", config.no_discovery),
     ];
     for cidr in &config.allow_cidr {
         lines.push(format!("allow_cidr={}", cidr.replace(['\r', '\n'], "")));
@@ -232,6 +233,7 @@ pub fn apply_service_config_text(config: &mut Config, text: &str) -> Result<()> 
             "allow_insecure_no_auth" => {
                 config.allow_insecure_no_auth = val == "true" || val == "1"
             }
+            "no_discovery" => config.no_discovery = val == "true" || val == "1",
             "allow_cidr" if !val.is_empty() => cidrs.push(val.to_owned()),
             _ => {}
         }

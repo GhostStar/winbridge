@@ -31,6 +31,9 @@ struct ClientSettings {
     var authToken: String
     var useTls: Bool
     var trustedFingerprints: [String: String]
+    var autoReconnect: Bool
+    var showPerformanceHud: Bool
+    var suppressInactiveHover: Bool
     var codecPreference: CodecPreference
     var cmdMapsToCtrl: Bool
     var syncClipboard: Bool
@@ -41,6 +44,8 @@ struct ClientSettings {
     var mouseSensitivity: Float
     var targetFps: UInt32
     var processCaptureModes: [String: CaptureMode]
+    var processMouseSensitivity: [String: Float]
+    var processAutoGameLock: [String: Bool]
     var appCaptureModes: [String: CaptureMode]
     var pinnedAppIds: [String]
 }
@@ -74,6 +79,9 @@ enum SettingsStore {
 
         let useTls = defaults.object(forKey: "winbridge.useTls") as? Bool ?? true
         let trustedFingerprints = defaults.dictionary(forKey: "winbridge.trustedFingerprints") as? [String: String] ?? [:]
+        let autoReconnect = defaults.object(forKey: "winbridge.autoReconnect") as? Bool ?? true
+        let showPerformanceHud = defaults.object(forKey: "winbridge.showPerformanceHud") as? Bool ?? false
+        let suppressInactiveHover = defaults.object(forKey: "winbridge.suppressInactiveHover") as? Bool ?? false
 
         let codecRaw = defaults.string(forKey: "winbridge.codec") ?? CodecPreference.auto.rawValue
         let codec = CodecPreference(rawValue: codecRaw) ?? .auto
@@ -93,6 +101,12 @@ enum SettingsStore {
                 modes[proc] = mode
             }
         }
+        let rawSens = defaults.dictionary(forKey: "winbridge.processMouseSensitivity") as? [String: NSNumber] ?? [:]
+        var procSens: [String: Float] = [:]
+        for (proc, num) in rawSens {
+            procSens[proc] = max(0.1, min(4.0, num.floatValue))
+        }
+        let procAutoLock = defaults.dictionary(forKey: "winbridge.processAutoGameLock") as? [String: Bool] ?? [:]
         let rawAppModes = defaults.dictionary(forKey: "winbridge.appCaptureModes") as? [String: Int] ?? [:]
         var appModes: [String: CaptureMode] = [:]
         for (appId, raw) in rawAppModes {
@@ -108,6 +122,9 @@ enum SettingsStore {
             authToken: token,
             useTls: useTls,
             trustedFingerprints: trustedFingerprints,
+            autoReconnect: autoReconnect,
+            showPerformanceHud: showPerformanceHud,
+            suppressInactiveHover: suppressInactiveHover,
             codecPreference: codec,
             cmdMapsToCtrl: cmdToCtrl,
             syncClipboard: clipboard,
@@ -118,6 +135,8 @@ enum SettingsStore {
             mouseSensitivity: max(0.1, min(4.0, mouseSensitivity)),
             targetFps: fps,
             processCaptureModes: modes,
+            processMouseSensitivity: procSens,
+            processAutoGameLock: procAutoLock,
             appCaptureModes: appModes,
             pinnedAppIds: pinned
         )
@@ -134,6 +153,9 @@ enum SettingsStore {
         }
         defaults.set(s.useTls, forKey: "winbridge.useTls")
         defaults.set(s.trustedFingerprints, forKey: "winbridge.trustedFingerprints")
+        defaults.set(s.autoReconnect, forKey: "winbridge.autoReconnect")
+        defaults.set(s.showPerformanceHud, forKey: "winbridge.showPerformanceHud")
+        defaults.set(s.suppressInactiveHover, forKey: "winbridge.suppressInactiveHover")
         defaults.set(s.codecPreference.rawValue, forKey: "winbridge.codec")
         defaults.set(s.cmdMapsToCtrl, forKey: "winbridge.cmdToCtrl")
         defaults.set(s.syncClipboard, forKey: "winbridge.syncClipboard")
@@ -144,6 +166,8 @@ enum SettingsStore {
         defaults.set(s.mouseSensitivity, forKey: "winbridge.mouseSensitivity")
         defaults.set(Int(s.targetFps), forKey: "winbridge.fps")
         defaults.set(s.processCaptureModes.mapValues { Int($0.rawValue) }, forKey: "winbridge.processCaptureModes")
+        defaults.set(s.processMouseSensitivity, forKey: "winbridge.processMouseSensitivity")
+        defaults.set(s.processAutoGameLock, forKey: "winbridge.processAutoGameLock")
         defaults.set(s.appCaptureModes.mapValues { Int($0.rawValue) }, forKey: "winbridge.appCaptureModes")
         defaults.set(s.pinnedAppIds, forKey: "winbridge.pinnedAppIds")
     }

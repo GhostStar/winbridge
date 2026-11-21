@@ -1,3 +1,4 @@
+pub mod discovery;
 mod media;
 pub mod tls;
 
@@ -278,6 +279,22 @@ pub async fn serve(config: Config, h264: bool, tls_material: Option<tls::TlsMate
     if !allowlist.is_empty() {
         tracing::info!(cidrs = ?config.allow_cidr, "client IP/CIDR allowlist active");
     }
+
+    let _mdns_advertiser = if !config.no_discovery && !config.bind.is_loopback() {
+        match discovery::Advertiser::start(
+            local_addr.port(),
+            tls_material.is_some(),
+            tls_material.as_ref().map(|m| m.short_fingerprint.as_str()),
+        ) {
+            Ok(adv) => Some(adv),
+            Err(e) => {
+                tracing::warn!(error = %e, "mDNS LAN discovery advertiser failed to start");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     let state = Arc::new(Server {
         config: Arc::new(config),

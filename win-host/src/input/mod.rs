@@ -1,5 +1,7 @@
+pub mod gamepad;
 mod hid_scancode;
 mod injector;
+pub use gamepad::GamepadManager;
 pub(crate) use injector::DirectExecutor;
 pub use injector::Injector;
 

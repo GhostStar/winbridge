@@ -5,6 +5,7 @@ mod cursor;
 pub mod desktop;
 mod event_hook;
 pub use event_hook::{Event, Observer};
+pub mod files;
 mod image;
 mod window;
 pub use window::{candidates, foreground_id, info, list, primary_desktop_info, DESKTOP_WINDOW_ID};

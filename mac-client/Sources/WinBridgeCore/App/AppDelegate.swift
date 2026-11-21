@@ -35,6 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         state.onOpenManager = { [weak self] in
             self?.showManager()
         }
+        state.startDiscovery()
 
         showManager()
         NSApp.activate(ignoringOtherApps: true)
@@ -52,6 +53,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        state.stopDiscovery()
         state.unlockAllPointers()
         state.disconnect()
     }
@@ -76,6 +78,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func togglePointerLockAction() {
         state.togglePointerLockForActiveWindow()
+    }
+
+    @objc private func toggleAutoGameLockAction() {
+        state.toggleAutoGameLockForActiveWindow()
+    }
+
+    @objc private func toggleHudAction() {
+        state.togglePerformanceHud()
     }
 
     @objc private func disconnectAction() {
@@ -136,6 +146,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         lockItem.keyEquivalentModifierMask = [.command, .shift]
         winMenu.addItem(lockItem)
+        winMenu.addItem(withTitle: "记住当前游戏自动开启鼠标锁定", action: #selector(toggleAutoGameLockAction), keyEquivalent: "")
+        let hudItem = NSMenuItem(
+            title: "显示 / 隐藏性能 HUD",
+            action: #selector(toggleHudAction),
+            keyEquivalent: "H"
+        )
+        hudItem.keyEquivalentModifierMask = [.command, .shift]
+        winMenu.addItem(hudItem)
         winMenu.addItem(withTitle: "刷新当前窗口关键帧 (IDR)", action: #selector(requestKeyframeAction), keyEquivalent: "")
         winMenu.addItem(withTitle: "脱离当前远端窗口", action: #selector(detachActiveWindowAction), keyEquivalent: "")
         winMenu.addItem(.separator())

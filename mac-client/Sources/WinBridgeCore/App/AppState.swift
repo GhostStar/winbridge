@@ -7,6 +7,12 @@ enum ConnectionState: Equatable {
     case connected(hostName: String, codec: VideoCodec)
 }
 
+private struct RestoreWindowTarget: Equatable {
+    let isDesktop: Bool
+    let processName: String
+    let title: String
+}
+
 @MainActor
 final class AppState {
     var settings: ClientSettings {
@@ -19,8 +25,16 @@ final class AppState {
                     wc.updateResizeBehavior()
                 }
             }
+            if oldValue.showPerformanceHud != settings.showPerformanceHud {
+                for (_, wc) in controllers {
+                    wc.updateHudVisibility()
+                }
+            }
             if oldValue.audioEnabled != settings.audioEnabled {
                 applyAudioSetting()
+            }
+            if !settings.autoReconnect && oldValue.autoReconnect {
+                cancelReconnect()
             }
         }
     }
@@ -29,9 +43,12 @@ final class AppState {
     private(set) var rttMs: Double?
     private(set) var availableWindows: [WindowInfo] = []
     private(set) var availableApps: [AppEntry] = []
+    private(set) var discoveredHosts: [DiscoveredHost] = []
     private(set) var subscribedRootIds: Set<UInt64> = []
     private(set) var lastBannerMessage: String = ""
     private(set) var lastBannerIsError: Bool = false
+
+    var isReconnecting: Bool { reconnectTask != nil }
 
     var isDesktopOpen: Bool {
         subscribedRootIds.contains(SyntheticWindow.primaryDesktop)
@@ -46,6 +63,15 @@ final class AppState {
     private var controllers: [UInt64: RemoteWindowController] = [:]
     private let clipboardMonitor = ClipboardMonitor()
     private let audioPlayer = AudioPlayer()
+    private let hostDiscovery = HostDiscovery()
+    private let gamepadMonitor = GamepadMonitor()
+
+    private var manualDisconnectRequested = false
+    private var reconnectTask: Task<Void, Never>?
+    private var reconnectAttempt = 0
+    private var pendingRestoreTargets: [RestoreWindowTarget] = []
+    private var nextTransferId: UInt64 = 1
+    private var activeTransferNames: [UInt64: String] = [:]
 
     var onStateChanged: (() -> Void)?
     var onOpenManager: (() -> Void)?
@@ -57,12 +83,97 @@ final class AppState {
         clipboardMonitor.onLocalChange = { [weak self] sync in
             self?.sendControl(.clipboardSync(sync))
         }
+        hostDiscovery.onHostsChanged = { [weak self] hosts in
+            self?.discoveredHosts = hosts
+            self?.onStateChanged?()
+        }
+        gamepadMonitor.shouldForward = { [weak self] in
+            guard let self, case .connected = self.connectionState else { return false }
+            return NSApp.keyWindow?.windowController is RemoteWindowController
+        }
+        gamepadMonitor.onGamepadState = { [weak self] state in
+            self?.sendControl(.gamepadState(state))
+        }
+    }
+
+    func startDiscovery() {
+        hostDiscovery.start()
+    }
+
+    func stopDiscovery() {
+        hostDiscovery.stop()
+    }
+
+    func selectDiscoveredHost(_ host: DiscoveredHost) {
+        var s = settings
+        s.host = host.host
+        s.port = host.port
+        s.useTls = host.tlsEnabled
+        settings = s
+        setBanner("已选择局域网主机 \(host.name)（\(host.host):\(host.port)）", isError: false)
+        onStateChanged?()
     }
 
     func toggleAudioEnabled() {
         var s = settings
         s.audioEnabled.toggle()
         settings = s
+        onStateChanged?()
+    }
+
+    func togglePerformanceHud() {
+        var s = settings
+        s.showPerformanceHud.toggle()
+        settings = s
+        onStateChanged?()
+    }
+
+    func mouseSensitivity(forProcess processName: String) -> Float {
+        let key = processName.lowercased()
+        if !key.isEmpty, let saved = settings.processMouseSensitivity[key] {
+            return saved
+        }
+        return settings.mouseSensitivity
+    }
+
+    func setMouseSensitivity(_ value: Float, forProcess processName: String?) {
+        let clamped = max(0.1, min(4.0, value))
+        var s = settings
+        s.mouseSensitivity = clamped
+        if let proc = processName?.lowercased(), !proc.isEmpty {
+            s.processMouseSensitivity[proc] = clamped
+        }
+        settings = s
+    }
+
+    func activeRemoteProcessName() -> String? {
+        guard let wc = NSApp.keyWindow?.windowController as? RemoteWindowController else { return nil }
+        return wc.info.processName.isEmpty ? nil : wc.info.processName
+    }
+
+    func isAutoGameLockEnabled(forProcess processName: String) -> Bool {
+        let key = processName.lowercased()
+        return !key.isEmpty && (settings.processAutoGameLock[key] == true)
+    }
+
+    func toggleAutoGameLockForActiveWindow() {
+        guard let wc = NSApp.keyWindow?.windowController as? RemoteWindowController,
+              !wc.info.processName.isEmpty else {
+            setBanner("请先选中一个正在投射的 Windows 游戏窗口", isError: true)
+            onStateChanged?()
+            return
+        }
+        let key = wc.info.processName.lowercased()
+        var s = settings
+        let next = !(s.processAutoGameLock[key] == true)
+        s.processAutoGameLock[key] = next
+        settings = s
+        setBanner(
+            next
+                ? "已记住：下次打开 \(wc.info.processName) 时自动开启游戏鼠标锁定"
+                : "已取消 \(wc.info.processName) 的自动游戏鼠标锁定",
+            isError: false
+        )
         onStateChanged?()
     }
 
@@ -75,19 +186,30 @@ final class AppState {
         sendControl(.setAudioConfig(SetAudioConfig(enabled: settings.audioEnabled)))
     }
 
-    // MARK: - Connection Lifecycle
+    // MARK: - Connection Lifecycle & Auto-Reconnect
 
-    func connect() {
+    func connect(isAutoReconnect: Bool = false) {
         guard connectionState == .disconnected else { return }
+        if !isAutoReconnect {
+            cancelReconnect()
+            manualDisconnectRequested = false
+            reconnectAttempt = 0
+            pendingRestoreTargets.removeAll()
+        }
         let host = settings.host.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !host.isEmpty else {
-            setBanner("请输入 Windows 主机内网 IP", isError: true)
+            setBanner("请输入 Windows 主机内网 IP 或从局域网发现中选择", isError: true)
             return
         }
 
         connectionState = .connecting
-        ClientLogger.shared.info("Connecting to \(host):\(settings.port)")
-        setBanner("正在连接 \(host):\(settings.port)…", isError: false)
+        ClientLogger.shared.info("Connecting to \(host):\(settings.port) tls=\(settings.useTls) auto=\(isAutoReconnect)")
+        setBanner(
+            isAutoReconnect
+                ? "正在自动重连 \(host):\(settings.port)（第 \(reconnectAttempt) 次）…"
+                : "正在连接 \(host):\(settings.port)…",
+            isError: false
+        )
         onStateChanged?()
 
         let conn = WinBridgeConnection()
@@ -101,11 +223,9 @@ final class AppState {
         let player = self.audioPlayer
         conn.onMediaFrame = { [weak self] frame in
             if frame.header.codec == .audioPcmS16Le {
-                // Feed CoreAudio directly from the Media TCP thread — zero main-thread jitter.
                 player.enqueue(frame: frame)
                 return
             }
-            // Dispatch video frame to its per-window decoder queue.
             Task { @MainActor in
                 self?.controllers[frame.header.windowId]?.handleMediaFrame(frame)
             }
@@ -144,6 +264,9 @@ final class AppState {
                     s.trustedFingerprints[hostKey] = fp
                     self.settings = s
                 }
+                self.reconnectAttempt = 0
+                self.reconnectTask?.cancel()
+                self.reconnectTask = nil
                 self.connectionState = .connected(hostName: ack.hostName, codec: ack.selectedCodec)
                 self.rttMs = nil
                 let tlsNote: String
@@ -156,6 +279,7 @@ final class AppState {
                 ClientLogger.shared.info("Connected to \(ack.hostName) codec=\(ack.selectedCodec.displayName)\(tlsNote)")
                 self.setBanner("已连接到 \(ack.hostName)（\(ack.selectedCodec.displayName)\(tlsNote)）", isError: false)
                 self.clipboardMonitor.start()
+                self.gamepadMonitor.start()
                 if self.settings.audioEnabled {
                     self.applyAudioSetting()
                 }
@@ -172,10 +296,31 @@ final class AppState {
                 self.setBanner("连接失败：\(error.localizedDescription)", isError: true)
                 self.onStateChanged?()
                 if case ConnectionError.certificateMismatch(let mismatchKey, let expected, let actual) = error {
+                    self.cancelReconnect()
                     self.promptCertificateMismatch(hostKey: mismatchKey, expected: expected, actual: actual)
+                } else if isAutoReconnect && self.shouldAutoReconnect(for: error) {
+                    self.scheduleAutoReconnect(lastError: error)
                 }
             }
         }
+    }
+
+    func disconnect() {
+        manualDisconnectRequested = true
+        cancelReconnect()
+        pendingRestoreTargets.removeAll()
+        if connection != nil {
+            connection?.disconnect(error: nil)
+        } else {
+            setBanner("已断开连接", isError: false)
+            onStateChanged?()
+        }
+    }
+
+    func cancelReconnect() {
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        reconnectAttempt = 0
     }
 
     func resetTrustedFingerprintForCurrentHost() {
@@ -190,6 +335,94 @@ final class AppState {
             setBanner("\(key) 尚未保存过 TLS 证书指纹", isError: false)
         }
         onStateChanged?()
+    }
+
+    private func shouldAutoReconnect(for error: Error?) -> Bool {
+        guard settings.autoReconnect, !manualDisconnectRequested, let error else { return false }
+        if let ce = error as? ConnectionError {
+            switch ce {
+            case .handshakeRejected, .certificateMismatch, .localNetworkProhibited, .invalidEndpoint:
+                return false
+            default:
+                return true
+            }
+        }
+        return true
+    }
+
+    private func scheduleAutoReconnect(lastError: Error) {
+        guard settings.autoReconnect, !manualDisconnectRequested else { return }
+        reconnectTask?.cancel()
+        reconnectAttempt += 1
+        let delaySecs = Self.reconnectDelaySeconds(forAttempt: reconnectAttempt)
+        let attempt = reconnectAttempt
+        setBanner(
+            "连接异常（\(lastError.localizedDescription)），\(delaySecs) 秒后自动重连（第 \(attempt) 次）…",
+            isError: true
+        )
+        onStateChanged?()
+
+        reconnectTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delaySecs) * 1_000_000_000)
+            guard let self, !Task.isCancelled, self.connectionState == .disconnected else { return }
+            self.connect(isAutoReconnect: true)
+        }
+    }
+
+    nonisolated static func reconnectDelaySeconds(forAttempt attempt: Int) -> Int {
+        switch max(1, attempt) {
+        case 1: return 1
+        case 2: return 2
+        case 3: return 4
+        case 4: return 8
+        default: return 15
+        }
+    }
+
+    private func snapshotWindowsForRestore() -> [RestoreWindowTarget] {
+        var targets: [RestoreWindowTarget] = []
+        if subscribedRootIds.contains(SyntheticWindow.primaryDesktop) {
+            targets.append(RestoreWindowTarget(isDesktop: true, processName: "", title: ""))
+        }
+        for id in subscribedRootIds where id != SyntheticWindow.primaryDesktop {
+            if let wc = controllers[id], wc.info.kind != .popup {
+                targets.append(RestoreWindowTarget(
+                    isDesktop: false,
+                    processName: wc.info.processName,
+                    title: wc.info.title
+                ))
+            }
+        }
+        return targets
+    }
+
+    private func restoreWindowsIfPending(from windows: [WindowInfo]) {
+        guard !pendingRestoreTargets.isEmpty else { return }
+        let targets = pendingRestoreTargets
+        pendingRestoreTargets.removeAll()
+        var restoredIds = Set<UInt64>()
+        for target in targets {
+            if target.isDesktop {
+                if !isDesktopOpen {
+                    toggleDesktopView()
+                }
+                continue
+            }
+            let exact = windows.first {
+                !restoredIds.contains($0.windowId)
+                    && $0.processName.caseInsensitiveCompare(target.processName) == .orderedSame
+                    && $0.title == target.title
+            }
+            let byProcess = exact ?? windows.first {
+                !restoredIds.contains($0.windowId)
+                    && !target.processName.isEmpty
+                    && $0.processName.caseInsensitiveCompare(target.processName) == .orderedSame
+            }
+            if let match = byProcess {
+                restoredIds.insert(match.windowId)
+                subscribeWindow(match)
+            }
+        }
     }
 
     private func promptCertificateMismatch(hostKey: String, expected: String, actual: String) {
@@ -218,12 +451,14 @@ final class AppState {
         }
     }
 
-    func disconnect() {
-        connection?.disconnect(error: nil)
-    }
-
     private func handleDisconnected(error: Error?) {
+        let shouldReconnect = shouldAutoReconnect(for: error)
+        if shouldReconnect && pendingRestoreTargets.isEmpty {
+            pendingRestoreTargets = snapshotWindowsForRestore()
+        }
+
         clipboardMonitor.stop()
+        gamepadMonitor.stop()
         audioPlayer.stop()
         connection = nil
         connectionState = .disconnected
@@ -231,6 +466,7 @@ final class AppState {
         availableWindows.removeAll()
         availableApps.removeAll()
         subscribedRootIds.removeAll()
+        activeTransferNames.removeAll()
 
         for (_, controller) in controllers {
             controller.forceCloseLocally()
@@ -239,6 +475,10 @@ final class AppState {
 
         if let error {
             ClientLogger.shared.error("Disconnected: \(error.localizedDescription)")
+            if shouldReconnect {
+                scheduleAutoReconnect(lastError: error)
+                return
+            }
             setBanner("连接已断开：\(error.localizedDescription)", isError: true)
         } else {
             ClientLogger.shared.info("Disconnected cleanly")
@@ -330,7 +570,6 @@ final class AppState {
         if let saved = settings.processCaptureModes[key] {
             return saved
         }
-        // Smart default: cross-process Android emulators (MuMu, LDPlayer, BlueStacks) need Monitor Crop.
         if key.contains("mumu") || key.contains("nemu") || key.contains("dnplayer") || key.contains("bluestacks") {
             return .monitorCrop
         }
@@ -344,7 +583,6 @@ final class AppState {
             s.processCaptureModes[key] = mode
             settings = s
         }
-        // If already subscribed, hot-switch live without closing the macOS window.
         if subscribedRootIds.contains(info.windowId) {
             subscribeWindow(info)
         } else {
@@ -410,12 +648,86 @@ final class AppState {
         connection?.send(payload)
     }
 
+    // MARK: - Drag & Drop File Transfer (Mac -> Windows)
+
+    func sendDroppedFiles(_ urls: [URL], toWindowId windowId: UInt64) {
+        guard case .connected = connectionState else { return }
+        let maxBytes: UInt64 = 512 * 1024 * 1024
+        let chunkSize = 64 * 1024
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            for url in urls {
+                guard case .connected = self.connectionState else { break }
+                do {
+                    let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
+                    let fileSize = (attrs[.size] as? NSNumber)?.uint64Value ?? 0
+                    guard fileSize <= maxBytes else {
+                        self.setBanner("文件「\(url.lastPathComponent)」超过 512 MiB 上限，已跳过", isError: true)
+                        self.onStateChanged?()
+                        continue
+                    }
+                    let transferId = self.nextTransferId
+                    self.nextTransferId &+= 1
+                    let name = url.lastPathComponent
+                    self.activeTransferNames[transferId] = name
+                    self.setBanner("正在传输「\(name)」到 Windows…", isError: false)
+                    self.onStateChanged?()
+
+                    self.sendControl(.fileTransferStart(FileTransferStart(
+                        transferId: transferId,
+                        targetWindowId: windowId,
+                        fileName: name,
+                        totalBytes: fileSize
+                    )))
+
+                    let handle = try FileHandle(forReadingFrom: url)
+                    defer { try? handle.close() }
+                    var offset: UInt64 = 0
+                    var chunksSinceYield = 0
+                    if fileSize == 0 {
+                        self.sendControl(.fileTransferChunk(FileTransferChunk(
+                            transferId: transferId,
+                            offset: 0,
+                            data: Data(),
+                            isLast: true
+                        )))
+                    } else {
+                        while offset < fileSize {
+                            guard case .connected = self.connectionState else { break }
+                            let data = handle.readData(ofLength: chunkSize)
+                            if data.isEmpty { break }
+                            let nextOffset = offset + UInt64(data.count)
+                            let isLast = nextOffset >= fileSize
+                            self.sendControl(.fileTransferChunk(FileTransferChunk(
+                                transferId: transferId,
+                                offset: offset,
+                                data: data,
+                                isLast: isLast
+                            )))
+                            offset = nextOffset
+                            chunksSinceYield += 1
+                            if chunksSinceYield >= 8 {
+                                chunksSinceYield = 0
+                                await Task.yield()
+                            }
+                        }
+                    }
+                } catch {
+                    self.setBanner("读取拖放文件失败：\(error.localizedDescription)", isError: true)
+                    self.onStateChanged?()
+                }
+            }
+        }
+    }
+
     // MARK: - Inbound Control Dispatch
 
     private func handleControlMessage(_ msg: ControlMessage) {
         switch msg.payload {
         case .listWindowsRes(let res):
             availableWindows = res.windows
+            restoreWindowsIfPending(from: res.windows)
             onStateChanged?()
 
         case .listAppsRes(let res):
@@ -426,7 +738,6 @@ final class AppState {
             if res.started {
                 let name = availableApps.first(where: { $0.appId == res.appId })?.name ?? "应用"
                 setBanner("已向 Windows 发送启动「\(name)」，正在等待主窗口出现…", isError: false)
-                // Also refresh window list after a short delay so newly launched apps appear.
                 Task { @MainActor [weak self] in
                     try? await Task.sleep(nanoseconds: 2_500_000_000)
                     self?.refreshWindowList()
@@ -451,6 +762,15 @@ final class AppState {
         case .clipboardSync(let sync):
             clipboardMonitor.applyRemote(sync)
 
+        case .fileTransferRes(let res):
+            let name = activeTransferNames.removeValue(forKey: res.transferId) ?? "文件"
+            if res.success {
+                setBanner("文件「\(name)」已保存到 Windows：\(res.savedPath)", isError: false)
+            } else {
+                setBanner("文件「\(name)」传输失败：\(res.message)", isError: true)
+            }
+            onStateChanged?()
+
         case .hostError(let err):
             handleHostError(err)
 
@@ -473,13 +793,19 @@ final class AppState {
             owner: ownerController,
             syncWindowResize: { [weak self] in self?.settings.syncWindowResize ?? false }
         )
+        let procName = info.processName
         wc.cmdMapsToCtrl = { [weak self] in self?.settings.cmdMapsToCtrl ?? true }
-        wc.mouseSensitivity = { [weak self] in self?.settings.mouseSensitivity ?? 1.0 }
+        wc.mouseSensitivity = { [weak self] in self?.mouseSensitivity(forProcess: procName) ?? 1.0 }
+        wc.suppressInactiveHover = { [weak self] in self?.settings.suppressInactiveHover ?? false }
+        wc.showPerformanceHud = { [weak self] in self?.settings.showPerformanceHud ?? false }
+        wc.currentRttMs = { [weak self] in self?.rttMs }
         wc.onSendControl = { [weak self] payload in self?.sendControl(payload) }
         wc.onDetachRequested = { [weak self] id in self?.unsubscribeWindow(id) }
         wc.onOwnerMovedOrResized = { [weak self] ownerId in self?.repositionOwnedPopups(for: ownerId) }
         wc.onRequestQuit = { NSApp.terminate(nil) }
         wc.onOpenManager = { [weak self] in self?.onOpenManager?() }
+        wc.onToggleHud = { [weak self] in self?.togglePerformanceHud() }
+        wc.onFilesDropped = { [weak self] winId, urls in self?.sendDroppedFiles(urls, toWindowId: winId) }
 
         controllers[info.windowId] = wc
         ClientLogger.shared.info("Opened window 0x\(String(info.windowId, radix: 16)) kind=\(info.kind) \(info.width)x\(info.height) title=\"\(info.title)\"")
@@ -487,6 +813,10 @@ final class AppState {
             subscribedRootIds.insert(info.windowId)
         }
         wc.present(owner: ownerController)
+        wc.updateHudVisibility()
+        if info.kind == .normal && isAutoGameLockEnabled(forProcess: info.processName) {
+            wc.setPointerLock(true)
+        }
         onStateChanged?()
     }
 
@@ -498,7 +828,6 @@ final class AppState {
     }
 
     private func closeWindowLocally(_ windowId: UInt64) {
-        // Also close any popups owned by this window.
         let ownedIds = controllers.values
             .filter { $0.info.ownerWindowId == windowId && $0.info.kind == .popup }
             .map(\.windowId)
