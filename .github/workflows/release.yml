@@ -57,7 +57,7 @@ jobs:
 
       - name: Bundle WinBridge.app
         working-directory: mac-client
-        run: ./scripts/bundle_app.sh
+        run: bash ./scripts/bundle_app.sh
 
       - name: Package macOS zip
         run: |

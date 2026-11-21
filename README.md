@@ -128,7 +128,7 @@ cd mac-client
 # 可选（强烈推荐，仅需执行一次）：创建本地固定自签证书，防止重打包后 macOS 重置本地网络权限
 ./scripts/setup_codesign.sh
 
-./scripts/bundle_app.sh
+bash ./scripts/bundle_app.sh
 open build/WinBridge.app
 ```
 

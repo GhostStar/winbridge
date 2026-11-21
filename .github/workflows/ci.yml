@@ -53,4 +53,4 @@ jobs:
         run: ./scripts/run_tests.sh
 
       - name: Build WinBridge.app release bundle
-        run: ./scripts/bundle_app.sh
+        run: bash ./scripts/bundle_app.sh
