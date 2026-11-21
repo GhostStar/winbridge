@@ -70,14 +70,14 @@ pub(super) struct Capture {
 }
 
 pub(super) fn minimized(id: u64) -> bool {
-    if id == DESKTOP_WINDOW_ID {
+    if id == DESKTOP_WINDOW_ID || crate::win32::is_monitor_id(id) {
         return false;
     }
     unsafe { IsIconic(HWND(id as usize as _)).as_bool() }
 }
 
 pub(super) fn check_desktop(id: u64) -> Result<()> {
-    if id != DESKTOP_WINDOW_ID {
+    if id != DESKTOP_WINDOW_ID && !crate::win32::is_monitor_id(id) {
         ensure!(
             unsafe { IsWindow(HWND(id as usize as _)) }.as_bool(),
             "WINDOW_NOT_FOUND: 0x{id:X}"
@@ -147,11 +147,21 @@ impl Capture {
             GraphicsCaptureSession::IsSupported()?,
             "Windows Graphics Capture is unavailable on this desktop"
         );
-        let is_desktop = id == DESKTOP_WINDOW_ID;
+        let monitor_slot = crate::win32::monitor_index(id);
+        let is_desktop = id == DESKTOP_WINDOW_ID || monitor_slot.is_some();
         let hwnd = HWND(id as usize as _);
         let gpu = Graphics::new()?;
         let interop = factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
-        let (item, monitor): (GraphicsCaptureItem, Option<HMONITOR>) = if is_desktop {
+        let (item, monitor): (GraphicsCaptureItem, Option<HMONITOR>) = if let Some(index) = monitor_slot {
+            let raw = crate::win32::monitor_handle(index)?;
+            let hmon = HMONITOR(raw as *mut core::ffi::c_void);
+            ensure!(
+                !hmon.is_invalid(),
+                "DISPLAY_DISCONNECTED: monitor index {index} is not active"
+            );
+            let item: GraphicsCaptureItem = unsafe { interop.CreateForMonitor(hmon) }?;
+            (item, Some(hmon))
+        } else if is_desktop {
             let hmon = unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) };
             ensure!(
                 !hmon.is_invalid(),
