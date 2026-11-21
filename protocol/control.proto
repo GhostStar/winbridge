@@ -66,6 +66,7 @@ message ControlMessage {
     ListHostFilesResponse list_host_files_res = 66; // Win -> Mac
     FilePullRequest file_pull_req = 67;          // Mac -> Win
     ClipboardFilesNotice clipboard_files_notice = 68; // Win -> Mac
+    HostNotification host_notification = 69;     // Win -> Mac
 
     // --- Diagnostics / Errors (Win -> Mac) ---
     HostError host_error = 70;                   // Win -> Mac
@@ -569,6 +570,23 @@ message SetAudioConfig {
   // Optional list of subscribed window_ids muted by the client. The host excludes
   // processes whose subscribed windows are all muted (or pauses audio if all are muted).
   repeated uint64 muted_window_ids = 5;
+}
+
+message HostNotification {
+  // Monotonic notification record ID from Windows Action Center (wpndatabase.db).
+  uint64 notification_id = 1;
+  // Human-readable source application name (e.g. "微信", "Discord", "VS Code").
+  string app_name = 2;
+  // Best-effort Windows process executable hint (e.g. "WeChat.exe") for click-to-focus.
+  string process_name = 3;
+  // Primary toast heading line.
+  string title = 4;
+  // Secondary toast body lines joined with newlines.
+  string body = 5;
+  // Matching open top-level Windows HWND if found when the toast arrived (0 if none).
+  uint64 window_id = 6;
+  // Unix timestamp in milliseconds when the host observed the notification.
+  uint64 timestamp_ms = 7;
 }
 
 message HostError {

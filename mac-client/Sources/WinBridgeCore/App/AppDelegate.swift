@@ -152,6 +152,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         state.toggleAutoWanOptimize()
     }
 
+    @objc private func toggleForwardNotificationsAction() {
+        state.toggleForwardNotifications()
+    }
+
     @objc private func saveWorkspacePresetAction() {
         let alert = NSAlert()
         alert.messageText = "保存当前工作区布局"
@@ -332,6 +336,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         )
         autoPullItem.state = state.settings.autoPullClipboardFiles ? .on : .off
         winMenu.addItem(autoPullItem)
+        let notifyWinItem = NSMenuItem(
+            title: "转发 Windows 通知到 macOS 通知中心",
+            action: #selector(toggleForwardNotificationsAction),
+            keyEquivalent: ""
+        )
+        notifyWinItem.state = state.settings.forwardNotifications ? .on : .off
+        winMenu.addItem(notifyWinItem)
         appendVideoQualityItems(to: winMenu, includeProcess: true)
         winMenu.addItem(.separator())
         winMenu.addItem(makeWorkspacePresetsMenuItem())
@@ -434,6 +445,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             )
             autoPullStatus.state = state.settings.autoPullClipboardFiles ? .on : .off
             menu.addItem(autoPullStatus)
+            let notifyStatusItem = NSMenuItem(
+                title: "转发 Windows 通知",
+                action: #selector(toggleForwardNotificationsAction),
+                keyEquivalent: ""
+            )
+            notifyStatusItem.state = state.settings.forwardNotifications ? .on : .off
+            menu.addItem(notifyStatusItem)
             appendVideoQualityItems(to: menu, includeProcess: true)
             menu.addItem(.separator())
             menu.addItem(makeWorkspacePresetsMenuItem())

@@ -73,6 +73,9 @@ final class AppState {
             if oldValue.shortcuts != settings.shortcuts {
                 onShortcutsChanged?()
             }
+            if settings.forwardNotifications && !oldValue.forwardNotifications {
+                notificationForwarder.requestAuthorizationIfNeeded()
+            }
         }
     }
 
@@ -113,6 +116,7 @@ final class AppState {
     private let audioPlayer = AudioPlayer()
     private let hostDiscovery = HostDiscovery()
     private let gamepadMonitor = GamepadMonitor()
+    private let notificationForwarder = NotificationForwarder()
 
     private var manualDisconnectRequested = false
     private var reconnectTask: Task<Void, Never>?
@@ -151,6 +155,10 @@ final class AppState {
         }
         gamepadMonitor.onGamepadState = { [weak self] state in
             self?.sendControl(.gamepadState(state))
+        }
+        notificationForwarder.prepareIfBundled()
+        notificationForwarder.onNotificationClicked = { [weak self] windowId, processName, appName in
+            self?.handleNotificationClicked(windowId: windowId, processName: processName, appName: appName)
         }
     }
 
@@ -555,6 +563,58 @@ final class AppState {
         onStateChanged?()
     }
 
+    func toggleForwardNotifications() {
+        var s = settings
+        s.forwardNotifications.toggle()
+        settings = s
+        if s.forwardNotifications {
+            notificationForwarder.requestAuthorizationIfNeeded()
+        }
+        setBanner(
+            s.forwardNotifications
+                ? "已开启 Windows 通知转发（收到通知时推送至 macOS 通知中心，点击可直达窗口）"
+                : "已关闭 Windows 通知转发",
+            isError: false
+        )
+        onStateChanged?()
+    }
+
+    private func handleHostNotification(_ note: HostNotification) {
+        guard settings.forwardNotifications else { return }
+        let formatted = NotificationForwarder.formatBanner(from: note)
+        ClientLogger.shared.info(
+            "HostNotification id=\(note.notificationId) app=\"\(note.appName)\" proc=\"\(note.processName)\" wid=0x\(String(note.windowId, radix: 16))"
+        )
+        notificationForwarder.post(note)
+        let preview = formatted.subtitle.isEmpty ? formatted.body : "\(formatted.subtitle) — \(formatted.body)"
+        setBanner("🔔 [\(formatted.title)] \(preview)", isError: false)
+        onStateChanged?()
+    }
+
+    private func handleNotificationClicked(windowId: UInt64, processName: String, appName: String) {
+        NSApp.activate(ignoringOtherApps: true)
+        guard case .connected = connectionState else {
+            onOpenManager?()
+            return
+        }
+        if windowId != 0, let existing = controllers[windowId] {
+            existing.present(owner: nil)
+            sendControl(.windowAction(WindowAction(windowId: windowId, action: .bringToFront)))
+            return
+        }
+        if let target = NotificationForwarder.selectTargetWindow(
+            windowId: windowId,
+            processName: processName,
+            appName: appName,
+            availableWindows: availableWindows
+        ) {
+            focusOrSubscribe(target)
+            return
+        }
+        refreshWindowList()
+        onOpenManager?()
+    }
+
     func mouseSensitivity(forProcess processName: String) -> Float {
         let key = processName.lowercased()
         if !key.isEmpty, let saved = settings.processMouseSensitivity[key] {
@@ -822,6 +882,9 @@ final class AppState {
                 )
                 self.clipboardMonitor.start()
                 self.gamepadMonitor.start()
+                if self.settings.forwardNotifications {
+                    self.notificationForwarder.requestAuthorizationIfNeeded()
+                }
                 if self.settings.audioEnabled {
                     self.applyAudioSetting()
                 }
@@ -1957,6 +2020,9 @@ final class AppState {
 
         case .clipboardFilesNotice(let notice):
             handleClipboardFilesNotice(notice)
+
+        case .hostNotification(let note):
+            handleHostNotification(note)
 
         case .listHostFilesRes(let res):
             onHostFilesListed?(res)

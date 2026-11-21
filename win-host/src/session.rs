@@ -858,6 +858,11 @@ pub async fn run(
     sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut uac_poll = tokio::time::interval(Duration::from_millis(200));
     uac_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let notif_watcher = Arc::new(std::sync::Mutex::new(
+        win32::notifications::NotificationWatcher::new(),
+    ));
+    let mut notif_poll = tokio::time::interval(Duration::from_millis(900));
+    notif_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut refresh_at = None;
     loop {
         let next =
@@ -900,6 +905,16 @@ pub async fn run(
             },
             _=tokio::time::sleep_until(next), if refresh_at.is_some()=>{refresh_at=None;session.refresh().await?;},
             _=uac_poll.tick()=>{session.poll_secure_desktop().await?;},
+            _=notif_poll.tick()=>{
+                let watcher = notif_watcher.clone();
+                if let Ok(items) = tokio::task::spawn_blocking(move || {
+                    watcher.lock().map(|mut w| w.poll()).unwrap_or_default()
+                }).await {
+                    for note in items {
+                        let _ = session.send(Payload::HostNotification(note));
+                    }
+                }
+            },
             _=sweep.tick()=>{refresh_at=None;session.refresh().await?;},
             msg=rx.recv()=>match msg {
                 Some(Payload::ClipboardSync(sync))=>{

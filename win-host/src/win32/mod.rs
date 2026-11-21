@@ -7,6 +7,7 @@ mod event_hook;
 pub use event_hook::{Event, Observer};
 pub mod files;
 mod image;
+pub mod notifications;
 pub mod tray;
 mod window;
 mod zip_pack;

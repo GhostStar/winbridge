@@ -156,6 +156,7 @@ struct ClientSettings {
     var autoReconnect: Bool
     var showPerformanceHud: Bool
     var suppressInactiveHover: Bool
+    var forwardNotifications: Bool
     var codecPreference: CodecPreference
     var cmdMapsToCtrl: Bool
     var syncClipboard: Bool
@@ -259,6 +260,7 @@ enum SettingsStore {
         let autoReconnect = defaults.object(forKey: "winbridge.autoReconnect") as? Bool ?? true
         let showPerformanceHud = defaults.object(forKey: "winbridge.showPerformanceHud") as? Bool ?? false
         let suppressInactiveHover = defaults.object(forKey: "winbridge.suppressInactiveHover") as? Bool ?? false
+        let forwardNotifications = defaults.object(forKey: "winbridge.forwardNotifications") as? Bool ?? true
 
         let codecRaw = defaults.string(forKey: "winbridge.codec") ?? CodecPreference.auto.rawValue
         let codec = CodecPreference(rawValue: codecRaw) ?? .auto
@@ -343,6 +345,7 @@ enum SettingsStore {
             autoReconnect: autoReconnect,
             showPerformanceHud: showPerformanceHud,
             suppressInactiveHover: suppressInactiveHover,
+            forwardNotifications: forwardNotifications,
             codecPreference: codec,
             cmdMapsToCtrl: cmdToCtrl,
             syncClipboard: clipboard,
@@ -394,6 +397,7 @@ enum SettingsStore {
         defaults.set(s.autoReconnect, forKey: "winbridge.autoReconnect")
         defaults.set(s.showPerformanceHud, forKey: "winbridge.showPerformanceHud")
         defaults.set(s.suppressInactiveHover, forKey: "winbridge.suppressInactiveHover")
+        defaults.set(s.forwardNotifications, forKey: "winbridge.forwardNotifications")
         defaults.set(s.codecPreference.rawValue, forKey: "winbridge.codec")
         defaults.set(s.cmdMapsToCtrl, forKey: "winbridge.cmdToCtrl")
         defaults.set(s.syncClipboard, forKey: "winbridge.syncClipboard")

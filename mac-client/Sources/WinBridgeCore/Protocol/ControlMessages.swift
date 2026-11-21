@@ -132,7 +132,7 @@ enum HostErrorCode: Int32, Sendable {
 // MARK: - Messages
 
 enum ProtocolCapabilities {
-    static let currentAppVersion = "0.4.0"
+    static let currentAppVersion = "0.5.0"
     static let processAudio: UInt32 = 1 << 0
     static let filePull: UInt32 = 1 << 1
     static let clipboardFiles: UInt32 = 1 << 2
@@ -140,9 +140,10 @@ enum ProtocolCapabilities {
     static let perWindowMute: UInt32 = 1 << 4
     static let wolMac: UInt32 = 1 << 5
     static let quic: UInt32 = 1 << 6
+    static let notifications: UInt32 = 1 << 7
 
     static let clientSupported: UInt32 =
-        processAudio | filePull | clipboardFiles | adaptiveVideo | perWindowMute | wolMac | quic
+        processAudio | filePull | clipboardFiles | adaptiveVideo | perWindowMute | wolMac | quic | notifications
 }
 
 struct Hello: Equatable, Sendable {
@@ -1343,6 +1344,47 @@ struct SetVideoConfig: Equatable, Sendable {
     }
 }
 
+struct HostNotification: Equatable, Sendable {
+    var notificationId: UInt64 = 0
+    var appName: String = ""
+    var processName: String = ""
+    var title: String = ""
+    var body: String = ""
+    var windowId: UInt64 = 0
+    var timestampMs: UInt64 = 0
+
+    func encode() -> Data {
+        var w = ProtoWriter()
+        w.writeUInt64(field: 1, notificationId)
+        w.writeString(field: 2, appName)
+        w.writeString(field: 3, processName)
+        w.writeString(field: 4, title)
+        w.writeString(field: 5, body)
+        w.writeUInt64(field: 6, windowId)
+        w.writeUInt64(field: 7, timestampMs)
+        return w.data
+    }
+
+    static func decode(from data: Data) throws -> HostNotification {
+        var r = ProtoReader(data: data)
+        var m = HostNotification()
+        while !r.isAtEnd {
+            let (field, wire) = try r.readTag()
+            switch field {
+            case 1: m.notificationId = try r.readUInt64()
+            case 2: m.appName = try r.readString()
+            case 3: m.processName = try r.readString()
+            case 4: m.title = try r.readString()
+            case 5: m.body = try r.readString()
+            case 6: m.windowId = try r.readUInt64()
+            case 7: m.timestampMs = try r.readUInt64()
+            default: try r.skip(wireType: wire)
+            }
+        }
+        return m
+    }
+}
+
 struct HostError: Equatable, Sendable {
     var windowId: UInt64 = 0
     var code: HostErrorCode = .unspecified
@@ -1410,6 +1452,7 @@ struct ControlMessage: Equatable, Sendable {
         case listHostFilesRes(ListHostFilesResponse)   // 66
         case filePullReq(FilePullRequest)              // 67
         case clipboardFilesNotice(ClipboardFilesNotice) // 68
+        case hostNotification(HostNotification)         // 69
         case hostError(HostError)                       // 70
         case unknown(Int)                               // Forward-compatible unknown oneof field
     }
@@ -1457,6 +1500,7 @@ struct ControlMessage: Equatable, Sendable {
         case .listHostFilesRes(let m): w.writeMessage(field: 66, m.encode(), forceEmit: true)
         case .filePullReq(let m): w.writeMessage(field: 67, m.encode(), forceEmit: true)
         case .clipboardFilesNotice(let m): w.writeMessage(field: 68, m.encode(), forceEmit: true)
+        case .hostNotification(let m): w.writeMessage(field: 69, m.encode(), forceEmit: true)
         case .hostError(let m): w.writeMessage(field: 70, m.encode(), forceEmit: true)
         case .unknown: break
         }
@@ -1508,6 +1552,7 @@ struct ControlMessage: Equatable, Sendable {
             case 66: payload = .listHostFilesRes(try ListHostFilesResponse.decode(from: try r.readBytes()))
             case 67: payload = .filePullReq(try FilePullRequest.decode(from: try r.readBytes()))
             case 68: payload = .clipboardFilesNotice(try ClipboardFilesNotice.decode(from: try r.readBytes()))
+            case 69: payload = .hostNotification(try HostNotification.decode(from: try r.readBytes()))
             case 70: payload = .hostError(try HostError.decode(from: try r.readBytes()))
             default:
                 unknownField = field

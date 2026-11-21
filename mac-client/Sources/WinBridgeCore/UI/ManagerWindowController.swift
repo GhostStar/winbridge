@@ -31,6 +31,7 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
     private let autoReconnectCheck = NSButton(checkboxWithTitle: "自动重连", target: nil, action: nil)
     private let hudCheck = NSButton(checkboxWithTitle: "性能 HUD", target: nil, action: nil)
     private let suppressHoverCheck = NSButton(checkboxWithTitle: "背景禁悬停", target: nil, action: nil)
+    private let notifyCheck = NSButton(checkboxWithTitle: "通知转发", target: nil, action: nil)
     private let desktopButton = NSButton(title: "查看完整桌面", target: nil, action: nil)
 
     private let audioCheck = NSButton(checkboxWithTitle: "开启音频", target: nil, action: nil)
@@ -217,6 +218,9 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         suppressHoverCheck.target = self
         suppressHoverCheck.action = #selector(settingsChanged)
         suppressHoverCheck.toolTip = "多窗并行时，屏蔽非激活远端窗口上的鼠标悬停事件，避免误触背景窗口"
+        notifyCheck.target = self
+        notifyCheck.action = #selector(settingsChanged)
+        notifyCheck.toolTip = "将 Windows 系统弹窗通知转发至 macOS 通知中心，点击通知可直达对应窗口"
 
         desktopButton.bezelStyle = .rounded
         desktopButton.image = NSImage(systemSymbolName: "desktopcomputer", accessibilityDescription: nil)
@@ -237,12 +241,13 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
             autoReconnectCheck,
             hudCheck,
             suppressHoverCheck,
+            notifyCheck,
             optionsSpacer,
             desktopButton,
         ])
         optionsRow.orientation = .horizontal
         optionsRow.alignment = .centerY
-        optionsRow.spacing = 10
+        optionsRow.spacing = 8
 
         // --- Row 3: Audio Switch & Volume ---
         audioCheck.target = self
@@ -475,6 +480,7 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         autoReconnectCheck.state = state.settings.autoReconnect ? .on : .off
         hudCheck.state = state.settings.showPerformanceHud ? .on : .off
         suppressHoverCheck.state = state.settings.suppressInactiveHover ? .on : .off
+        notifyCheck.state = state.settings.forwardNotifications ? .on : .off
         audioCheck.state = state.settings.audioEnabled ? .on : .off
         if let qIdx = AudioQualityPreference.allCases.firstIndex(of: state.settings.audioQuality) {
             audioQualityPopup.selectItem(at: qIdx)
@@ -511,6 +517,7 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         s.autoReconnect = (autoReconnectCheck.state == .on)
         s.showPerformanceHud = (hudCheck.state == .on)
         s.suppressInactiveHover = (suppressHoverCheck.state == .on)
+        s.forwardNotifications = (notifyCheck.state == .on)
         s.audioEnabled = (audioCheck.state == .on)
         let qIdx = audioQualityPopup.indexOfSelectedItem
         if qIdx >= 0 && qIdx < AudioQualityPreference.allCases.count {
@@ -667,6 +674,7 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         hudCheck.state = state.settings.showPerformanceHud ? .on : .off
         autoReconnectCheck.state = state.settings.autoReconnect ? .on : .off
         suppressHoverCheck.state = state.settings.suppressInactiveHover ? .on : .off
+        notifyCheck.state = state.settings.forwardNotifications ? .on : .off
         tlsCheck.state = state.settings.useTls ? .on : .off
         audioCheck.state = state.settings.audioEnabled ? .on : .off
         if let qIdx = AudioQualityPreference.allCases.firstIndex(of: state.settings.audioQuality) {
