@@ -100,6 +100,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         state.toggleAudioEnabled()
     }
 
+    @objc private func toggleMicAction() {
+        state.toggleMicEnabled()
+    }
+
     @objc private func toggleDesktopAction() {
         state.toggleDesktopView()
     }
@@ -199,6 +203,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let audioItem = NSMenuItem(title: "开启 Windows 音频", action: #selector(toggleAudioAction), keyEquivalent: "")
             audioItem.state = state.settings.audioEnabled ? .on : .off
             menu.addItem(audioItem)
+            let micItem = NSMenuItem(title: "把 Mac 麦克风发到 Windows", action: #selector(toggleMicAction), keyEquivalent: "")
+            micItem.state = state.settings.micEnabled ? .on : .off
+            menu.addItem(micItem)
 
             let pinned = state.pinnedApps
             if !pinned.isEmpty {

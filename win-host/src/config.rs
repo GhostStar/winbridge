@@ -78,6 +78,10 @@ pub struct Config {
     pub capture_mode: CaptureMode,
     #[arg(long)]
     pub capture_cursor: bool,
+    /// Friendly name of an existing playback endpoint used as the Mac mic target.
+    /// Empty searches for CABLE Input, VB-Audio, or WinBridge Mic. Never the default speakers.
+    #[arg(long, default_value = "")]
+    pub mic_device: String,
     #[arg(long, default_value = "info")]
     pub log_level: String,
     #[arg(long)]
