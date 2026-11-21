@@ -43,6 +43,7 @@ final class AppState {
     private(set) var rttMs: Double?
     private(set) var availableWindows: [WindowInfo] = []
     private(set) var availableApps: [AppEntry] = []
+    private(set) var availableMonitors: [MonitorInfo] = []
     private(set) var discoveredHosts: [DiscoveredHost] = []
     private(set) var subscribedRootIds: Set<UInt64> = []
     private(set) var lastBannerMessage: String = ""
@@ -289,6 +290,7 @@ final class AppState {
                 }
                 self.refreshWindowList()
                 self.refreshAppList()
+                self.refreshMonitors()
                 self.onStateChanged?()
             } catch {
                 conn.disconnect()
@@ -469,6 +471,7 @@ final class AppState {
         rttMs = nil
         availableWindows.removeAll()
         availableApps.removeAll()
+        availableMonitors.removeAll()
         subscribedRootIds.removeAll()
         activeTransferNames.removeAll()
 
@@ -501,6 +504,36 @@ final class AppState {
     func refreshAppList() {
         guard case .connected = connectionState else { return }
         sendControl(.listAppsReq(ListAppsRequest(includeIcons: true)))
+    }
+
+    func refreshMonitors() {
+        guard case .connected = connectionState else { return }
+        sendControl(.listMonitorsReq(ListMonitorsRequest()))
+    }
+
+    func subscribeMonitor(_ monitor: MonitorInfo) {
+        let info = WindowInfo(
+            windowId: monitor.monitorId,
+            processName: monitor.virtualAdapter ? "virtual-display" : "monitor",
+            title: monitor.friendlyName.isEmpty ? monitor.deviceName : monitor.friendlyName,
+            kind: .normal,
+            x: monitor.x,
+            y: monitor.y,
+            width: monitor.width,
+            height: monitor.height
+        )
+        subscribeWindow(info)
+    }
+
+    func enableVirtualDisplay() {
+        guard case .connected = connectionState else { return }
+        setBanner("正在请求把已安装的虚拟显示器设为 2560×1440。没有虚拟适配器时会失败，本程序不安装驱动。", isError: false)
+        sendControl(.setVirtualDisplay(SetVirtualDisplay(enable: true, width: 2560, height: 1440, hz: 60)))
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 700_000_000)
+            self?.refreshMonitors()
+        }
+        onStateChanged?()
     }
 
     func toggleDesktopView() {
@@ -738,6 +771,10 @@ final class AppState {
             availableApps = res.apps
             onStateChanged?()
 
+        case .listMonitorsRes(let res):
+            availableMonitors = res.monitors
+            onStateChanged?()
+
         case .launchAppRes(let res):
             if res.started {
                 let name = availableApps.first(where: { $0.appId == res.appId })?.name ?? "应用"
@@ -860,9 +897,9 @@ final class AppState {
         case .encoderError:
             prefix = "[编码错误] "
         case .unspecified:
-            prefix = "[提示] "
+            prefix = err.message.hasPrefix("已将") ? "" : "[提示] "
         }
-        setBanner(prefix + err.message, isError: true)
+        setBanner(prefix + err.message, isError: err.code != .unspecified || !err.message.hasPrefix("已将"))
         onStateChanged?()
     }
 
