@@ -1079,12 +1079,15 @@ struct SetAudioConfig: Equatable, Sendable {
     var enabled: Bool = false
     var codec: AudioCodec = .unspecified
     var bitrateKbps: UInt32 = 0
+    /// 0 = system loopback, 1 = subscribed processes only.
+    var scope: UInt32 = 0
 
     func encode() -> Data {
         var w = ProtoWriter()
         w.writeBool(field: 1, enabled)
         w.writeInt32(field: 2, codec.rawValue)
         w.writeUInt32(field: 3, bitrateKbps)
+        w.writeUInt32(field: 4, scope)
         return w.data
     }
 
@@ -1097,6 +1100,7 @@ struct SetAudioConfig: Equatable, Sendable {
             case 1: m.enabled = try r.readBool()
             case 2: m.codec = AudioCodec(rawValue: try r.readInt32()) ?? .unspecified
             case 3: m.bitrateKbps = try r.readUInt32()
+            case 4: m.scope = try r.readUInt32()
             default: try r.skip(wireType: wire)
             }
         }

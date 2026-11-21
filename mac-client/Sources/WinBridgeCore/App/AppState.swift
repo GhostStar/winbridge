@@ -30,7 +30,9 @@ final class AppState {
                     wc.updateHudVisibility()
                 }
             }
-            if oldValue.audioEnabled != settings.audioEnabled || oldValue.audioQuality != settings.audioQuality {
+            if oldValue.audioEnabled != settings.audioEnabled
+                || oldValue.audioQuality != settings.audioQuality
+                || oldValue.audioProcessOnly != settings.audioProcessOnly {
                 applyAudioSetting()
             }
             if !settings.autoReconnect && oldValue.autoReconnect {
@@ -186,8 +188,22 @@ final class AppState {
         sendControl(.setAudioConfig(SetAudioConfig(
             enabled: settings.audioEnabled,
             codec: settings.audioQuality.audioCodec,
-            bitrateKbps: settings.audioQuality.bitrateKbps
+            bitrateKbps: settings.audioQuality.bitrateKbps,
+            scope: settings.audioProcessOnly ? 1 : 0
         )))
+    }
+
+    func toggleAudioProcessOnly() {
+        var s = settings
+        s.audioProcessOnly.toggle()
+        settings = s
+        setBanner(
+            s.audioProcessOnly
+                ? "只采集已投射窗口的进程声音。若系统不支持进程回环，会自动退回整机声音。"
+                : "已改回采集整机系统声音",
+            isError: false
+        )
+        onStateChanged?()
     }
 
     // MARK: - Connection Lifecycle & Auto-Reconnect

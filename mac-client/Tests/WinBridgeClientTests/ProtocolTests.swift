@@ -96,6 +96,7 @@ import Testing
         .subscribeWindow(SubscribeWindow(windowId: 100, targetFps: 60, maxBitrateKbps: 15000, followPopups: true, captureMode: .monitorCrop)),
         .setAudioConfig(SetAudioConfig(enabled: true)),
         .setAudioConfig(SetAudioConfig(enabled: false)),
+        .setAudioConfig(SetAudioConfig(enabled: true, codec: .opus, bitrateKbps: 64, scope: 1)),
         .listAppsReq(ListAppsRequest(includeIcons: true)),
         .listAppsRes(ListAppsResponse(apps: [
             AppEntry(appId: "0123456789abcdef", name: "MuMu模拟器12", source: "Desktop", iconPng: Data([0x89, 0x50])),

@@ -475,13 +475,18 @@ enum AudioCodec {
 }
 
 message SetAudioConfig {
-  // Enable or disable Windows system audio loopback streaming delivered on the Media channel
+  // Enable or disable Windows audio streaming delivered on the Media channel
   // with window_id = 0, codec = 10 (PCM) or 11 (Opus).
   bool enabled = 1;
   // Desired audio codec (0 or 10 = PCM_S16LE, 11 = Opus).
   AudioCodec codec = 2;
   // Target bitrate in kbps for compressed audio (0 = host default 128 kbps).
   uint32 bitrate_kbps = 3;
+  // 0 = whole-system WASAPI loopback (default).
+  // 1 = mix only the processes that own subscribed windows.
+  //    If a subscribed root is the desktop (or process loopback cannot be activated),
+  //    the host falls back to system loopback and reports HostError.
+  uint32 scope = 4;
 }
 
 message HostError {

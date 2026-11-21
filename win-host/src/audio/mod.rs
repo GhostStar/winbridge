@@ -1,4 +1,7 @@
-use crate::net::{Mux, AUDIO_OPUS, AUDIO_PCM_S16LE};
+use crate::{
+    net::{Mux, AUDIO_OPUS, AUDIO_PCM_S16LE},
+    proto::{control_message::Payload, HostError},
+};
 use anyhow::{anyhow, bail, ensure, Result};
 use mousiki::{Application, Bitrate, Channels, Encoder};
 use std::{
@@ -9,6 +12,7 @@ use std::{
     },
     time::Duration,
 };
+use tokio::sync::mpsc;
 use windows::{
     core::GUID,
     Win32::{
@@ -33,8 +37,10 @@ const KSDATAFORMAT_SUBTYPE_IEEE_FLOAT: GUID =
 const BUFFER_FLAG_SILENT: u32 = 0x0000_0002;
 const AUDCLNT_DEVICE_INVALIDATED: u32 = 0x8889_0004;
 
-const OPUS_SAMPLE_RATE: u32 = 48_000;
-const OPUS_FRAME_SAMPLES_PER_CH: usize = 960; // 20ms at 48kHz
+mod process;
+
+pub(crate) const OPUS_SAMPLE_RATE: u32 = 48_000;
+pub(crate) const OPUS_FRAME_SAMPLES_PER_CH: usize = 960; // 20ms at 48kHz
 const OPUS_FRAME_INTERLEAVED_I16: usize = OPUS_FRAME_SAMPLES_PER_CH * 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,15 +49,46 @@ pub enum AudioMode {
     Opus { bitrate_kbps: u32 },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CapturePlan {
+    /// Default render-endpoint loopback. Also used when the desktop is subscribed,
+    /// or after process loopback fails to activate.
+    System,
+    /// Per-process scope is on, but nothing is subscribed yet. Capture silence.
+    Idle,
+    /// One process-loopback client per pid, mixed into the single media audio stream.
+    Processes(Vec<u32>),
+}
+
+/// `windows` is `(window_id, pid)` for subscribed roots only.
+pub fn capture_plan(per_process: bool, windows: &[(u64, u32)]) -> CapturePlan {
+    if !per_process {
+        return CapturePlan::System;
+    }
+    if windows.iter().any(|(id, pid)| {
+        *id == crate::win32::DESKTOP_WINDOW_ID || *pid == 0
+    }) {
+        return CapturePlan::System;
+    }
+    let mut pids: Vec<u32> = windows.iter().map(|(_, pid)| *pid).collect();
+    pids.sort_unstable();
+    pids.dedup();
+    if pids.is_empty() {
+        CapturePlan::Idle
+    } else {
+        CapturePlan::Processes(pids)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SampleFormat {
+pub(crate) enum SampleFormat {
     Float32,
     Int16,
     Int24,
     Int32,
 }
 
-struct ComGuard(bool);
+pub(crate) struct ComGuard(bool);
 impl ComGuard {
     fn init() -> Self {
         let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
@@ -66,7 +103,7 @@ impl Drop for ComGuard {
     }
 }
 
-struct MixFormatGuard(*mut WAVEFORMATEX);
+pub(crate) struct MixFormatGuard(pub(crate) *mut WAVEFORMATEX);
 impl Drop for MixFormatGuard {
     fn drop(&mut self) {
         if !self.0.is_null() {
@@ -75,7 +112,7 @@ impl Drop for MixFormatGuard {
     }
 }
 
-fn detect_format(ptr: *const WAVEFORMATEX) -> Result<(u16, usize, SampleFormat)> {
+pub(crate) fn detect_format(ptr: *const WAVEFORMATEX) -> Result<(u16, usize, SampleFormat)> {
     ensure!(!ptr.is_null(), "WASAPI returned null mix format");
     let mix = unsafe { ptr::read_unaligned(ptr) };
     let sample_rate_raw = mix.nSamplesPerSec;
@@ -124,7 +161,7 @@ fn float_to_i16(v: f32) -> i16 {
     (clamped * 32767.0).round() as i16
 }
 
-fn convert_to_stereo_i16(
+pub(crate) fn convert_to_stereo_i16(
     raw: &[u8],
     frames: usize,
     channels: usize,
@@ -171,7 +208,7 @@ fn convert_to_stereo_i16(
     out
 }
 
-fn stereo_i16_to_le_bytes(samples: &[i16]) -> Vec<u8> {
+pub(crate) fn stereo_i16_to_le_bytes(samples: &[i16]) -> Vec<u8> {
     let mut out = Vec::with_capacity(samples.len() * 2);
     for &s in samples {
         out.extend_from_slice(&s.to_le_bytes());
@@ -292,6 +329,30 @@ impl OpusPipeline {
     }
 }
 
+pub(crate) fn emit_interleaved_stereo(
+    mux: &Mux,
+    opus: &mut Option<OpusPipeline>,
+    sample_rate: u16,
+    stereo: &[i16],
+) -> Result<()> {
+    if stereo.is_empty() {
+        return Ok(());
+    }
+    if let Some(enc) = opus.as_mut() {
+        for packet in enc.encode_samples(stereo)? {
+            mux.push_audio(AUDIO_OPUS, OPUS_SAMPLE_RATE as u16, 2, packet);
+        }
+    } else {
+        mux.push_audio(
+            AUDIO_PCM_S16LE,
+            sample_rate,
+            2,
+            stereo_i16_to_le_bytes(stereo),
+        );
+    }
+    Ok(())
+}
+
 fn run_once(mux: &Mux, running: &AtomicBool, mode: AudioMode) -> Result<()> {
     unsafe {
         let enumerator: IMMDeviceEnumerator =
@@ -392,25 +453,85 @@ pub struct AudioWorker {
     running: Arc<AtomicBool>,
     mux: Arc<Mux>,
     mode: AudioMode,
+    plan: CapturePlan,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl AudioWorker {
-    pub fn start(mux: Arc<Mux>, mode: AudioMode) -> Result<Self> {
+    pub fn start(
+        mux: Arc<Mux>,
+        mode: AudioMode,
+        plan: CapturePlan,
+        replies: mpsc::Sender<Payload>,
+    ) -> Result<Self> {
         let running = Arc::new(AtomicBool::new(true));
         let worker_running = running.clone();
         let worker_mux = mux.clone();
+        let worker_plan = plan.clone();
         let thread = std::thread::Builder::new()
             .name("audio-loopback".into())
             .spawn(move || {
                 let _com = ComGuard::init();
+                let mut plan = worker_plan;
+                let mut reported_fallback = false;
                 while worker_running.load(Ordering::Acquire) {
-                    match run_once(&worker_mux, &worker_running, mode) {
-                        Ok(()) => break,
+                    let step = match &plan {
+                        CapturePlan::Idle => {
+                            std::thread::sleep(Duration::from_millis(50));
+                            Ok(process::RunOutcome::Stopped)
+                        }
+                        CapturePlan::System => {
+                            run_once(&worker_mux, &worker_running, mode)
+                                .map(|()| process::RunOutcome::Stopped)
+                        }
+                        CapturePlan::Processes(pids) => process::run_processes(
+                            &worker_mux,
+                            &worker_running,
+                            mode,
+                            pids,
+                            &mut |message| {
+                                if !reported_fallback {
+                                    reported_fallback = true;
+                                    let _ = replies.try_send(Payload::HostError(HostError {
+                                        window_id: 0,
+                                        code: 0,
+                                        message,
+                                    }));
+                                }
+                            },
+                        ),
+                    };
+                    match step {
+                        Ok(process::RunOutcome::Stopped) => {
+                            if matches!(plan, CapturePlan::System | CapturePlan::Processes(_)) {
+                                break;
+                            }
+                        }
+                        Ok(process::RunOutcome::StreamEnded) => {
+                            tracing::info!(
+                                "process audio loopback stream ended; retrying after brief backoff"
+                            );
+                            std::thread::sleep(Duration::from_millis(250));
+                        }
                         Err(e) => {
-                            let invalidated = e
-                                .downcast_ref::<windows::core::Error>()
-                                .is_some_and(|we| we.code().0 as u32 == AUDCLNT_DEVICE_INVALIDATED);
+                            let invalidated = e.downcast_ref::<windows::core::Error>().is_some_and(
+                                |we| we.code().0 as u32 == AUDCLNT_DEVICE_INVALIDATED,
+                            );
+                            if matches!(plan, CapturePlan::Processes(_)) {
+                                if !reported_fallback {
+                                    reported_fallback = true;
+                                    let _ = replies.try_send(Payload::HostError(HostError {
+                                        window_id: 0,
+                                        code: 0,
+                                        message: format!(
+                                            "进程回环不可用（需要 Windows 10 20348+ / Windows 11），已回退到系统环回：{e:#}"
+                                        ),
+                                    }));
+                                }
+                                tracing::warn!(error = %e, "process loopback failed; falling back to system loopback");
+                                plan = CapturePlan::System;
+                                continue;
+                            }
                             if invalidated {
                                 tracing::info!(
                                     "Windows audio output device changed; reopening loopback"
@@ -428,12 +549,17 @@ impl AudioWorker {
             running,
             mux,
             mode,
+            plan,
             thread: Some(thread),
         })
     }
 
     pub fn mode(&self) -> AudioMode {
         self.mode
+    }
+
+    pub fn plan(&self) -> &CapturePlan {
+        &self.plan
     }
 }
 
@@ -470,6 +596,31 @@ mod tests {
         let mono: Vec<u8> = (-0.5f32).to_le_bytes().to_vec();
         let s_mono = convert_to_stereo_i16(&mono, 1, 1, SampleFormat::Float32);
         assert_eq!(s_mono, vec![-16384, -16384]);
+    }
+
+    #[test]
+    fn capture_plan_uses_system_for_desktop_and_dedups_pids() {
+        use crate::win32::DESKTOP_WINDOW_ID;
+        assert_eq!(capture_plan(false, &[(10, 4)]), CapturePlan::System);
+        assert_eq!(capture_plan(true, &[]), CapturePlan::Idle);
+        assert_eq!(
+            capture_plan(true, &[(DESKTOP_WINDOW_ID, 0), (10, 4)]),
+            CapturePlan::System
+        );
+        assert_eq!(
+            capture_plan(true, &[(10, 4), (11, 4), (12, 9)]),
+            CapturePlan::Processes(vec![4, 9])
+        );
+    }
+
+    #[test]
+    fn mix_tracks_sums_active_streams_with_saturation_and_pads_silence() {
+        let a = [1000i16, -20_000, 30_000, 0];
+        let b: [i16; 0] = [];
+        let c = [500i16, -20_000, 10_000, -500];
+        let mixed = process::mix_tracks(&[&a, &b, &c], 2);
+        assert_eq!(mixed, vec![1500, i16::MIN, i16::MAX, -500]);
+        assert!(process::mix_tracks(&[&b, &[]], 2).iter().all(|s| *s == 0));
     }
 
     #[test]

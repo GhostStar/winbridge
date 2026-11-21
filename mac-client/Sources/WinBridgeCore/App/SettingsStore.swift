@@ -73,6 +73,7 @@ struct ClientSettings {
     var syncWindowResize: Bool
     var audioEnabled: Bool
     var audioQuality: AudioQualityPreference
+    var audioProcessOnly: Bool
     var audioVolume: Float
     var mouseSensitivity: Float
     var targetFps: UInt32
@@ -125,6 +126,7 @@ enum SettingsStore {
         let audioEnabled = defaults.object(forKey: "winbridge.audioEnabled") as? Bool ?? false
         let audioQualityRaw = defaults.string(forKey: "winbridge.audioQuality") ?? AudioQualityPreference.opus128.rawValue
         let audioQuality = AudioQualityPreference(rawValue: audioQualityRaw) ?? .opus128
+        let audioProcessOnly = defaults.object(forKey: "winbridge.audioProcessOnly") as? Bool ?? false
         let audioVolume = defaults.object(forKey: "winbridge.audioVolume") as? Float ?? 0.85
         let mouseSensitivity = defaults.object(forKey: "winbridge.mouseSensitivity") as? Float ?? 1.0
         let fpsInt = defaults.integer(forKey: "winbridge.fps")
@@ -167,6 +169,7 @@ enum SettingsStore {
             syncWindowResize: syncResize,
             audioEnabled: audioEnabled,
             audioQuality: audioQuality,
+            audioProcessOnly: audioProcessOnly,
             audioVolume: max(0, min(1, audioVolume)),
             mouseSensitivity: max(0.1, min(4.0, mouseSensitivity)),
             targetFps: fps,
@@ -199,6 +202,7 @@ enum SettingsStore {
         defaults.set(s.syncWindowResize, forKey: "winbridge.syncWindowResize")
         defaults.set(s.audioEnabled, forKey: "winbridge.audioEnabled")
         defaults.set(s.audioQuality.rawValue, forKey: "winbridge.audioQuality")
+        defaults.set(s.audioProcessOnly, forKey: "winbridge.audioProcessOnly")
         defaults.set(s.audioVolume, forKey: "winbridge.audioVolume")
         defaults.set(s.mouseSensitivity, forKey: "winbridge.mouseSensitivity")
         defaults.set(Int(s.targetFps), forKey: "winbridge.fps")

@@ -9,7 +9,7 @@ use std::{
 };
 mod tracking;
 use crate::{
-    audio::{AudioMode, AudioWorker},
+    audio::{self, AudioMode, AudioWorker},
     capture,
     config::Config,
     input::{GamepadManager, Injector},
@@ -71,6 +71,8 @@ struct Session {
     files: FileReceiver,
     cursor: Option<CursorShape>,
     audio: Option<AudioWorker>,
+    audio_mode: Option<AudioMode>,
+    audio_per_process: bool,
     auto_uac_desktop: bool,
     last_desktop_state: win32::desktop::DesktopState,
 }
@@ -187,6 +189,7 @@ impl Session {
         if let Some(shape) = self.cursor.as_ref().filter(|shape| shape.window_id == id) {
             self.send(Payload::CursorShape(shape.clone()))?;
         }
+        let _ = self.sync_audio();
         Ok(())
     }
     fn remove(&mut self, id: u64, closed: bool) -> Result<()> {
@@ -208,6 +211,7 @@ impl Session {
                 self.send(Payload::WindowClosed(WindowClosed { window_id: child }))?;
             }
         }
+        let _ = self.sync_audio();
         Ok(())
     }
     async fn subscribe(&mut self, mut req: SubscribeWindow) -> Result<()> {
@@ -336,6 +340,7 @@ impl Session {
             }
             Payload::LaunchApp(req) => return self.launch(req).await,
             Payload::SetAudioConfig(cfg) => {
+                self.audio_per_process = cfg.scope == 1;
                 if cfg.enabled {
                     let desired = if cfg.codec == 11 {
                         AudioMode::Opus {
@@ -348,23 +353,11 @@ impl Session {
                     } else {
                         AudioMode::PcmS16Le
                     };
-                    let needs_restart = self
-                        .audio
-                        .as_ref()
-                        .is_none_or(|worker| worker.mode() != desired);
-                    if needs_restart {
-                        self.audio = None;
-                        match AudioWorker::start(self.mux.clone(), desired) {
-                            Ok(worker) => self.audio = Some(worker),
-                            Err(e) => {
-                                return self.error(0, 0, format!("audio start failed: {e:#}"))
-                            }
-                        }
-                    }
+                    self.audio_mode = Some(desired);
                 } else {
-                    self.audio = None;
+                    self.audio_mode = None;
                 }
-                return Ok(());
+                return self.sync_audio();
             }
             Payload::GamepadState(state) => {
                 if let Err(e) = self.gamepad.apply(&state) {
@@ -427,6 +420,36 @@ impl Session {
             ),
         }
     }
+
+    fn sync_audio(&mut self) -> Result<()> {
+        let Some(mode) = self.audio_mode else {
+            self.audio = None;
+            return Ok(());
+        };
+        let roots: Vec<(u64, u32)> = self
+            .windows
+            .values()
+            .filter(|sub| sub.root == sub.info.window_id)
+            .map(|sub| (sub.info.window_id, sub.info.pid))
+            .collect();
+        let plan = audio::capture_plan(self.audio_per_process, &roots);
+        if self
+            .audio
+            .as_ref()
+            .is_some_and(|worker| worker.mode() == mode && worker.plan() == &plan)
+        {
+            return Ok(());
+        }
+        self.audio = None;
+        match AudioWorker::start(self.mux.clone(), mode, plan, self.replies.clone()) {
+            Ok(worker) => {
+                self.audio = Some(worker);
+                Ok(())
+            }
+            Err(e) => self.error(0, 0, format!("audio start failed: {e:#}")),
+        }
+    }
+
     fn notice(&mut self, n: Notice) -> Result<()> {
         if !self
             .windows
@@ -511,6 +534,8 @@ pub async fn run(
         files: FileReceiver::default(),
         cursor: None,
         audio: None,
+        audio_mode: None,
+        audio_per_process: false,
         auto_uac_desktop: false,
         last_desktop_state: win32::desktop::DesktopState::Default,
     };

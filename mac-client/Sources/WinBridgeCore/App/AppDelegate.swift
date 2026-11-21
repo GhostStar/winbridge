@@ -100,6 +100,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         state.toggleAudioEnabled()
     }
 
+    @objc private func toggleAudioProcessOnlyAction() {
+        state.toggleAudioProcessOnly()
+    }
+
     @objc private func toggleDesktopAction() {
         state.toggleDesktopView()
     }
@@ -199,6 +203,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let audioItem = NSMenuItem(title: "开启 Windows 音频", action: #selector(toggleAudioAction), keyEquivalent: "")
             audioItem.state = state.settings.audioEnabled ? .on : .off
             menu.addItem(audioItem)
+            let processAudio = NSMenuItem(
+                title: "只采集已投射进程",
+                action: #selector(toggleAudioProcessOnlyAction),
+                keyEquivalent: ""
+            )
+            processAudio.state = state.settings.audioProcessOnly ? .on : .off
+            menu.addItem(processAudio)
 
             let pinned = state.pinnedApps
             if !pinned.isEmpty {
