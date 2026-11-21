@@ -849,7 +849,7 @@ final class AppState {
         wc.onFilesDropped = { [weak self] winId, urls in self?.sendDroppedFiles(urls, toWindowId: winId) }
 
         controllers[info.windowId] = wc
-        ClientLogger.shared.info("Opened window 0x\(String(info.windowId, radix: 16)) kind=\(info.kind) \(info.width)x\(info.height) title=\"\(info.title)\"")
+        ClientLogger.shared.info("Opened window 0x\(String(info.windowId, radix: 16)) kind=\(info.kind) \(info.width)x\(info.height) title=\\"\(info.title)\"")
         if info.kind == .normal {
             subscribedRootIds.insert(info.windowId)
         }
