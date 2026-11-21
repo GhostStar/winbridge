@@ -1066,6 +1066,12 @@ final class AppState {
         onStateChanged?()
     }
 
+    func focusDesktopIfOpen() {
+        if let existing = controllers[SyntheticWindow.primaryDesktop] {
+            existing.present(owner: nil)
+        }
+    }
+
     func focusOrSubscribe(_ info: WindowInfo) {
         if let existing = controllers[info.windowId] {
             existing.present(owner: nil)

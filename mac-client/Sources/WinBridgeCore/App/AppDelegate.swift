@@ -18,8 +18,10 @@ public enum WinBridgeAppLauncher {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let state = AppState()
+    private let globalHotKey = GlobalHotKey()
     private var managerController: ManagerWindowController?
     private var filePullController: FilePullWindowController?
+    private var quickLauncherController: QuickLauncherWindowController?
     private var statusItem: NSStatusItem?
     private var windowMenu: NSMenu?
 
@@ -29,14 +31,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let manager = ManagerWindowController(state: state)
         self.managerController = manager
+        self.quickLauncherController = QuickLauncherWindowController(state: state)
 
         state.onStateChanged = { [weak self] in
             self?.managerController?.refreshUI()
+            self?.quickLauncherController?.refreshResults()
             self?.rebuildStatusMenu()
             self?.rebuildWindowMenu()
         }
         state.onOpenManager = { [weak self] in
             self?.showManager()
+        }
+        globalHotKey.registerOptionSpace { [weak self] in
+            self?.toggleQuickLauncherAction()
         }
         state.startDiscovery()
 
@@ -56,9 +63,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        globalHotKey.unregister()
         state.stopDiscovery()
         state.unlockAllPointers()
         state.disconnect()
+    }
+
+    @objc private func toggleQuickLauncherAction() {
+        if quickLauncherController == nil {
+            quickLauncherController = QuickLauncherWindowController(state: state)
+        }
+        quickLauncherController?.toggle()
     }
 
     @objc func showManager() {
@@ -206,6 +221,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func rebuildWindowMenu() {
         guard let winMenu = windowMenu else { return }
         winMenu.removeAllItems()
+        let launcherItem = NSMenuItem(
+            title: "快速启动 / 切换窗口 (⌥Space)",
+            action: #selector(toggleQuickLauncherAction),
+            keyEquivalent: ""
+        )
+        winMenu.addItem(launcherItem)
         winMenu.addItem(withTitle: "刷新 Windows 窗口列表", action: #selector(refreshWindowsAction), keyEquivalent: "")
         let lockItem = NSMenuItem(
             title: "锁定 / 解锁游戏鼠标 (3D 相对视角)",
@@ -283,6 +304,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(withTitle: "已连接：\(host) (\(codec.displayName))", action: nil, keyEquivalent: "")
         }
         menu.addItem(.separator())
+        let launcherStatusItem = NSMenuItem(
+            title: "快速启动 / 切换窗口 (⌥Space)",
+            action: #selector(toggleQuickLauncherAction),
+            keyEquivalent: ""
+        )
+        launcherStatusItem.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: nil)
+        menu.addItem(launcherStatusItem)
         menu.addItem(withTitle: "打开管理窗口…", action: #selector(showManager), keyEquivalent: "")
         if state.connectionState == .disconnected,
            WakeOnLan.normalizeMac(state.settings.macAddress) != nil {
