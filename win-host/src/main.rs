@@ -65,6 +65,12 @@ fn main() -> Result<()> {
     }
 
     load_cli_token(&mut config)?;
+    if let Some((width, height)) = config.virtual_display {
+        match win32::apply_virtual_mode(width, height, 60) {
+            Ok(message) => tracing::info!("{message}"),
+            Err(e) => tracing::error!("{e:#}"),
+        }
+    }
 
     if config.install_service {
         return service::install(&config);

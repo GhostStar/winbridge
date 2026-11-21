@@ -3,6 +3,11 @@ pub use apps::{discover_apps, launch_shortcut};
 mod clipboard;
 mod cursor;
 pub mod desktop;
+mod display;
+pub use display::{
+    apply_virtual_mode, is_monitor_id, list_monitors, monitor_handle, monitor_index,
+    monitor_window_info, MONITOR_ID_BASE,
+};
 mod event_hook;
 pub use event_hook::{Event, Observer};
 pub mod files;
