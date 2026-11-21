@@ -33,6 +33,9 @@ final class AppState {
             if oldValue.audioEnabled != settings.audioEnabled || oldValue.audioQuality != settings.audioQuality {
                 applyAudioSetting()
             }
+            if oldValue.micEnabled != settings.micEnabled {
+                applyMicSetting()
+            }
             if !settings.autoReconnect && oldValue.autoReconnect {
                 cancelReconnect()
             }
@@ -63,6 +66,7 @@ final class AppState {
     private var controllers: [UInt64: RemoteWindowController] = [:]
     private let clipboardMonitor = ClipboardMonitor()
     private let audioPlayer = AudioPlayer()
+    private let micUplink = MicUplink()
     private let hostDiscovery = HostDiscovery()
     private let gamepadMonitor = GamepadMonitor()
 
@@ -94,6 +98,14 @@ final class AppState {
         gamepadMonitor.onGamepadState = { [weak self] state in
             self?.sendControl(.gamepadState(state))
         }
+        micUplink.onChunk = { [weak self] pcm in
+            self?.sendControl(.micChunk(MicChunk(
+                sampleRate: 48_000,
+                channels: 2,
+                pcmS16le: pcm,
+                enabled: true
+            )))
+        }
     }
 
     func startDiscovery() {
@@ -119,6 +131,47 @@ final class AppState {
         s.audioEnabled.toggle()
         settings = s
         onStateChanged?()
+    }
+
+    func toggleMicEnabled() {
+        var s = settings
+        s.micEnabled.toggle()
+        settings = s
+        onStateChanged?()
+    }
+
+    private func applyMicSetting() {
+        guard case .connected = connectionState, settings.micEnabled else {
+            if micUplink.running {
+                micUplink.stop()
+                sendControl(.micChunk(MicChunk(enabled: false)))
+            }
+            return
+        }
+        micUplink.requestPermission { [weak self] granted in
+            Task { @MainActor in
+                guard let self else { return }
+                guard self.settings.micEnabled, case .connected = self.connectionState else { return }
+                guard granted else {
+                    var s = self.settings
+                    s.micEnabled = false
+                    self.settings = s
+                    self.setBanner("macOS 没有授予麦克风权限，无法上行", isError: true)
+                    self.onStateChanged?()
+                    return
+                }
+                do {
+                    try self.micUplink.start()
+                    self.setBanner("正在把 Mac 麦克风发到 Windows。Windows 上需要已安装的虚拟声卡，否则主机会拒绝。", isError: false)
+                } catch {
+                    var s = self.settings
+                    s.micEnabled = false
+                    self.settings = s
+                    self.setBanner("打开麦克风失败：\(error.localizedDescription)", isError: true)
+                }
+                self.onStateChanged?()
+            }
+        }
     }
 
     func togglePerformanceHud() {
@@ -286,6 +339,9 @@ final class AppState {
                 self.gamepadMonitor.start()
                 if self.settings.audioEnabled {
                     self.applyAudioSetting()
+                }
+                if self.settings.micEnabled {
+                    self.applyMicSetting()
                 }
                 self.refreshWindowList()
                 self.refreshAppList()
@@ -464,6 +520,7 @@ final class AppState {
         clipboardMonitor.stop()
         gamepadMonitor.stop()
         audioPlayer.stop()
+        micUplink.stop()
         connection = nil
         connectionState = .disconnected
         rttMs = nil
@@ -860,9 +917,14 @@ final class AppState {
         case .encoderError:
             prefix = "[编码错误] "
         case .unspecified:
-            prefix = "[提示] "
+            prefix = err.message.hasPrefix("已将") ? "" : "[提示] "
         }
-        setBanner(prefix + err.message, isError: true)
+        if err.message.contains("虚拟麦克风") && settings.micEnabled && !err.message.hasPrefix("已将") {
+            var s = settings
+            s.micEnabled = false
+            settings = s
+        }
+        setBanner(prefix + err.message, isError: !(err.code == .unspecified && err.message.hasPrefix("已将")))
         onStateChanged?()
     }
 
