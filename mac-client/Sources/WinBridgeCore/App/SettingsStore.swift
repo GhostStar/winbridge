@@ -43,7 +43,7 @@ struct ClientSettings {
 }
 
 enum SettingsStore {
-    private static let defaults = UserDefaults.standard
+    private static let defaults = UserDefaults(suiteName: "com.winbridge.client") ?? UserDefaults.standard
 
     static func load() -> ClientSettings {
         let host = defaults.string(forKey: "winbridge.host") ?? "192.168.1.100"

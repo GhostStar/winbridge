@@ -126,7 +126,7 @@ final class AppState {
         let config = ConnectionConfig(
             host: host,
             port: settings.port,
-            authToken: settings.authToken,
+            authToken: settings.authToken.trimmingCharacters(in: .whitespacesAndNewlines),
             clientName: Host.current().localizedName ?? "macOS",
             displayScale: displayScale,
             supportedCodecs: settings.codecPreference.offeredCodecs
