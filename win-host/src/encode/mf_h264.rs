@@ -419,6 +419,20 @@ impl VideoEncoder {
         Ok(frames)
     }
 
+    /// Updates the encoder target bitrate in place via `ICodecAPI` without tearing down the MFT.
+    /// Returns `true` if the MFT accepted the live update.
+    pub fn set_bitrate_kbps(&mut self, bitrate_kbps: u32) -> bool {
+        let Some(bitrate) = bitrate_kbps.checked_mul(1000) else {
+            return false;
+        };
+        unsafe {
+            self.transform
+                .codec
+                .SetValue(&CODECAPI_AVEncCommonMeanBitRate, &VARIANT::from(bitrate))
+                .is_ok()
+        }
+    }
+
     pub fn encode(&mut self, tex: &ID3D11Texture2D, force: bool) -> Result<Vec<(bool, Vec<u8>)>> {
         let mut frames = self.drain_ready()?;
         let deadline = Instant::now() + Duration::from_secs(2);

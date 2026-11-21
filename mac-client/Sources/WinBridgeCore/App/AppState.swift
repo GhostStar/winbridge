@@ -43,6 +43,9 @@ final class AppState {
                 || oldValue.audioProcessOnly != settings.audioProcessOnly {
                 applyAudioSetting()
             }
+            if oldValue.videoProfile != settings.videoProfile || oldValue.adaptiveBitrate != settings.adaptiveBitrate {
+                pushVideoConfig(windowId: 0)
+            }
             if !settings.autoReconnect && oldValue.autoReconnect {
                 cancelReconnect()
             }
@@ -84,6 +87,7 @@ final class AppState {
     private var activeTransferNames: [UInt64: String] = [:]
     private var incomingPulls: [UInt64: IncomingPull] = [:]
     var onHostFilesListed: ((ListHostFilesResponse) -> Void)?
+    private var lastAdaptivePush = Date.distantPast
 
     var onStateChanged: (() -> Void)?
     var onOpenManager: (() -> Void)?
@@ -131,6 +135,48 @@ final class AppState {
         s.audioEnabled.toggle()
         settings = s
         onStateChanged?()
+    }
+
+    func setVideoProfile(_ profile: VideoProfilePreference) {
+        var s = settings
+        s.videoProfile = profile
+        settings = s
+        let adapt = s.adaptiveBitrate ? "，自适应码率开" : "，自适应码率关"
+        setBanner("画质已设为\(profile.title)\(adapt)", isError: false)
+        onStateChanged?()
+    }
+
+    func setVideoProfileForActiveProcess(_ profile: VideoProfilePreference) {
+        guard let name = activeRemoteProcessName(), !name.isEmpty else {
+            setBanner("请先选中一个正在投射的窗口，再按进程记住画质", isError: true)
+            onStateChanged?()
+            return
+        }
+        let key = name.lowercased()
+        var s = settings
+        s.processVideoProfiles[key] = profile
+        settings = s
+        if let wc = NSApp.keyWindow?.windowController as? RemoteWindowController {
+            pushVideoConfig(windowId: wc.windowId)
+        }
+        setBanner("已记住：\(name) 使用\(profile.title)画质", isError: false)
+        onStateChanged?()
+    }
+
+    func toggleAdaptiveBitrate() {
+        var s = settings
+        s.adaptiveBitrate.toggle()
+        settings = s
+        setBanner(s.adaptiveBitrate ? "已开启自适应码率（队列积压或 RTT 升高时降码率）" : "已关闭自适应码率", isError: false)
+        onStateChanged?()
+    }
+
+    func videoProfile(for info: WindowInfo) -> VideoProfilePreference {
+        let key = info.processName.lowercased()
+        if !key.isEmpty, let saved = settings.processVideoProfiles[key] {
+            return saved
+        }
+        return settings.videoProfile
     }
 
     func togglePerformanceHud() {
@@ -216,6 +262,42 @@ final class AppState {
         onStateChanged?()
     }
 
+    func pushVideoConfig(windowId: UInt64, rttOnly: Bool = false) {
+        guard case .connected = connectionState else { return }
+        let profile: VideoProfile
+        if rttOnly {
+            profile = .unspecified
+        } else if windowId != 0, let info = videoInfo(for: windowId) {
+            profile = videoProfile(for: info).protoValue
+        } else {
+            profile = settings.videoProfile.protoValue
+        }
+        let rtt = UInt32(min(10_000, max(0, (rttMs ?? 0).rounded())))
+        sendControl(.setVideoConfig(SetVideoConfig(
+            windowId: windowId,
+            profile: profile,
+            targetFps: 0,
+            maxBitrateKbps: 0,
+            adaptive: settings.adaptiveBitrate,
+            rttMs: rtt
+        )))
+    }
+
+    private func pushAdaptiveRttIfNeeded() {
+        guard settings.adaptiveBitrate, case .connected = connectionState else { return }
+        let now = Date()
+        guard now.timeIntervalSince(lastAdaptivePush) >= 2 else { return }
+        lastAdaptivePush = now
+        pushVideoConfig(windowId: 0, rttOnly: true)
+    }
+
+    private func videoInfo(for windowId: UInt64) -> WindowInfo? {
+        if let info = controllers[windowId]?.info {
+            return info
+        }
+        return availableWindows.first { $0.windowId == windowId }
+    }
+
     // MARK: - Connection Lifecycle & Auto-Reconnect
 
     func connect(isAutoReconnect: Bool = false) {
@@ -264,6 +346,7 @@ final class AppState {
             Task { @MainActor in
                 self?.rttMs = rtt
                 self?.onStateChanged?()
+                self?.pushAdaptiveRttIfNeeded()
             }
         }
         conn.onDisconnected = { [weak self] error in
@@ -313,6 +396,7 @@ final class AppState {
                 if self.settings.audioEnabled {
                     self.applyAudioSetting()
                 }
+                self.pushVideoConfig(windowId: 0)
                 self.refreshWindowList()
                 self.refreshAppList()
                 self.onStateChanged?()
@@ -1014,6 +1098,10 @@ final class AppState {
         ClientLogger.shared.info("Opened window 0x\(String(info.windowId, radix: 16)) kind=\(info.kind) \(info.width)x\(info.height) title=\"\(info.title)\"")
         if info.kind == .normal {
             subscribedRootIds.insert(info.windowId)
+            let procKey = info.processName.lowercased()
+            if !procKey.isEmpty, settings.processVideoProfiles[procKey] != nil {
+                pushVideoConfig(windowId: info.windowId)
+            }
         }
         wc.present(owner: ownerController)
         wc.updateHudVisibility()

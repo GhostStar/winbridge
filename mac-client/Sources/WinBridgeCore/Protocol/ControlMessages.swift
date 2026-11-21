@@ -50,6 +50,13 @@ enum CaptureMode: Int32, CaseIterable, Sendable {
     }
 }
 
+enum VideoProfile: Int32, CaseIterable, Sendable {
+    case unspecified = 0
+    case auto = 1
+    case text = 2
+    case game = 3
+}
+
 enum WindowKind: Int32, Sendable {
     case unspecified = 0
     case normal = 1
@@ -1223,6 +1230,44 @@ struct SetAudioConfig: Equatable, Sendable {
     }
 }
 
+struct SetVideoConfig: Equatable, Sendable {
+    var windowId: UInt64 = 0
+    var profile: VideoProfile = .unspecified
+    var targetFps: UInt32 = 0
+    var maxBitrateKbps: UInt32 = 0
+    var adaptive: Bool = false
+    var rttMs: UInt32 = 0
+
+    func encode() -> Data {
+        var w = ProtoWriter()
+        w.writeUInt64(field: 1, windowId)
+        w.writeInt32(field: 2, profile.rawValue)
+        w.writeUInt32(field: 3, targetFps)
+        w.writeUInt32(field: 4, maxBitrateKbps)
+        w.writeBool(field: 5, adaptive)
+        w.writeUInt32(field: 6, rttMs)
+        return w.data
+    }
+
+    static func decode(from data: Data) throws -> SetVideoConfig {
+        var r = ProtoReader(data: data)
+        var m = SetVideoConfig()
+        while !r.isAtEnd {
+            let (field, wire) = try r.readTag()
+            switch field {
+            case 1: m.windowId = try r.readUInt64()
+            case 2: m.profile = VideoProfile(rawValue: try r.readInt32()) ?? .unspecified
+            case 3: m.targetFps = try r.readUInt32()
+            case 4: m.maxBitrateKbps = try r.readUInt32()
+            case 5: m.adaptive = try r.readBool()
+            case 6: m.rttMs = try r.readUInt32()
+            default: try r.skip(wireType: wire)
+            }
+        }
+        return m
+    }
+}
+
 struct HostError: Equatable, Sendable {
     var windowId: UInt64 = 0
     var code: HostErrorCode = .unspecified
@@ -1276,6 +1321,7 @@ struct ControlMessage: Equatable, Sendable {
         case closeWindow(CloseWindow)                   // 42
         case windowAction(WindowAction)                 // 43
         case requestKeyFrame(RequestKeyFrame)           // 44
+        case setVideoConfig(SetVideoConfig)             // 45
         case mouseEvent(MouseEvent)                     // 50
         case keyEvent(KeyEvent)                         // 51
         case textInput(TextInput)                       // 52
@@ -1320,6 +1366,7 @@ struct ControlMessage: Equatable, Sendable {
         case .closeWindow(let m): w.writeMessage(field: 42, m.encode(), forceEmit: true)
         case .windowAction(let m): w.writeMessage(field: 43, m.encode(), forceEmit: true)
         case .requestKeyFrame(let m): w.writeMessage(field: 44, m.encode(), forceEmit: true)
+        case .setVideoConfig(let m): w.writeMessage(field: 45, m.encode(), forceEmit: true)
         case .mouseEvent(let m): w.writeMessage(field: 50, m.encode(), forceEmit: true)
         case .keyEvent(let m): w.writeMessage(field: 51, m.encode(), forceEmit: true)
         case .textInput(let m): w.writeMessage(field: 52, m.encode(), forceEmit: true)
@@ -1367,6 +1414,7 @@ struct ControlMessage: Equatable, Sendable {
             case 42: payload = .closeWindow(try CloseWindow.decode(from: try r.readBytes()))
             case 43: payload = .windowAction(try WindowAction.decode(from: try r.readBytes()))
             case 44: payload = .requestKeyFrame(try RequestKeyFrame.decode(from: try r.readBytes()))
+            case 45: payload = .setVideoConfig(try SetVideoConfig.decode(from: try r.readBytes()))
             case 50: payload = .mouseEvent(try MouseEvent.decode(from: try r.readBytes()))
             case 51: payload = .keyEvent(try KeyEvent.decode(from: try r.readBytes()))
             case 52: payload = .textInput(try TextInput.decode(from: try r.readBytes()))

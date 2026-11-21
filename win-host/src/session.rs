@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         Arc,
     },
     time::{Duration, Instant},
@@ -33,6 +33,8 @@ struct Subscription {
     ack: u32,
     running: Arc<AtomicBool>,
     key: Arc<AtomicBool>,
+    rates: Arc<crate::quality::RateControl>,
+    profile_override: Option<i32>,
     worker: Option<std::thread::JoinHandle<()>>,
 }
 impl Drop for Subscription {
@@ -82,6 +84,9 @@ struct Session {
     audio: Option<AudioWorker>,
     audio_mode: Option<AudioMode>,
     audio_per_process: bool,
+    video_profile: i32,
+    video_adaptive: bool,
+    video_rtt_ms: u32,
     auto_uac_desktop: bool,
     last_desktop_state: win32::desktop::DesktopState,
 }
@@ -225,16 +230,20 @@ impl Session {
         let ack = self.windows.get(&id).map_or(0, |s| s.ack);
         let running = Arc::new(AtomicBool::new(true));
         let key = Arc::new(AtomicBool::new(true));
-        let fps = if options.target_fps == 0 {
-            self.config.fps
-        } else {
-            options.target_fps.min(self.config.fps)
-        };
-        let rate = if options.max_bitrate_kbps == 0 {
-            self.config.bitrate
-        } else {
-            options.max_bitrate_kbps.min(self.config.bitrate)
-        };
+        let (fps, rate) = crate::quality::profile_budget(
+            self.video_profile,
+            self.config.fps,
+            self.config.bitrate,
+            options.target_fps,
+            options.max_bitrate_kbps,
+        );
+        let rates = Arc::new(crate::quality::RateControl {
+            fps: AtomicU32::new(fps),
+            base_bitrate_kbps: AtomicU32::new(rate),
+            rtt_ms: AtomicU32::new(self.video_rtt_ms),
+            adaptive: AtomicBool::new(self.video_adaptive),
+            generation: AtomicU32::new(0),
+        });
         let codec = self.codec;
         let cursor = self.config.capture_cursor;
         let monitor_crop = match options.capture_mode {
@@ -247,6 +256,8 @@ impl Session {
         self.mux.register(id, info.kind == 3, key.clone());
         let alive = running.clone();
         let force = key.clone();
+        let rates_thread = rates.clone();
+        let mux_backlog = mux.clone();
         let worker = std::thread::Builder::new()
             .name(format!("capture-{id:x}"))
             .spawn(move || {
@@ -261,13 +272,13 @@ impl Session {
                 };
                 let result = capture::stream(
                     id,
-                    fps,
-                    rate,
+                    &rates_thread,
                     codec,
                     cursor,
                     monitor_crop,
                     &alive,
                     &force,
+                    move || mux_backlog.backlog(id),
                     |w, h, k, data| mux.push(id, &force, codec as u8, (w, h), k, data),
                     |code, msg| report(code, msg, false),
                 );
@@ -295,6 +306,8 @@ impl Session {
                 ack,
                 running,
                 key,
+                rates,
+                profile_override: None,
                 worker: Some(handle),
             },
         );
@@ -472,6 +485,7 @@ impl Session {
                 }
                 return self.sync_audio();
             }
+            Payload::SetVideoConfig(cfg) => return self.apply_video_config(cfg),
             Payload::GamepadState(state) => {
                 if let Err(e) = self.gamepad.apply(&state) {
                     let _ = self.error(0, 0, format!("手柄透传提示: {e:#}"));
@@ -630,6 +644,73 @@ impl Session {
         }
     }
 
+    fn apply_video_config(&mut self, cfg: SetVideoConfig) -> Result<()> {
+        if cfg.window_id == 0 {
+            if cfg.profile != 0 {
+                self.video_profile = cfg.profile;
+            }
+            self.video_adaptive = cfg.adaptive;
+            self.video_rtt_ms = cfg.rtt_ms;
+        }
+        let ids: Vec<u64> = if cfg.window_id == 0 {
+            self.windows.keys().copied().collect()
+        } else if self.windows.contains_key(&cfg.window_id) {
+            vec![cfg.window_id]
+        } else {
+            return self.error(cfg.window_id, 1, "window is not subscribed");
+        };
+        // profile/fps/bitrate all zero is an RTT heartbeat: do not rebuild the budget.
+        let touches_budget = cfg.profile != 0 || cfg.target_fps != 0 || cfg.max_bitrate_kbps != 0;
+        for id in ids {
+            let Some(sub) = self.windows.get_mut(&id) else {
+                continue;
+            };
+            let prev_adaptive = sub.rates.adaptive.swap(cfg.adaptive, Ordering::AcqRel);
+            sub.rates.rtt_ms.store(cfg.rtt_ms, Ordering::Release);
+            if !touches_budget {
+                if prev_adaptive != cfg.adaptive {
+                    sub.rates.generation.fetch_add(1, Ordering::Release);
+                }
+                continue;
+            }
+            if cfg.window_id != 0 && cfg.profile != 0 {
+                sub.profile_override = Some(cfg.profile);
+            } else if cfg.window_id == 0 && sub.profile_override.is_some() {
+                // Global profile updates do not clobber explicit per-window/per-process overrides.
+                sub.rates.generation.fetch_add(1, Ordering::Release);
+                continue;
+            }
+            let profile = if cfg.profile == 0 {
+                sub.profile_override.unwrap_or(self.video_profile)
+            } else {
+                cfg.profile
+            };
+            let requested_fps = if cfg.target_fps == 0 {
+                sub.options.target_fps
+            } else {
+                cfg.target_fps
+            };
+            let requested_rate = if cfg.max_bitrate_kbps == 0 {
+                sub.options.max_bitrate_kbps
+            } else {
+                cfg.max_bitrate_kbps
+            };
+            let (fps, rate) = crate::quality::profile_budget(
+                profile,
+                self.config.fps,
+                self.config.bitrate,
+                requested_fps,
+                requested_rate,
+            );
+            sub.rates.fps.store(fps, Ordering::Release);
+            sub.rates
+                .base_bitrate_kbps
+                .store(rate, Ordering::Release);
+            sub.rates.generation.fetch_add(1, Ordering::Release);
+        }
+        Ok(())
+    }
+
     fn notice(&mut self, n: Notice) -> Result<()> {
         if !self
             .windows
@@ -721,6 +802,9 @@ pub async fn run(
         audio: None,
         audio_mode: None,
         audio_per_process: false,
+        video_profile: 1,
+        video_adaptive: false,
+        video_rtt_ms: 0,
         auto_uac_desktop: false,
         last_desktop_state: win32::desktop::DesktopState::Default,
     };

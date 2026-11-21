@@ -48,6 +48,7 @@ message ControlMessage {
     CloseWindow close_window = 42;               // Mac -> Win
     WindowAction window_action = 43;             // Mac -> Win
     RequestKeyFrame request_key_frame = 44;      // Mac -> Win
+    SetVideoConfig set_video_config = 45;        // Mac -> Win
 
     // --- Input (Mac -> Win) ---
     MouseEvent mouse_event = 50;                 // Mac -> Win
@@ -365,6 +366,28 @@ message WindowAction {
 
 message RequestKeyFrame {
   uint64 window_id = 1;
+}
+
+enum VideoProfile {
+  VIDEO_PROFILE_UNSPECIFIED = 0;
+  VIDEO_PROFILE_AUTO = 1;
+  // Fewer frames, host bitrate kept so each frame gets more bits (IDE / browser).
+  VIDEO_PROFILE_TEXT = 2;
+  // Host frame-rate cap. Pair with adaptive bitrate on Wi-Fi.
+  VIDEO_PROFILE_GAME = 3;
+}
+
+message SetVideoConfig {
+  // 0 updates every subscribed window and the session default for later subscriptions.
+  uint64 window_id = 1;
+  VideoProfile profile = 2;
+  // 0 = derive from the profile and the host cap.
+  uint32 target_fps = 3;
+  // 0 = derive from the profile. This is the base rate, before adaptation.
+  uint32 max_bitrate_kbps = 4;
+  bool adaptive = 5;
+  // Latest control-channel RTT observed by the client, in milliseconds. 0 = unknown.
+  uint32 rtt_ms = 6;
 }
 
 // ============================================================================

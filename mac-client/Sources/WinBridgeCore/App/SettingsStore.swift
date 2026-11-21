@@ -57,6 +57,28 @@ enum AudioQualityPreference: String, CaseIterable {
     }
 }
 
+enum VideoProfilePreference: String, CaseIterable {
+    case auto = "auto"
+    case text = "text"
+    case game = "game"
+
+    var title: String {
+        switch self {
+        case .auto: return "自动"
+        case .text: return "文字"
+        case .game: return "游戏"
+        }
+    }
+
+    var protoValue: VideoProfile {
+        switch self {
+        case .auto: return .auto
+        case .text: return .text
+        case .game: return .game
+        }
+    }
+}
+
 struct ClientSettings {
     var host: String
     var port: UInt16
@@ -77,6 +99,9 @@ struct ClientSettings {
     var audioVolume: Float
     var mouseSensitivity: Float
     var targetFps: UInt32
+    var videoProfile: VideoProfilePreference
+    var adaptiveBitrate: Bool
+    var processVideoProfiles: [String: VideoProfilePreference]
     var processCaptureModes: [String: CaptureMode]
     var processMouseSensitivity: [String: Float]
     var processAutoGameLock: [String: Bool]
@@ -131,6 +156,16 @@ enum SettingsStore {
         let mouseSensitivity = defaults.object(forKey: "winbridge.mouseSensitivity") as? Float ?? 1.0
         let fpsInt = defaults.integer(forKey: "winbridge.fps")
         let fps = (fpsInt >= 1 && fpsInt <= 240) ? UInt32(fpsInt) : 60
+        let profileRaw = defaults.string(forKey: "winbridge.videoProfile") ?? VideoProfilePreference.auto.rawValue
+        let videoProfile = VideoProfilePreference(rawValue: profileRaw) ?? .auto
+        let adaptiveBitrate = defaults.object(forKey: "winbridge.adaptiveBitrate") as? Bool ?? false
+        let rawProcProfiles = defaults.dictionary(forKey: "winbridge.processVideoProfiles") as? [String: String] ?? [:]
+        var procProfiles: [String: VideoProfilePreference] = [:]
+        for (proc, raw) in rawProcProfiles {
+            if let pref = VideoProfilePreference(rawValue: raw) {
+                procProfiles[proc] = pref
+            }
+        }
         let rawModes = defaults.dictionary(forKey: "winbridge.processCaptureModes") as? [String: Int] ?? [:]
         var modes: [String: CaptureMode] = [:]
         for (proc, raw) in rawModes {
@@ -173,6 +208,9 @@ enum SettingsStore {
             audioVolume: max(0, min(1, audioVolume)),
             mouseSensitivity: max(0.1, min(4.0, mouseSensitivity)),
             targetFps: fps,
+            videoProfile: videoProfile,
+            adaptiveBitrate: adaptiveBitrate,
+            processVideoProfiles: procProfiles,
             processCaptureModes: modes,
             processMouseSensitivity: procSens,
             processAutoGameLock: procAutoLock,
@@ -206,6 +244,9 @@ enum SettingsStore {
         defaults.set(s.audioVolume, forKey: "winbridge.audioVolume")
         defaults.set(s.mouseSensitivity, forKey: "winbridge.mouseSensitivity")
         defaults.set(Int(s.targetFps), forKey: "winbridge.fps")
+        defaults.set(s.videoProfile.rawValue, forKey: "winbridge.videoProfile")
+        defaults.set(s.adaptiveBitrate, forKey: "winbridge.adaptiveBitrate")
+        defaults.set(s.processVideoProfiles.mapValues(\.rawValue), forKey: "winbridge.processVideoProfiles")
         defaults.set(s.processCaptureModes.mapValues { Int($0.rawValue) }, forKey: "winbridge.processCaptureModes")
         defaults.set(s.processMouseSensitivity, forKey: "winbridge.processMouseSensitivity")
         defaults.set(s.processAutoGameLock, forKey: "winbridge.processAutoGameLock")

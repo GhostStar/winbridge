@@ -63,6 +63,7 @@ flowchart LR
 
 ### 3. 视频与音频编解码（4K / 高刷 / Wi-Fi 友好）
 - **HEVC (H.265) + H.264 硬件低延迟管线**：Windows D3D11 GPU `BGRA → NV12` + Media Foundation 零 B 帧硬件编码（自动探测并优先协商 `HEVC → H.264 → JPEG`），macOS `VideoToolbox` 硬解 → `IOSurface` 零拷贝上屏。
+- **画质档位 + 自适应码率**：菜单「画质」可选自动 / 文字（最高 30fps，把码率留给清晰度）/ 游戏（吃满主机帧率上限），并可按进程记住。开启「自适应码率」后，主机按发送队列积压和 Mac 回报的 RTT 通过 `ICodecAPI` 在线平滑调节码率（基础值的 50%–100%，不低于 800 kbps，带防抖与冷却避免重建编码器卡顿）。
 - **Opus 低带宽音频 + PCM 无损双模**：基于 Windows WASAPI 环回采集 + 纯 Rust RFC 6716 **Opus 编码**（内置 48 kHz 重采样，支持 `Opus 128k` / `Opus 64k` 将带宽降至原 PCM 的 1/12 ~ 1/24）与 macOS 原生 `AudioToolbox`（`AVAudioConverter`）硬/系统解码，亦可一键切回 `PCM 无损`。菜单「只采集已投射进程」会把已订阅窗口的进程树混成一路音频（Windows 10 20348+ / Windows 11）；不支持或订阅了完整桌面时自动退回整机环回，并在 Mac 上提示。
 
 ---

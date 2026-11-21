@@ -184,6 +184,11 @@ impl Mux {
         slots.audio.clear();
     }
 
+    pub fn backlog(&self, id: u64) -> usize {
+        let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        slots.by_id.get(&id).map(|slot| slot.queue.len()).unwrap_or(0)
+    }
+
     pub fn reset(&self) {
         let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         slots.audio.clear();

@@ -21,6 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var managerController: ManagerWindowController?
     private var filePullController: FilePullWindowController?
     private var statusItem: NSStatusItem?
+    private var windowMenu: NSMenu?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupMainMenu()
@@ -32,6 +33,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         state.onStateChanged = { [weak self] in
             self?.managerController?.refreshUI()
             self?.rebuildStatusMenu()
+            self?.rebuildWindowMenu()
         }
         state.onOpenManager = { [weak self] in
             self?.showManager()
@@ -112,6 +114,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         state.toggleAudioProcessOnly()
     }
 
+    @objc private func setVideoProfileAction(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let profile = VideoProfilePreference(rawValue: raw) else { return }
+        state.setVideoProfile(profile)
+    }
+
+    @objc private func setProcessVideoProfileAction(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let profile = VideoProfilePreference(rawValue: raw) else { return }
+        state.setVideoProfileForActiveProcess(profile)
+    }
+
+    @objc private func toggleAdaptiveBitrateAction() {
+        state.toggleAdaptiveBitrate()
+    }
+
     @objc private func toggleDesktopAction() {
         state.toggleDesktopView()
     }
@@ -150,6 +168,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Window menu
         let winItem = NSMenuItem()
         let winMenu = NSMenu(title: "窗口")
+        windowMenu = winMenu
+        rebuildWindowMenu()
+        winItem.submenu = winMenu
+        mainMenu.addItem(winItem)
+
+        NSApp.mainMenu = mainMenu
+    }
+
+    private func rebuildWindowMenu() {
+        guard let winMenu = windowMenu else { return }
+        winMenu.removeAllItems()
         winMenu.addItem(withTitle: "刷新 Windows 窗口列表", action: #selector(refreshWindowsAction), keyEquivalent: "")
         let lockItem = NSMenuItem(
             title: "锁定 / 解锁游戏鼠标 (3D 相对视角)",
@@ -168,14 +197,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         winMenu.addItem(hudItem)
         winMenu.addItem(withTitle: "刷新当前窗口关键帧 (IDR)", action: #selector(requestKeyframeAction), keyEquivalent: "")
         winMenu.addItem(withTitle: "从 Windows 取回文件…", action: #selector(showFilePullAction), keyEquivalent: "")
+        appendVideoQualityItems(to: winMenu, includeProcess: true)
+        winMenu.addItem(.separator())
         winMenu.addItem(withTitle: "脱离当前远端窗口", action: #selector(detachActiveWindowAction), keyEquivalent: "")
         winMenu.addItem(.separator())
         winMenu.addItem(withTitle: "重置当前主机 TLS 证书信任", action: #selector(resetTrustAction), keyEquivalent: "")
         winMenu.addItem(withTitle: "断开连接", action: #selector(disconnectAction), keyEquivalent: "")
-        winItem.submenu = winMenu
-        mainMenu.addItem(winItem)
-
-        NSApp.mainMenu = mainMenu
     }
 
     private func setupStatusItem() {
@@ -219,6 +246,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             )
             processAudio.state = state.settings.audioProcessOnly ? .on : .off
             menu.addItem(processAudio)
+            menu.addItem(withTitle: "从 Windows 取回文件…", action: #selector(showFilePullAction), keyEquivalent: "")
+            appendVideoQualityItems(to: menu, includeProcess: true)
 
             let pinned = state.pinnedApps
             if !pinned.isEmpty {
@@ -244,5 +273,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         menu.addItem(withTitle: "退出 WinBridge", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "")
         statusItem?.menu = menu
+    }
+
+    private func appendVideoQualityItems(to menu: NSMenu, includeProcess: Bool) {
+        menu.addItem(.separator())
+        let header = NSMenuItem(title: "画质", action: nil, keyEquivalent: "")
+        header.isEnabled = false
+        menu.addItem(header)
+        for profile in VideoProfilePreference.allCases {
+            let item = NSMenuItem(title: profile.title, action: #selector(setVideoProfileAction(_:)), keyEquivalent: "")
+            item.representedObject = profile.rawValue
+            item.state = state.settings.videoProfile == profile ? .on : .off
+            menu.addItem(item)
+        }
+        let adaptive = NSMenuItem(title: "自适应码率", action: #selector(toggleAdaptiveBitrateAction), keyEquivalent: "")
+        adaptive.state = state.settings.adaptiveBitrate ? .on : .off
+        menu.addItem(adaptive)
+        if includeProcess {
+            let sub = NSMenuItem(title: "仅当前进程使用…", action: nil, keyEquivalent: "")
+            let subMenu = NSMenu()
+            for profile in VideoProfilePreference.allCases {
+                let item = NSMenuItem(
+                    title: profile.title,
+                    action: #selector(setProcessVideoProfileAction(_:)),
+                    keyEquivalent: ""
+                )
+                item.representedObject = profile.rawValue
+                subMenu.addItem(item)
+            }
+            sub.submenu = subMenu
+            menu.addItem(sub)
+        }
     }
 }

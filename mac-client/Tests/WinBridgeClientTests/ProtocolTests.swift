@@ -104,6 +104,8 @@ import Testing
         .launchApp(LaunchApp(appId: "0123456789abcdef", autoSubscribe: true, targetFps: 60, maxBitrateKbps: 15000, followPopups: true, captureMode: .monitorCrop)),
         .launchAppRes(LaunchAppResult(appId: "0123456789abcdef", started: true, message: "")),
         .hostError(HostError(windowId: 100, code: .displayDisconnected, message: "No monitor")),
+        .setVideoConfig(SetVideoConfig(windowId: 0, profile: .text, adaptive: true, rttMs: 42)),
+        .setVideoConfig(SetVideoConfig(windowId: 7, profile: .game, targetFps: 60, maxBitrateKbps: 8000, adaptive: false)),
     ]
     for (i, payload) in cases.enumerated() {
         let msg = ControlMessage(seq: UInt64(i + 1), timestampUs: 500, payload: payload)

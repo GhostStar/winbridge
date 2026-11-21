@@ -146,13 +146,13 @@ pub fn error_code(error: &anyhow::Error) -> i32 {
 #[allow(clippy::too_many_arguments)]
 pub fn stream(
     id: u64,
-    fps: u32,
-    bitrate_kbps: u32,
+    rates: &crate::quality::RateControl,
     codec: i32,
     cursor: bool,
     monitor_crop: bool,
     running: &AtomicBool,
     keyframe: &AtomicBool,
+    backlog: impl Fn() -> usize,
     mut emit: impl FnMut(u16, u16, bool, Vec<u8>),
     mut report: impl FnMut(i32, String),
 ) -> Result<()> {
@@ -173,8 +173,14 @@ pub fn stream(
     let mut video_enc: Option<((u16, u16), VideoEncoder)> = None;
     let mut dirty = false;
     let mut paused = false;
-    let interval = Duration::from_nanos(1_000_000_000 / u64::from(fps.max(1)));
-    let jitter = (interval / 4).min(Duration::from_millis(2));
+    let mut applied_fps = rates.fps.load(Ordering::Acquire).max(1);
+    let mut applied_rate = rates.base_bitrate_kbps.load(Ordering::Acquire).max(800);
+    let mut last_rebuild_rate = applied_rate;
+    let mut applied_gen = rates.generation.load(Ordering::Acquire);
+    let mut adaptive_ctrl = crate::quality::AdaptiveState::new(applied_rate, Instant::now());
+    let mut next_rate_sample = Instant::now();
+    let mut interval = Duration::from_nanos(1_000_000_000 / u64::from(applied_fps));
+    let mut jitter = (interval / 4).min(Duration::from_millis(2));
     let mut next_send = Instant::now();
     let mut measured = Duration::ZERO;
     let mut samples = 0;
@@ -196,6 +202,55 @@ pub fn stream(
         }
     };
     while running.load(Ordering::Acquire) {
+        let now_rates = Instant::now();
+        let gen = rates.generation.load(Ordering::Acquire);
+        if gen != applied_gen || now_rates >= next_rate_sample {
+            applied_gen = gen;
+            next_rate_sample = now_rates + Duration::from_millis(200);
+            let fps = rates.fps.load(Ordering::Acquire).max(1);
+            let base = rates.base_bitrate_kbps.load(Ordering::Acquire).max(800);
+            let adaptive = rates.adaptive.load(Ordering::Acquire);
+            let rtt = rates.rtt_ms.load(Ordering::Acquire);
+            let rate = adaptive_ctrl.sample(now_rates, base, adaptive, backlog(), rtt);
+            let fps_changed = fps != applied_fps;
+            let rate_changed = rate != applied_rate;
+            if fps_changed {
+                applied_fps = fps;
+                interval = Duration::from_nanos(1_000_000_000 / u64::from(fps));
+                jitter = (interval / 4).min(Duration::from_millis(2));
+            }
+            if rate_changed {
+                applied_rate = rate;
+            }
+            if fps_changed {
+                // Explicit FPS/profile switch: recreate MFT with the new frame duration.
+                video_enc = None;
+                pending_capture.clear();
+                last_rebuild_rate = applied_rate;
+                keyframe.store(true, Ordering::Release);
+            } else if rate_changed {
+                // Adjust bitrate in place via ICodecAPI so the encoder is not torn down.
+                let live_ok = video_enc
+                    .as_mut()
+                    .is_some_and(|(_, enc)| enc.set_bitrate_kbps(applied_rate));
+                if live_ok {
+                    tracing::debug!(
+                        window_id = id,
+                        bitrate_kbps = applied_rate,
+                        "updated video encoder bitrate dynamically via ICodecAPI"
+                    );
+                } else if video_enc.is_some()
+                    && applied_rate.abs_diff(last_rebuild_rate).saturating_mul(5)
+                        >= last_rebuild_rate
+                {
+                    // Fallback only if MFT refuses live bitrate updates and delta is >= 20%.
+                    video_enc = None;
+                    pending_capture.clear();
+                    last_rebuild_rate = applied_rate;
+                    keyframe.store(true, Ordering::Release);
+                }
+            }
+        }
         wgc::check_desktop(id)?;
 
         // When streaming the full primary desktop and Windows switches into a Secure Desktop
@@ -265,11 +320,12 @@ pub fn stream(
                                 &gpu.ctx,
                                 w,
                                 h,
-                                fps.min(30),
-                                bitrate_kbps,
+                                applied_fps.min(30),
+                                applied_rate,
                             )
                             .context("encoder: cannot initialize video encoder for secure desktop")?;
                             video_enc = Some(((w, h), enc));
+                            last_rebuild_rate = applied_rate;
                         }
                         let (_, enc) = video_enc.as_mut().unwrap();
                         ensure!(
@@ -374,9 +430,10 @@ pub fn stream(
                 drop(video_enc.take());
                 pending_capture.clear();
                 let gpu = &src.capture.gpu;
-                let encoder = VideoEncoder::new(bs_codec, &gpu.device, &gpu.ctx, w, h, fps, bitrate_kbps)
+                let encoder = VideoEncoder::new(bs_codec, &gpu.device, &gpu.ctx, w, h, applied_fps, applied_rate)
                     .context("encoder: cannot initialize video encoder")?;
                 video_enc = Some(((w, h), encoder));
+                last_rebuild_rate = applied_rate;
             }
             let (_, encoder) = video_enc.as_mut().unwrap();
             ensure!(

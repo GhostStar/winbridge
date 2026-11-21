@@ -6,6 +6,7 @@ pub mod helper;
 pub mod input;
 pub mod net;
 pub mod proto;
+pub mod quality;
 pub mod security;
 pub mod service;
 mod session;
