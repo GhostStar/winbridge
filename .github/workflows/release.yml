@@ -1,0 +1,94 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Build Windows Host (x64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: win-host
+
+      - name: Run tests
+        working-directory: win-host
+        run: cargo test --locked
+
+      - name: Build release binary
+        working-directory: win-host
+        run: cargo build --release --locked
+
+      - name: Package Windows zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/win-host | Out-Null
+          Copy-Item win-host/target/release/win-host.exe dist/win-host/
+          Copy-Item README.md dist/win-host/
+          Compress-Archive -Path dist/win-host/* -DestinationPath dist/win-host-windows-x86_64.zip -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: win-host-windows-x86_64
+          path: dist/win-host-windows-x86_64.zip
+
+  build-macos:
+    name: Build macOS Client (Apple Silicon)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run unit tests
+        working-directory: mac-client
+        run: ./scripts/run_tests.sh
+
+      - name: Bundle WinBridge.app
+        working-directory: mac-client
+        run: ./scripts/bundle_app.sh
+
+      - name: Package macOS zip
+        run: |
+          mkdir -p dist
+          ditto -c -k --sequesterRsrc --keepParent mac-client/build/WinBridge.app dist/WinBridge-macos-arm64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WinBridge-macos-arm64
+          path: dist/WinBridge-macos-arm64.zip
+
+  publish:
+    name: Publish GitHub Release
+    needs: [build-windows, build-macos]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate SHA-256 checksums
+        working-directory: artifacts
+        run: sha256sum * > SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/win-host-windows-x86_64.zip
+            artifacts/WinBridge-macos-arm64.zip
+            artifacts/SHA256SUMS.txt

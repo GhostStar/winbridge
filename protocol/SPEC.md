@@ -1,17 +1,19 @@
-# WinBridge Protocol Specification (v0.1)
+# WinBridge Protocol Specification (v0.2)
 
 WinBridge is a LAN-first seamless remote window protocol allowing a **macOS Client** (Swift) to display and control individual windows hosted on a **Windows Host** (Rust).
 
 Design influences:
 - **Xpra**: Normal vs. Override-Redirect (`POPUP`) window model and cursor shape sync.
 - **Microsoft `[MS-RDPERP]` (RAIL)**: Visible frame bounds (`DWMWA_EXTENDED_FRAME_BOUNDS`), owner/modal relationships, and sequence-numbered resize anti-looping.
-- **RustDesk / Sunshine**: Low-latency Annex-B streaming, on-demand IDR keyframes, and clean input abstraction.
+- **RustDesk / Sunshine**: Low-latency HEVC/H.264 Annex-B streaming, Opus audio, TLS TOFU pinning, and clean input abstraction.
 
 ---
 
-## 1. Transport Layer (Single Port, Dual TCP Channels)
+## 1. Transport Layer (Single Port, TLS 1.3 + Dual Channels)
 
-Windows Host listens on a single TCP port (default: **`9876`**) so only one Windows Firewall rule is required. Both connections **MUST** set `TCP_NODELAY = true`.
+Windows Host listens on a single TCP port (default: **`9876`**) so only one Windows Firewall rule is required. Both connections **MUST** set `TCP_NODELAY = true` and wrap the TCP stream in **TLS 1.3** (with TLS 1.2 minimum fallback; `--no-tls` opt-out for local debugging only). Clients authenticate the host certificate via **TOFU (Trust On First Use)** SHA-256 certificate fingerprint pinning per `host:port`, and pin the Media connection to the exact leaf certificate verified on the Control connection.
+
+LAN discovery uses mDNS / Bonjour service type **`_winbridge._tcp.local.`** with TXT keys `v=1`, `tls=1|0`, and `fp=<8-byte hex prefix>`.
 
 Every incoming TCP connection starts with an **8-byte ASCII+version preface** so the host can route it:
 
@@ -72,9 +74,9 @@ After the `WBRGMED\x01` + 16-byte `session_id` handshake returns `0x00`, Windows
 | `0` | 4 | `u32` | `magic` | Fixed `0x57424D46` (`"WBMF"`) |
 | `4` | 8 | `u64` | `window_id` | Windows `HWND` cast to `u64` |
 | `12` | 8 | `u64` | `timestamp_us` | Host monotonic capture timestamp (microseconds) |
-| `20` | 2 | `u16` | `width` | Frame width in physical pixels (for `codec = 10` audio: sample rate in Hz, e.g. `48000`) |
-| `22` | 2 | `u16` | `height` | Frame height in physical pixels (for `codec = 10` audio: channel count, e.g. `2`) |
-| `24` | 1 | `u8` | `codec` | `1`=H264, `2`=HEVC, `3`=JPEG, `4`=RAW_BGRA, `10`=AUDIO_PCM_S16LE |
+| `20` | 2 | `u16` | `width` | Frame width in physical pixels (for audio codecs `10`/`11`: sample rate in Hz, e.g. `48000`) |
+| `22` | 2 | `u16` | `height` | Frame height in physical pixels (for audio codecs `10`/`11`: channel count, e.g. `2`) |
+| `24` | 1 | `u8` | `codec` | `1`=H264, `2`=HEVC, `3`=JPEG, `4`=RAW_BGRA, `10`=AUDIO_PCM_S16LE, `11`=AUDIO_OPUS |
 | `25` | 1 | `u8` | `flags` | Bitmask: `0x01`=KEYFRAME, `0x02`=CONFIG_ONLY, `0x04`=END_OF_STREAM |
 | `26` | 2 | `u16` | `frame_seq` | Per-window wrapping frame counter (`0..65535`) |
 | `28` | 4 | `u32` | `payload_len` | Byte length of the following payload (max **64 MiB**) |
@@ -153,7 +155,12 @@ After the `WBRGMED\x01` + 16-byte `session_id` handshake returns `0x00`, Windows
 
 ---
 
-## 7. Future Evolution (v0.2+)
-- Swap dual TCP for **QUIC** (`quinn` on Windows + `NWProtocolQUIC` on macOS) for per-window stream multiplexing without head-of-line blocking.
-- Add **WASAPI Loopback / Per-Process Audio** (`ActivateAudioInterfaceAsync` process loopback on Win10 20348+ / Win11!) streamed as Opus frames on the Media channel.
-- Add **mDNS / Bonjour** auto-discovery (`_winbridge._tcp.local`) so macOS finds the Windows host automatically without typing an IP.
+## 7. v0.2 Additions & Future Evolution
+- **Implemented in v0.2**:
+  - **TLS 1.3 + TOFU pinning**, per-IP auth rate limiting, optional `--allow-cidr`, Named Pipe + `GetNamedPipeClientProcessId` secure-helper IPC, and macOS Keychain storage.
+  - **mDNS / Bonjour** LAN auto-discovery (`_winbridge._tcp.local.`), exponential-backoff auto-reconnect with window restoration.
+  - **HEVC (`VIDEO_CODEC_HEVC_ANNEX_B = 2`)** hardware encode/decode and **Opus (`AUDIO_CODEC_OPUS = 11`)** 48 kHz stereo 20 ms low-bandwidth audio alongside PCM lossless (`10`).
+  - **Smart 3D Game Relative Mouse Lock** (`MOUSE_EVENT_KIND_RELATIVE_MOVE = 5`), **Gamepad passthrough** (`GamepadState`), and **chunked Drag-and-Drop File Transfer** (`FileTransferStart` / `FileTransferChunk` / `FileTransferResult`).
+- **Future (v0.3+)**:
+  - Optional **QUIC** transport (`quinn` + `NWProtocolQUIC`) for per-window stream multiplexing without head-of-line blocking on lossy Wi-Fi / WAN links.
+  - Per-process WASAPI audio loopback (`ActivateAudioInterfaceAsync` on Win10 20348+ / Win11).

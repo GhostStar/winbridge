@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-host:
+    name: Windows Host (Rust MSVC)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: win-host
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: win-host
+
+      - name: Check all targets
+        run: cargo check --all-targets --locked
+
+      - name: Run unit & loopback integration tests
+        run: cargo test --locked
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+  macos-client:
+    name: macOS Client (Swift 6)
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: mac-client
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show Swift toolchain
+        run: swift --version
+
+      - name: Run Swift Testing suite
+        run: ./scripts/run_tests.sh
+
+      - name: Build WinBridge.app release bundle
+        run: ./scripts/bundle_app.sh

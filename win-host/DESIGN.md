@@ -361,3 +361,20 @@ Diagnostics (Milestone 1):
   --frames <N>             测试抓取帧数 [default: 30]
   --save <PATH>            将测试抓到的最后一帧保存为 PNG
 ```
+
+---
+
+## 9. v0.2 架构演进与安全实现说明
+
+- **Session 0 服务 + Session 1 双进程协同模型（`service.rs` / `helper.rs`）**：
+  - `WinBridgeHost` Windows Service 以 `LocalSystem` 运行在 Session 0，仅在 `C:\ProgramData\WinBridge\service.conf`（SDDL 仅限 `SY`/`BA`）保存配置与口令，SCM `ImagePath` 仅保留 `"<exe>" --service`。
+  - 针对当前活跃交互式桌面会话，服务先以 `CREATE_SUSPENDED` 启动当前登录用户身份的 `--session-worker`（通过继承的匿名 `stdin` 管道传递 Token 与 TLS 私钥），拿到精确 `worker_pid` 与用户 SID 后，再启动 `LocalSystem + TokenUIAccess=1` 的 `--secure-helper` 监听 SDDL 保护的 Windows Named Pipe（`PIPE_REJECT_REMOTE_CLIENTS`）并严格校验 `GetNamedPipeClientProcessId == worker_pid`，最后 `ResumeThread` 唤醒 Worker。
+- **TLS 1.3 + 防爆破 + CIDR 白名单（`net/tls.rs` / `security.rs` / `net/mod.rs`）**：
+  - 使用 `rcgen`（ECDSA P-256）自动生成持久化自签证书，`rustls`（`ring`）+ `tokio-rustls` 加密 Control 与 Media 通道，并提供常量时间口令校验、按 IP 指数退避锁定和 `--allow-cidr`。
+- **LAN 自动发现、HEVC、Opus、文件拖放与手柄透传**：
+  - `net/discovery.rs`：纯 Rust `mdns-sd` 广播 `_winbridge._tcp.local.`。
+  - `encode/annexb.rs` & `encode/mf_h264.rs`：支持硬件 HEVC（`MFVideoFormat_HEVC` + `VPS/SPS/PPS` 内联）与 H.264 零 B 帧编码。
+  - `audio/mod.rs`：WASAPI 环回 + 48 kHz 重采样 + 纯 Rust `mousiki` Opus 编码（`codec=11`）及无损 PCM（`codec=10`）。
+  - `win32/files.rs`：安全接收 macOS 拖放文件至 `Downloads\WinBridge\`（文件名净化 + 原子重命名 + 512 MiB 上限）。
+  - `input/gamepad.rs`：运行时动态加载 `ViGEmClient.dll` 提供可选虚拟 Xbox 360 手柄支持，未安装驱动时零构建/启动依赖。
+

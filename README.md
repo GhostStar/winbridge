@@ -1,30 +1,69 @@
 # WinBridge
 
-面向局域网（LAN）的**无缝单窗口远程操控工具**：将 Windows 上的单个或多个应用窗口以低延迟投射到 macOS 上，像原生 macOS 窗口一样浏览、缩放、输入中文与键鼠操控。
+[![CI](https://github.com/WormW/winbridge/actions/workflows/ci.yml/badge.svg)](https://github.com/WormW/winbridge/actions/workflows/ci.yml)
 
-> 典型场景：Windows 主机与 Mac 共用显示器，平时显示器切给 Mac 使用，无需来回切换显示器输入源即可在 Mac 上直接使用 Windows 应用、安卓模拟器（如 MuMu）或 Steam 游戏。
+面向局域网（LAN）与远程隧道的**无缝单窗口远程操控工具**：将 Windows 上的单个或多个应用窗口以低延迟、端到端 TLS 1.3 加密方式投射到 macOS 上，像原生 macOS 窗口一样浏览、缩放、输入中文与键鼠/手柄操控。
+
+> 典型场景：Windows 主机与 Mac 共用显示器，平时显示器切给 Mac 使用，无需来回切换显示器输入源即可在 Mac 上直接使用 Windows 应用、安卓模拟器（如 MuMu）或 3D PC 游戏。
+
+---
+
+## 系统架构
+
+```mermaid
+flowchart LR
+    subgraph Mac["macOS Client (Swift · Zero 3rd-Party Deps)"]
+        UI["Manager & Native NSWindow / NSPanel<br/>Performance HUD · File Drop · Smart Game Lock"]
+        Keychain["macOS Keychain & TOFU Pinning"]
+        Discovery["Bonjour Browser<br/>(_winbridge._tcp)"]
+        MediaMac["VideoToolbox HEVC / H.264<br/>→ IOSurface · AudioToolbox Opus/PCM"]
+        InputMac["Mouse / HID / Chinese IME<br/>GameController.framework"]
+    end
+
+    subgraph Win["Windows Host (Rust · Single Port :9876)"]
+        Svc["Session 0 Windows Service<br/>(LocalSystem · ACL service.conf)"]
+        Worker["Session 1 User Worker (--session-worker)<br/>WGC · D3D11 · MF HEVC/H.264 · WASAPI+Opus · mDNS"]
+        Helper["Session 1 Secure Helper (--secure-helper)<br/>LocalSystem + TokenUIAccess=1<br/>Winlogon UAC/Lock Screen & Anti-Cheat Input"]
+    end
+
+    UI <-->|"TLS 1.3 Control & Media (:9876)"| Worker
+    Keychain -.->|"SHA-256 TOFU Verify"| Worker
+    Discovery <-.->|"mDNS LAN Auto-Discovery"| Worker
+    Svc -->|"Anonymous Stdin Pipe<br/>(Token + TLS Key, never in CLI)"| Worker
+    Worker <-->|"ACL + GetNamedPipeClientProcessId<br/>Verified Named Pipe"| Helper
+    MediaMac -.-> UI
+    InputMac -.-> UI
+```
 
 ---
 
 ## 核心特性
 
-- **无缝多窗口投射**：每个 Windows 窗口对应 macOS 上独立的原生 `NSWindow`，并自动追踪右键菜单、下拉框、Tooltip 和对话框（无边框非抢焦浮层 `NSPanel`）。
-- **双采集模式（按窗口可切换）**：
-  - **单窗模式（`WINDOW`）**：基于 `Windows.Graphics.Capture (CreateForWindow)`，Windows 上窗口互相遮挡也能同时并排投射。
-  - **屏幕裁剪模式（`MONITOR_CROP`）**：基于 `CreateForMonitor` 按目标窗口可见矩形实时裁剪，完美兼容 **MuMu 等跨进程安卓模拟器、Vulkan / OpenGL 渲染窗口与硬件叠加层**，不黑屏。
-- **全硬件低延迟视频管线**：Windows 端 D3D11 GPU `BGRA → NV12` + Media Foundation 硬件 H.264 零 B 帧编码，macOS 端 `VideoToolbox` 硬解 → `IOSurface` 零拷贝上屏（同时兼容 `JPEG` / `RAW_BGRA` 调试模式）。
-- **本地等比缩放（不打乱 Windows 布局）**：默认仅在 Mac 本地等比缩放画面，不改动 Windows 原窗口尺寸；也支持一键开启「同步缩放 Windows」。
-- **原生级输入体验**：
-  - 鼠标归一化坐标（规避 Win10/11 7px 隐形边框与 DPI 偏移）与触控板平滑滚动。
-  - **3D 游戏相对鼠标锁定（`⇧⌘L` 开关 / `Ctrl+Option` 随时释放）**：隐藏并锁定 Mac 光标在窗口中心、直接传输相对位移 `dx/dy` 注入 Windows，支持无限 360° 转视角并内置实时灵敏度滑块。
-  - USB HID 物理键码映射 + 可选 **`Cmd → Ctrl`** 快捷映射（支持 `Cmd+C/V/X/Z/A/W`、点击、缩放）。
-  - **macOS 原生中文输入法**：通过 `NSTextInputClient` 在 Mac 完成选词，经 `KEYEVENTF_UNICODE` 直接注入 Windows。
-  - 系统光标与自定义 RGBA 光标同步、文本/PNG 剪贴板双向同步。
-- **可灵活开关的低延迟内网音频**：基于 Windows WASAPI 系统环回采集 + 16-bit PCM 传输 + macOS `AVAudioEngine` 实时播放，支持在管理窗口和 Mac 顶部菜单栏随时动态开关与调节音量。
-- **Windows 应用启动器 & 完整桌面兜底**：
-  - 自动扫描 Windows 桌面与开始菜单快捷方式（`.lnk` / `.url`，支持 Steam 游戏与模拟器快捷方式），带图标与搜索；启动后自动监听并接管新弹出的主窗口。
-  - 支持将常用 Windows 应用**星标置顶到 macOS 顶部菜单栏**一键启动。
-  - 内置 **「查看完整桌面」** 按钮，随时临时操作 Windows 任务栏与系统托盘。
+### 1. 安全加固（Security Hardening）
+- **TLS 1.3 端到端加密 + TOFU 指纹锁定**：默认使用 `rustls`（`ring`）与 macOS `Network.framework` 对控制与媒体双通道进行 TLS 1.3 加密。首次连接自动记录主机证书 SHA-256 指纹（TOFU）；若证书发生意外变化则阻断连接并弹窗警告（支持调试模式 `--no-tls`）。
+- **零明文凭据暴露**：
+  - Windows 服务模式将口令与配置存储在仅限 `SYSTEM` 与 `Administrators` 可读的 `C:\ProgramData\WinBridge\service.conf`（SDDL 强隔离），SCM `ImagePath` 与子进程命令行中**不再出现任何 Token 或私钥**（由 Session 0 通过匿名 `stdin` 管道传递给 Worker）。
+  - macOS 客户端将 `authToken` 自动迁移并加密保存在原生 **macOS Keychain** 中。
+- **权限面最小化与防爆破**：
+  - `--secure-helper` 改用 **Windows Named Pipe**（禁用远端访问 `PIPE_REJECT_REMOTE_CLIENTS`、严格 SDDL DACL）并在每次连接后通过 **`GetNamedPipeClientProcessId`** 校验调用方必须是服务启动的精确 `--session-worker` PID。
+  - 非回环监听默认强制要求 Token（除非显式 `--allow-insecure-no-auth`）；使用常量时间比较、按 IP 指数退避防爆破锁定，并支持 `--allow-cidr` 来源网段白名单。
+
+### 2. 无缝多窗口、游戏操控与日常体验
+- **局域网自动发现（mDNS / Bonjour）+ 指数退避自动重连**：Windows 端自动广播 `_winbridge._tcp.local.`，Mac 端下拉即可一键选择主机；意外断连或 Windows 唤醒后自动重连并恢复此前打开的窗口与桌面。
+- **双采集模式（按进程记忆）**：
+  - **单窗模式（`WINDOW`）**：`WGC CreateForWindow`，支持多窗口互相遮挡并行投射。
+  - **屏幕裁剪模式（`MONITOR_CROP`）**：`CreateForMonitor` 裁剪窗口可见边界，完美兼容 MuMu 模拟器、Vulkan / DirectX 游戏与叠加层。
+- **智能 3D 游戏鼠标锁定（`⇧⌘L` 开关 / `Ctrl+Option` 随时释放）**：
+  - 自动感知 Windows 游戏指针显隐（如游戏内按住 `Alt` 或弹出菜单时自动切回限域可见指针，返回 3D 战斗视角自动切换隐藏相对视角 `dx/dy`）。
+  - 支持按进程记住灵敏度倍率与自动开启游戏锁定；可选「背景禁悬停」避免多窗误触。
+- **可切换性能 HUD（`⇧⌘H`）**：远端窗口右上角半透明浮层实时展示编码格式、FPS、实时码率（Mbps）、RTT 与分辨率（完全鼠标穿透）。
+- **跨设备拖放传文件（Mac → Windows）**：直接将 Mac 文件拖入任意远端窗口，分块安全传输至 Windows `Downloads\WinBridge\`（自动防路径穿越与重名去重，单文件上限 512 MiB）。
+- **手柄透传（可选）**：macOS 原生 `GameController.framework`（Xbox / DualSense / Switch Pro）转发至 Windows；若本机已安装 [ViGEmBus](https://github.com/nefarius/ViGEmBus) 并将 `ViGEmClient.dll` 置于同目录，自动虚拟 Xbox 360 手柄。
+- **固定本地代码签名脚本**：提供 `./scripts/setup_codesign.sh`，重新打包 `WinBridge.app` 后保持签名身份不变，彻底避免 macOS 15/26 反复重置「本地网络」与钥匙串权限。
+
+### 3. 视频与音频编解码（4K / 高刷 / Wi-Fi 友好）
+- **HEVC (H.265) + H.264 硬件低延迟管线**：Windows D3D11 GPU `BGRA → NV12` + Media Foundation 零 B 帧硬件编码（自动探测并优先协商 `HEVC → H.264 → JPEG`），macOS `VideoToolbox` 硬解 → `IOSurface` 零拷贝上屏。
+- **Opus 低带宽音频 + PCM 无损双模**：基于 Windows WASAPI 环回采集 + 纯 Rust RFC 6716 **Opus 编码**（内置 48 kHz 重采样，支持 `Opus 128k` / `Opus 64k` 将带宽降至原 PCM 的 1/12 ~ 1/24）与 macOS 原生 `AudioToolbox`（`AVAudioConverter`）硬/系统解码，亦可一键切回 `PCM 无损`。
 
 ---
 
@@ -32,12 +71,13 @@
 
 ```text
 winbridge/
+├── .github/workflows/  # CI（Windows MSVC + macOS Swift 6）与 Tag 自动发布 Release
 ├── protocol/           # 两端共享的协议定义（单一事实来源）
 │   ├── control.proto   # 控制信道 Protobuf v3 Schema
-│   └── SPEC.md         # 单端口双 TCP、32 字节媒体帧头、坐标系与输入规范
-├── win-host/           # Windows 被控端（Rust：windows-rs、WGC、Media Foundation、WASAPI、Tokio）
+│   └── SPEC.md         # TLS 1.3 + 单端口双信道、32B 媒体头、HEVC/Opus/输入/文件传输规范
+├── win-host/           # Windows 被控端（Rust：WGC、Media Foundation HEVC/H.264、WASAPI+Opus、rustls、mDNS）
 │   └── DESIGN.md       # Windows 端架构设计文档
-└── mac-client/         # macOS 主控端（Swift：AppKit、VideoToolbox、AVAudioEngine、Network.framework）
+└── mac-client/         # macOS 主控端（Swift：AppKit、VideoToolbox、AVAudioEngine/Opus、Network TLS、Keychain、GameController）
 ```
 
 ---
@@ -46,108 +86,74 @@ winbridge/
 
 ### 1. Windows 被控端（`win-host`）
 
-**环境要求**：Windows 10（1903 及以上）或 Windows 11（x64），已安装 Rust stable MSVC 工具链、Visual C++ 生成工具与 Windows SDK（构建脚本已内置 `protoc`，无需手动安装）。
-
-请在**已登录的桌面会话**下的 Developer PowerShell 中构建并运行：
+**环境要求**：Windows 10（1903+）或 Windows 11（x64），已安装 Rust stable MSVC 工具链与 Visual C++ 生成工具（无需手动安装 `protoc` 或 CMake）。
 
 ```powershell
 cd win-host
-cargo check --locked
 cargo test --locked
 cargo build --release --locked
 
-# 查看当前可投射的窗口列表
-.\target\release\win-host.exe --list-windows
+# 推荐：以管理员 PowerShell 安装为系统服务（自动生成强随机 Token 并写入受保护的 service.conf，支持 UAC & 锁屏点击）
+.\target\release\win-host.exe --install-service --bind 0.0.0.0 --port 9876
 
-# 前台直接运行（开发/普通模式；默认监听 9876 端口，--token 留空免鉴权）
-.\target\release\win-host.exe --bind 0.0.0.0 --port 9876 --token "your-LAN-secret"
+# 或显式指定自定义 Token 与允许的来源网段
+.\target\release\win-host.exe --install-service --bind 0.0.0.0 --port 9876 --token "your-LAN-secret" --allow-cidr 192.168.1.0/24
 
-# 推荐：以管理员 PowerShell 安装为系统服务（开机自启，支持直接看到并点击 UAC 弹窗与锁屏界面！）
-.\target\release\win-host.exe --install-service --bind 0.0.0.0 --port 9876 --token "your-LAN-secret"
+# 前台直接运行（开发/单次调试；亦可通过环境变量 WINBRIDGE_TOKEN 或 --token-file 传入口令）
+$env:WINBRIDGE_TOKEN = "your-LAN-secret"
+.\target\release\win-host.exe --bind 0.0.0.0 --port 9876
 
 # 停止并卸载系统服务
 .\target\release\win-host.exe --uninstall-service
 ```
 
-> **关于 UAC 弹窗与锁屏界面**：Windows 内核禁止普通进程操作 `Winlogon` 安全桌面上的 UAC 弹窗。通过 `--install-service` 安装为 `LocalSystem` 系统服务后，`win-host` 会在检测到 UAC 弹出时**自动在 Mac 上弹出安全桌面画面供你直接点击「是 / 否」**，确认完成后自动关闭恢复原有窗口；且通过「启动应用」打开的软件仍以当前登录用户的普通身份启动，不会错乱用户配置。
-
 常用启动参数：
-- `--bind <ADDR>` / `--port <PORT>`：监听地址与端口（控制信道与媒体信道共用单端口，默认 `0.0.0.0:9876`，防火墙只需放行这一个端口）。
-- `--token <SECRET>`：内网预共享口令。
-- `--codec <auto|h264|jpeg|raw>`：编码器策略（默认 `auto`，按客户端优先级协商）。
-- `--capture-mode <window|monitor-crop>`：默认采集模式（默认 `window`；macOS 客户端也可为单个窗口单独覆盖切换）。
-- `--fps <FPS>` / `--bitrate <KBPS>`：默认帧率上限（默认 `60`）与 H.264 码率（默认 `15000` kbps）。
+- `--bind <ADDR>` / `--port <PORT>`：监听地址与单端口（默认 `0.0.0.0:9876`）。
+- `--token <SECRET>` / `--token-file <PATH>` / 环境变量 `WINBRIDGE_TOKEN`：预共享鉴权口令（非回环监听默认必填；仅受控测试可用 `--allow-insecure-no-auth`）。
+- `--allow-cidr <CIDR>`：可重复指定的来源 IP/CIDR 白名单（如 `192.168.1.0/24`、`100.64.0.0/10`）。
+- `--no-tls` / `--tls-dir <DIR>`：禁用 TLS（仅调试）或指定自定义 TLS 证书目录。
+- `--no-discovery`：禁用局域网 mDNS 广播。
+- `--codec <auto|hevc|h264|jpeg|raw>`：编码器策略（默认 `auto`，优先硬件 HEVC → H.264 → JPEG）。
+- `--capture-mode <window|monitor-crop>` / `--fps <FPS>` / `--bitrate <KBPS>`：默认采集模式、帧率上限（默认 `60`）与视频码率（默认 `15000` kbps）。
 
 ### 2. macOS 主控端（`mac-client`）
 
-**环境要求**：macOS 14+，Swift 6.0+（仅需 Apple Command Line Tools，**无需安装 Xcode.app**，零第三方依赖）。
+**环境要求**：macOS 14+，Swift 6.0+（仅需 Apple Command Line Tools，无需安装 Xcode.app，零第三方依赖）。
 
 ```bash
 cd mac-client
 ./scripts/run_tests.sh
+
+# 可选（强烈推荐，仅需执行一次）：创建本地固定自签证书，防止重打包后 macOS 重置本地网络权限
+./scripts/setup_codesign.sh
+
 ./scripts/bundle_app.sh
 open build/WinBridge.app
 ```
 
-开发期间也可以直接通过终端启动：
-
-```bash
-cd mac-client
-swift run
-```
-
-**使用说明**：
-1. 打开 `WinBridge.app`，在顶部输入 Windows 主机的局域网 IP、端口（默认 `9876`）和相同 Token，点击**连接**。
-2. 在 **「已打开窗口」** Tab 中双击或点**投射**接管任意窗口；遇到 MuMu 模拟器或黑屏游戏时，将该行采集模式切换为 **`屏幕裁剪`**（会自动按进程名记住）。
-3. 在 **「启动应用」** Tab 中搜索并启动 Windows 应用，点 **★** 可置顶到 macOS 顶部菜单栏。
-4. 需要操作 Windows 任务栏或系统托盘时，点击 **「查看完整桌面」** 即可临时打开主显示器视图。
-5. **关闭技巧**：直接点击远端窗口红叉会向 Windows 发送优雅关闭（`WM_CLOSE`）；按住 **`Option` + 点击红叉**（或连点两次红叉）仅在 Mac 端脱离窗口，不关闭 Windows 程序。
-6. **音频说明**：勾选 **「开启音频」** 即可实时收听 Windows 声音（需保持 Windows 音频输出设备未静音；显示器切给 Mac 时本身不会从显示器发声）。
+**快捷使用指南**：
+1. 打开 `WinBridge.app`，从顶部 **「发现主机」** 下拉框一键选择局域网内的 Windows 主机（或手动输入 IP），粘贴 Token 点击**连接**。
+2. 首次 TLS 连接会自动信任并锁定 Windows 主机 SHA-256 证书指纹（可在菜单 `窗口 → 重置当前主机 TLS 证书信任` 重置）。
+3. **快捷键一览**：
+   - `⇧⌘L`：开启 / 关闭智能 3D 游戏鼠标锁定（`Ctrl+Option` 随时紧急释放）
+   - `⇧⌘H`：显示 / 隐藏右上角实时性能 HUD（FPS / Mbps / RTT / 分辨率）
+   - `⌘,`：唤出 WinBridge 管理窗口；`Option + 点红叉`（或 2 秒内连点两次）：仅在 Mac 端脱离而不关闭 Windows 软件
+   - 拖放 Mac 文件到任意远端窗口：自动发送至 Windows `Downloads\WinBridge\`
 
 ---
 
 ## 调试与测试
 
-### Windows 桌面探针与显示器切源测试
-
-使用可调整大小的记事本等临时窗口，验证抓帧、中文注入以及**切换显示器输入源给 Mac 后**是否继续正常出帧：
-
 ```powershell
-$exe = ".\target\release\win-host.exe"
-& $exe --list-windows
-$windowId = Read-Host "输入窗口列表中的 HWND"
-& $exe --test-capture $windowId --frames 30 --save test.png
-& $exe --test-input $windowId
-
-# 在 5 秒延迟期间将显示器输入源切到 Mac，验证是否仍能正常抓帧
-& $exe --test-capture $windowId --delay-secs 5 --frames 30 --save after-switch.png
-```
-
-> **提示**：如果 Windows 使用 DisplayPort（DP）连接显示器，切源给 Mac 时部分显示器会触发热插拔断连导致桌面消失。可改用 HDMI、安装开源虚拟显示器驱动（Virtual Display Driver）或插一个显卡欺骗器解决。
-
-### Windows 端回环测试与 H.264 录流验证
-
-```powershell
-# 运行需要真实桌面的集成测试（双窗口、Resize、弹窗、光标、GPU NV12、H.264 关键帧）
+# Windows 桌面集成测试（双窗口、Resize、弹窗、光标、GPU NV12、H.264 关键帧）
 cd win-host
 cargo test --locked -- --ignored --test-threads=1
-
-# 录制单窗口裸 H.264 流并用 ffplay 播放验证
-$windowId = Read-Host "输入动态窗口的 HWND"
-cargo run --release --locked --example record_h264 -- --hwnd $windowId --token "your-LAN-secret" --frames 600 --save window.h264
-ffplay -f h264 window.h264
 ```
-
----
-
-## 安全说明
-
-当前 v0.1 版本的 TCP 协议采用明文传输（包含 Token、输入事件、视频流、音频流与剪贴板内容）。请**仅在可信的本地局域网内**或搭配加密隧道（如 Tailscale / WireGuard）使用，切勿直接将端口暴露到公网。
 
 ---
 
 ## 相关文档
 
 - 协议 Schema：[protocol/control.proto](protocol/control.proto)
-- 协议规范（帧格式 / DPI / 弹窗 / 音频）：[protocol/SPEC.md](protocol/SPEC.md)
+- 协议规范（TLS / 帧格式 / HEVC / Opus / 文件传输 / 手柄）：[protocol/SPEC.md](protocol/SPEC.md)
 - Windows 端开发设计文档：[win-host/DESIGN.md](win-host/DESIGN.md)
