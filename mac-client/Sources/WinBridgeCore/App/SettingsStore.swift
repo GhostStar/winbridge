@@ -79,11 +79,23 @@ enum VideoProfilePreference: String, CaseIterable {
     }
 }
 
+struct HostProfile: Codable, Equatable, Sendable {
+    var id: String
+    var name: String
+    var host: String
+    var port: UInt16
+    var useTls: Bool
+    var macAddress: String
+}
+
 struct ClientSettings {
     var host: String
     var port: UInt16
     var authToken: String
     var useTls: Bool
+    var macAddress: String
+    var hostProfiles: [HostProfile]
+    var selectedHostProfileId: String
     var trustedFingerprints: [String: String]
     var autoReconnect: Bool
     var showPerformanceHud: Bool
@@ -113,31 +125,70 @@ struct ClientSettings {
 enum SettingsStore {
     private static let defaults = UserDefaults(suiteName: "com.winbridge.client") ?? UserDefaults.standard
     private static let legacyTokenKey = "winbridge.token"
+    private static let hostProfilesKey = "winbridge.hostProfiles"
+    private static let selectedProfileKey = "winbridge.selectedHostProfileId"
 
     static func load() -> ClientSettings {
-        let host = defaults.string(forKey: "winbridge.host") ?? "192.168.1.100"
+        var host = defaults.string(forKey: "winbridge.host") ?? "192.168.1.100"
         let portInt = defaults.integer(forKey: "winbridge.port")
-        let port = (portInt > 0 && portInt <= 65535) ? UInt16(portInt) : 9876
+        var port = (portInt > 0 && portInt <= 65535) ? UInt16(portInt) : 9876
+        var useTls = defaults.object(forKey: "winbridge.useTls") as? Bool ?? true
+        var macAddress = defaults.string(forKey: "winbridge.macAddress") ?? ""
+
+        var hostProfiles: [HostProfile] = []
+        if let rawData = defaults.data(forKey: hostProfilesKey),
+           let decoded = try? JSONDecoder().decode([HostProfile].self, from: rawData),
+           !decoded.isEmpty {
+            hostProfiles = decoded
+        }
+        var selectedProfileId = defaults.string(forKey: selectedProfileKey) ?? KeychainStore.defaultAccount
+        if hostProfiles.isEmpty {
+            let defaultName = host.isEmpty ? "默认主机" : host
+            hostProfiles = [
+                HostProfile(
+                    id: KeychainStore.defaultAccount,
+                    name: defaultName,
+                    host: host,
+                    port: port,
+                    useTls: useTls,
+                    macAddress: macAddress
+                )
+            ]
+            selectedProfileId = KeychainStore.defaultAccount
+        } else if let selected = hostProfiles.first(where: { $0.id == selectedProfileId }) {
+            host = selected.host
+            port = selected.port
+            useTls = selected.useTls
+            macAddress = selected.macAddress
+        } else {
+            let first = hostProfiles[0]
+            selectedProfileId = first.id
+            host = first.host
+            port = first.port
+            useTls = first.useTls
+            macAddress = first.macAddress
+        }
 
         // Prefer macOS Keychain for auth token; automatically migrate legacy plaintext UserDefaults token once.
+        let account = KeychainStore.accountName(forProfileId: selectedProfileId)
         let token: String
-        if let keychainToken = KeychainStore.loadToken() {
+        if let keychainToken = KeychainStore.loadToken(account: account) {
             token = keychainToken
-            if defaults.object(forKey: legacyTokenKey) != nil {
+            if selectedProfileId == KeychainStore.defaultAccount, defaults.object(forKey: legacyTokenKey) != nil {
                 defaults.removeObject(forKey: legacyTokenKey)
             }
-        } else if let legacy = defaults.string(forKey: legacyTokenKey),
+        } else if selectedProfileId == KeychainStore.defaultAccount,
+                  let legacy = defaults.string(forKey: legacyTokenKey),
                   !legacy.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             let trimmed = legacy.trimmingCharacters(in: .whitespacesAndNewlines)
             token = trimmed
-            if KeychainStore.saveToken(trimmed) {
+            if KeychainStore.saveToken(trimmed, account: account) {
                 defaults.removeObject(forKey: legacyTokenKey)
             }
         } else {
             token = ""
         }
 
-        let useTls = defaults.object(forKey: "winbridge.useTls") as? Bool ?? true
         let trustedFingerprints = defaults.dictionary(forKey: "winbridge.trustedFingerprints") as? [String: String] ?? [:]
         let autoReconnect = defaults.object(forKey: "winbridge.autoReconnect") as? Bool ?? true
         let showPerformanceHud = defaults.object(forKey: "winbridge.showPerformanceHud") as? Bool ?? false
@@ -195,6 +246,9 @@ enum SettingsStore {
             port: port,
             authToken: token,
             useTls: useTls,
+            macAddress: macAddress,
+            hostProfiles: hostProfiles,
+            selectedHostProfileId: selectedProfileId,
             trustedFingerprints: trustedFingerprints,
             autoReconnect: autoReconnect,
             showPerformanceHud: showPerformanceHud,
@@ -225,9 +279,17 @@ enum SettingsStore {
     static func save(_ s: ClientSettings) {
         defaults.set(s.host, forKey: "winbridge.host")
         defaults.set(Int(s.port), forKey: "winbridge.port")
-        if KeychainStore.saveToken(s.authToken) {
-            defaults.removeObject(forKey: legacyTokenKey)
-        } else {
+        defaults.set(s.macAddress, forKey: "winbridge.macAddress")
+        defaults.set(s.selectedHostProfileId, forKey: selectedProfileKey)
+        if let encodedProfiles = try? JSONEncoder().encode(s.hostProfiles) {
+            defaults.set(encodedProfiles, forKey: hostProfilesKey)
+        }
+        let account = KeychainStore.accountName(forProfileId: s.selectedHostProfileId)
+        if KeychainStore.saveToken(s.authToken, account: account) {
+            if s.selectedHostProfileId == KeychainStore.defaultAccount {
+                defaults.removeObject(forKey: legacyTokenKey)
+            }
+        } else if s.selectedHostProfileId == KeychainStore.defaultAccount {
             // Fallback only if Keychain is unavailable (e.g. restricted headless test runner).
             defaults.set(s.authToken, forKey: legacyTokenKey)
         }

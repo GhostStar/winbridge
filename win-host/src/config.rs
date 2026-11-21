@@ -34,6 +34,7 @@ fn hwnd(arg: &str) -> Result<u64, String> {
 )]
 #[command(group(ArgGroup::new("diagnostic").args([
     "list_windows",
+    "print_pairing_code",
     "test_capture",
     "test_input",
     "install_service",
@@ -82,6 +83,9 @@ pub struct Config {
     pub log_level: String,
     #[arg(long)]
     pub list_windows: bool,
+    /// Print a one-click winbridge:// pairing URI (host IP, port, token, TLS fingerprint, MAC) and exit.
+    #[arg(long)]
+    pub print_pairing_code: bool,
     #[arg(long, value_parser = hwnd)]
     pub test_capture: Option<u64>,
     #[arg(long, value_parser = hwnd)]

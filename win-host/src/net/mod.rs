@@ -1,4 +1,5 @@
 pub mod discovery;
+pub mod host_info;
 mod media;
 pub mod tls;
 
@@ -123,15 +124,25 @@ impl Drop for Lease<'_> {
 async fn control<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     server: &Server,
     peer_ip: IpAddr,
+    local_ip: Option<IpAddr>,
     mut socket: S,
 ) -> Result<()> {
     let Payload::Hello(hello) = timeout(IDLE, read_message(&mut socket)).await?? else {
         bail!("expected Hello")
     };
+    tracing::info!(
+        %peer_ip,
+        client_name = %hello.client_name,
+        client_version = %hello.app_version,
+        client_caps = hello.capabilities,
+        "client Hello received"
+    );
     let codec = negotiate(server.config.codec, &hello.supported_codecs, server.caps);
     let mut ack = HelloAck {
         host_name: std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Windows".into()),
         default_fps: server.config.fps,
+        host_version: host_info::HOST_VERSION.into(),
+        capabilities: host_info::HOST_CAPABILITIES,
         ..Default::default()
     };
     let mut auth_failed = false;
@@ -182,6 +193,12 @@ async fn control<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     if auth_failed {
         // Brief uniform delay to slow online guessing even before lockout threshold.
         tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    if ack.accepted {
+        let (_, mac) = host_info::detect_lan_ipv4_and_mac(local_ip);
+        if let Some(mac) = mac {
+            ack.mac_address = mac;
+        }
     }
     let selected = ack.selected_codec;
     let lease = active.map(|active| Lease(server, active));
@@ -266,12 +283,13 @@ async fn media<S: AsyncRead + AsyncWrite + Unpin>(server: &Server, mut socket: S
 async fn handle_stream<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     server: &Server,
     peer_ip: IpAddr,
+    local_ip: Option<IpAddr>,
     mut stream: S,
 ) -> Result<()> {
     let mut prefix = [0; 8];
     timeout(IDLE, stream.read_exact(&mut prefix)).await??;
     match &prefix {
-        b"WBRGCTL\x01" => control(server, peer_ip, stream).await,
+        b"WBRGCTL\x01" => control(server, peer_ip, local_ip, stream).await,
         b"WBRGMED\x01" => media(server, stream).await,
         _ => bail!("unknown connection prefix"),
     }
@@ -337,6 +355,7 @@ pub async fn serve(
             continue;
         }
         let _ = socket.set_nodelay(true);
+        let local_ip = socket.local_addr().ok().map(|addr| addr.ip());
         let Ok(permit) = connections.clone().try_acquire_owned() else {
             continue;
         };
@@ -349,9 +368,9 @@ pub async fn serve(
                         .await
                         .context("TLS handshake timed out")?
                         .context("TLS handshake failed (ensure client has TLS enabled, or run host with --no-tls)")?;
-                    handle_stream(&state, peer_ip, tls_stream).await
+                    handle_stream(&state, peer_ip, local_ip, tls_stream).await
                 } else {
-                    handle_stream(&state, peer_ip, socket).await
+                    handle_stream(&state, peer_ip, local_ip, socket).await
                 }
             }
             .await;

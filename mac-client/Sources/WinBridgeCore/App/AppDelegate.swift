@@ -16,7 +16,7 @@ public enum WinBridgeAppLauncher {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let state = AppState()
     private var managerController: ManagerWindowController?
     private var filePullController: FilePullWindowController?
@@ -98,6 +98,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         state.togglePerformanceHud()
     }
 
+    @objc private func togglePinOnTopAction() {
+        state.togglePinOnTopForActiveWindow()
+    }
+
+    @objc private func toggleMuteWindowAction() {
+        state.toggleMuteForActiveWindow()
+    }
+
+    @objc private func wakeAndConnectAction() {
+        state.wakeAndConnect()
+    }
+
     @objc private func disconnectAction() {
         state.disconnect()
     }
@@ -176,12 +188,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Window menu
         let winItem = NSMenuItem()
         let winMenu = NSMenu(title: "窗口")
+        winMenu.delegate = self
         windowMenu = winMenu
         rebuildWindowMenu()
         winItem.submenu = winMenu
         mainMenu.addItem(winItem)
 
         NSApp.mainMenu = mainMenu
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        if menu === windowMenu {
+            rebuildWindowMenu()
+        }
     }
 
     private func rebuildWindowMenu() {
@@ -203,6 +222,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         hudItem.keyEquivalentModifierMask = [.command, .shift]
         winMenu.addItem(hudItem)
+        let pinItem = NSMenuItem(
+            title: "窗口置顶（当前桌面）",
+            action: #selector(togglePinOnTopAction),
+            keyEquivalent: "P"
+        )
+        pinItem.keyEquivalentModifierMask = [.command, .shift]
+        pinItem.state = state.isActiveWindowPinnedOnTop() ? .on : .off
+        winMenu.addItem(pinItem)
+        let muteItem = NSMenuItem(
+            title: "静音当前窗口音频",
+            action: #selector(toggleMuteWindowAction),
+            keyEquivalent: "M"
+        )
+        muteItem.keyEquivalentModifierMask = [.command, .shift]
+        muteItem.state = state.isActiveWindowMuted() ? .on : .off
+        winMenu.addItem(muteItem)
         winMenu.addItem(withTitle: "刷新当前窗口关键帧 (IDR)", action: #selector(requestKeyframeAction), keyEquivalent: "")
         winMenu.addItem(withTitle: "从 Windows 取回文件…", action: #selector(showFilePullAction), keyEquivalent: "")
         let pullClipItem = NSMenuItem(
@@ -249,6 +284,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         menu.addItem(.separator())
         menu.addItem(withTitle: "打开管理窗口…", action: #selector(showManager), keyEquivalent: "")
+        if state.connectionState == .disconnected,
+           WakeOnLan.normalizeMac(state.settings.macAddress) != nil {
+            let wolItem = NSMenuItem(
+                title: "唤醒并连接当前主机 (WoL)",
+                action: #selector(wakeAndConnectAction),
+                keyEquivalent: ""
+            )
+            wolItem.image = NSImage(systemSymbolName: "bolt.fill", accessibilityDescription: nil)
+            menu.addItem(wolItem)
+        }
         if case .connected = state.connectionState {
             let desktopItem = NSMenuItem(
                 title: state.isDesktopOpen ? "关闭 Windows 完整桌面" : "查看 Windows 完整桌面",

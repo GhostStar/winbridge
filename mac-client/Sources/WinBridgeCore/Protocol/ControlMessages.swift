@@ -131,12 +131,28 @@ enum HostErrorCode: Int32, Sendable {
 
 // MARK: - Messages
 
+enum ProtocolCapabilities {
+    static let currentAppVersion = "0.3.0"
+    static let processAudio: UInt32 = 1 << 0
+    static let filePull: UInt32 = 1 << 1
+    static let clipboardFiles: UInt32 = 1 << 2
+    static let adaptiveVideo: UInt32 = 1 << 3
+    static let perWindowMute: UInt32 = 1 << 4
+    static let wolMac: UInt32 = 1 << 5
+    static let quic: UInt32 = 1 << 6
+
+    static let clientSupported: UInt32 =
+        processAudio | filePull | clipboardFiles | adaptiveVideo | perWindowMute | wolMac
+}
+
 struct Hello: Equatable, Sendable {
     var protocolVersion: UInt32 = 1
     var clientName: String = ""
     var authToken: String = ""
     var displayScale: Float = 2.0
     var supportedCodecs: [VideoCodec] = []
+    var appVersion: String = ""
+    var capabilities: UInt32 = 0
 
     func encode() -> Data {
         var w = ProtoWriter()
@@ -145,6 +161,8 @@ struct Hello: Equatable, Sendable {
         w.writeString(field: 3, authToken)
         w.writeFloat(field: 4, displayScale)
         w.writePackedEnums(field: 5, supportedCodecs.map(\.rawValue))
+        w.writeString(field: 6, appVersion)
+        w.writeUInt32(field: 7, capabilities)
         return w.data
     }
 
@@ -167,6 +185,8 @@ struct Hello: Equatable, Sendable {
                         msg.supportedCodecs.append(c)
                     }
                 }
+            case 6: msg.appVersion = try r.readString()
+            case 7: msg.capabilities = try r.readUInt32()
             default: try r.skip(wireType: wire)
             }
         }
@@ -181,6 +201,9 @@ struct HelloAck: Equatable, Sendable {
     var hostName: String = ""
     var selectedCodec: VideoCodec = .unspecified
     var defaultFps: UInt32 = 60
+    var hostVersion: String = ""
+    var capabilities: UInt32 = 0
+    var macAddress: String = ""
 
     func encode() -> Data {
         var w = ProtoWriter()
@@ -190,6 +213,9 @@ struct HelloAck: Equatable, Sendable {
         w.writeString(field: 4, hostName)
         w.writeInt32(field: 5, selectedCodec.rawValue)
         w.writeUInt32(field: 6, defaultFps)
+        w.writeString(field: 7, hostVersion)
+        w.writeUInt32(field: 8, capabilities)
+        w.writeString(field: 9, macAddress)
         return w.data
     }
 
@@ -205,6 +231,9 @@ struct HelloAck: Equatable, Sendable {
             case 4: msg.hostName = try r.readString()
             case 5: msg.selectedCodec = VideoCodec(rawValue: try r.readInt32()) ?? .unspecified
             case 6: msg.defaultFps = try r.readUInt32()
+            case 7: msg.hostVersion = try r.readString()
+            case 8: msg.capabilities = try r.readUInt32()
+            case 9: msg.macAddress = try r.readString()
             default: try r.skip(wireType: wire)
             }
         }
@@ -1240,6 +1269,8 @@ struct SetAudioConfig: Equatable, Sendable {
     var bitrateKbps: UInt32 = 0
     /// 0 = system loopback, 1 = subscribed processes only.
     var scope: UInt32 = 0
+    /// Subscribed window IDs explicitly muted by the client.
+    var mutedWindowIds: [UInt64] = []
 
     func encode() -> Data {
         var w = ProtoWriter()
@@ -1247,6 +1278,7 @@ struct SetAudioConfig: Equatable, Sendable {
         w.writeInt32(field: 2, codec.rawValue)
         w.writeUInt32(field: 3, bitrateKbps)
         w.writeUInt32(field: 4, scope)
+        w.writePackedUInt64s(field: 5, mutedWindowIds)
         return w.data
     }
 
@@ -1260,6 +1292,12 @@ struct SetAudioConfig: Equatable, Sendable {
             case 2: m.codec = AudioCodec(rawValue: try r.readInt32()) ?? .unspecified
             case 3: m.bitrateKbps = try r.readUInt32()
             case 4: m.scope = try r.readUInt32()
+            case 5:
+                if wire == 2 {
+                    m.mutedWindowIds.append(contentsOf: try r.readPackedUInt64s())
+                } else {
+                    m.mutedWindowIds.append(try r.readUInt64())
+                }
             default: try r.skip(wireType: wire)
             }
         }

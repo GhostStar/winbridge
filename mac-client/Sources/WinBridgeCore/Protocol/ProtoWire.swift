@@ -99,6 +99,15 @@ struct ProtoWriter {
         }
         writeBytes(field: field, inner.data, forceEmit: true)
     }
+
+    mutating func writePackedUInt64s(field: Int, _ values: [UInt64]) {
+        guard !values.isEmpty else { return }
+        var inner = ProtoWriter()
+        for v in values {
+            inner.writeVarint(v)
+        }
+        writeBytes(field: field, inner.data, forceEmit: true)
+    }
 }
 
 /// Minimal, strict Proto3 binary reader supporting both packed and unpacked repeated fields.
@@ -192,6 +201,16 @@ struct ProtoReader {
         var out: [Int32] = []
         while !sub.isAtEnd {
             out.append(try sub.readInt32())
+        }
+        return out
+    }
+
+    mutating func readPackedUInt64s() throws -> [UInt64] {
+        let raw = try readBytes()
+        var sub = ProtoReader(data: raw)
+        var out: [UInt64] = []
+        while !sub.isAtEnd {
+            out.append(try sub.readUInt64())
         }
         return out
     }

@@ -42,6 +42,7 @@ const BUFFER_FLAG_SILENT: u32 = 0x0000_0002;
 const VT_BLOB: u16 = 65;
 const ACTIVATION_PROCESS_LOOPBACK: u32 = 1;
 const LOOPBACK_INCLUDE_TREE: u32 = 0;
+const LOOPBACK_EXCLUDE_TREE: u32 = 1;
 
 const IID_UNKNOWN: GUID = GUID::from_u128(0x00000000_0000_0000_C000_000000000046);
 const IID_HANDLER: GUID = GUID::from_u128(0x41D949AB_9862_444A_80F6_C261334DA5EB);
@@ -202,13 +203,17 @@ fn activate_async() -> Result<ActivateAudioInterfaceAsyncFn> {
     Ok(unsafe { mem::transmute(ptr) })
 }
 
-unsafe fn activate_process_client(pid: u32) -> Result<IAudioClient> {
+unsafe fn activate_process_client(pid: u32, exclude: bool) -> Result<IAudioClient> {
     let activate = activate_async()?;
     let path = wide(r"VAD\Process_Loopback");
     let mut params = ActivationParams {
         activation_type: ACTIVATION_PROCESS_LOOPBACK,
         target_process_id: pid,
-        process_loopback_mode: LOOPBACK_INCLUDE_TREE,
+        process_loopback_mode: if exclude {
+            LOOPBACK_EXCLUDE_TREE
+        } else {
+            LOOPBACK_INCLUDE_TREE
+        },
     };
     let pv = BlobPropVariant {
         vt: VT_BLOB,
@@ -269,9 +274,9 @@ struct ProcTap {
 }
 
 impl ProcTap {
-    fn open(pid: u32) -> Result<Self> {
+    fn open(pid: u32, exclude: bool) -> Result<Self> {
         unsafe {
-            let client = activate_process_client(pid)?;
+            let client = activate_process_client(pid, exclude)?;
             // `VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK` does not implement `GetMixFormat()`
             // (returns `E_NOTIMPL`), so we initialize directly with 48 kHz stereo 16-bit PCM.
             let format = WAVEFORMATEX {
@@ -372,14 +377,15 @@ pub(crate) fn run_processes(
     running: &std::sync::atomic::AtomicBool,
     mode: AudioMode,
     pids: &[u32],
+    exclude: bool,
     report: &mut dyn FnMut(String),
 ) -> Result<RunOutcome> {
     let mut taps = Vec::new();
     let mut errors = Vec::new();
     for &pid in pids {
-        match ProcTap::open(pid) {
+        match ProcTap::open(pid, exclude) {
             Ok(tap) => {
-                tracing::info!(pid, "process audio loopback started");
+                tracing::info!(pid, exclude, "process audio loopback started");
                 taps.push(tap);
             }
             Err(e) => errors.push(format!("pid {pid}: {e:#}")),

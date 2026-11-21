@@ -69,10 +69,15 @@ final class AppState {
     private(set) var availableApps: [AppEntry] = []
     private(set) var discoveredHosts: [DiscoveredHost] = []
     private(set) var subscribedRootIds: Set<UInt64> = []
+    private(set) var mutedWindowIds: Set<UInt64> = []
+    private(set) var connectedHostVersion: String = ""
+    private(set) var connectedHostCapabilities: UInt32 = 0
     private(set) var lastBannerMessage: String = ""
     private(set) var lastBannerIsError: Bool = false
 
     var isReconnecting: Bool { reconnectTask != nil }
+    private var isWakeConnecting = false
+    private var wakeDeadline: Date?
 
     var isDesktopOpen: Bool {
         subscribedRootIds.contains(SyntheticWindow.primaryDesktop)
@@ -142,8 +147,262 @@ final class AppState {
         s.host = host.host
         s.port = host.port
         s.useTls = host.tlsEnabled
+        syncSelectedProfileFields(in: &s)
         settings = s
         setBanner("已选择局域网主机 \(host.name)（\(host.host):\(host.port)）", isError: false)
+        onStateChanged?()
+    }
+
+    // MARK: - Multi-Host Profiles, Pairing Code & Wake-on-LAN
+
+    var activeHostProfile: HostProfile? {
+        settings.hostProfiles.first { $0.id == settings.selectedHostProfileId }
+    }
+
+    func syncSelectedProfileFields(in s: inout ClientSettings) {
+        if let idx = s.hostProfiles.firstIndex(where: { $0.id == s.selectedHostProfileId }) {
+            s.hostProfiles[idx].host = s.host
+            s.hostProfiles[idx].port = s.port
+            s.hostProfiles[idx].useTls = s.useTls
+            s.hostProfiles[idx].macAddress = s.macAddress
+        } else {
+            let id = s.selectedHostProfileId.isEmpty ? KeychainStore.defaultAccount : s.selectedHostProfileId
+            s.selectedHostProfileId = id
+            s.hostProfiles.append(HostProfile(
+                id: id,
+                name: s.host.isEmpty ? "默认主机" : s.host,
+                host: s.host,
+                port: s.port,
+                useTls: s.useTls,
+                macAddress: s.macAddress
+            ))
+        }
+    }
+
+    func selectHostProfile(id: String) {
+        guard connectionState == .disconnected, !isReconnecting else {
+            setBanner("请先断开当前连接再切换主机配置", isError: true)
+            onStateChanged?()
+            return
+        }
+        guard let profile = settings.hostProfiles.first(where: { $0.id == id }) else { return }
+        var s = settings
+        s.selectedHostProfileId = profile.id
+        s.host = profile.host
+        s.port = profile.port
+        s.useTls = profile.useTls
+        s.macAddress = profile.macAddress
+        s.authToken = KeychainStore.loadToken(account: KeychainStore.accountName(forProfileId: profile.id)) ?? ""
+        settings = s
+        setBanner("已切换到主机配置「\(profile.name)」（\(profile.host):\(profile.port)）", isError: false)
+        onStateChanged?()
+    }
+
+    func createHostProfile(named rawName: String) {
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalName = name.isEmpty ? (settings.host.isEmpty ? "新主机" : settings.host) : name
+        let newId = UUID().uuidString.lowercased()
+        var s = settings
+        let profile = HostProfile(
+            id: newId,
+            name: finalName,
+            host: s.host.trimmingCharacters(in: .whitespacesAndNewlines),
+            port: s.port,
+            useTls: s.useTls,
+            macAddress: WakeOnLan.normalizeMac(s.macAddress) ?? s.macAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+        s.hostProfiles.append(profile)
+        s.selectedHostProfileId = newId
+        settings = s
+        setBanner("已保存为主机配置「\(finalName)」", isError: false)
+        onStateChanged?()
+    }
+
+    func deleteSelectedHostProfile() {
+        guard connectionState == .disconnected, !isReconnecting else {
+            setBanner("请先断开连接再删除主机配置", isError: true)
+            onStateChanged?()
+            return
+        }
+        guard settings.hostProfiles.count > 1 else {
+            setBanner("至少保留一个主机配置", isError: true)
+            onStateChanged?()
+            return
+        }
+        var s = settings
+        let removedId = s.selectedHostProfileId
+        let removedName = s.hostProfiles.first(where: { $0.id == removedId })?.name ?? removedId
+        s.hostProfiles.removeAll { $0.id == removedId }
+        KeychainStore.deleteToken(account: KeychainStore.accountName(forProfileId: removedId))
+        let next = s.hostProfiles[0]
+        s.selectedHostProfileId = next.id
+        s.host = next.host
+        s.port = next.port
+        s.useTls = next.useTls
+        s.macAddress = next.macAddress
+        s.authToken = KeychainStore.loadToken(account: KeychainStore.accountName(forProfileId: next.id)) ?? ""
+        settings = s
+        setBanner("已删除主机配置「\(removedName)」，当前选中「\(next.name)」", isError: false)
+        onStateChanged?()
+    }
+
+    @discardableResult
+    func importPairingCode(_ raw: String) -> Bool {
+        guard let parsed = PairingCode.parse(raw) else {
+            setBanner("无法识别配对码（应以 winbridge:// 开头）", isError: true)
+            onStateChanged?()
+            return false
+        }
+        if connectionState != .disconnected {
+            disconnect()
+        }
+        var s = settings
+        let displayName = parsed.name ?? parsed.host
+        let targetId: String
+        if let existingIdx = s.hostProfiles.firstIndex(where: {
+            $0.host.caseInsensitiveCompare(parsed.host) == .orderedSame && $0.port == parsed.port
+        }) {
+            targetId = s.hostProfiles[existingIdx].id
+            if let explicitName = parsed.name, !explicitName.isEmpty {
+                s.hostProfiles[existingIdx].name = explicitName
+            }
+            s.hostProfiles[existingIdx].host = parsed.host
+            s.hostProfiles[existingIdx].port = parsed.port
+            s.hostProfiles[existingIdx].useTls = parsed.useTls
+            if let mac = parsed.macAddress {
+                s.hostProfiles[existingIdx].macAddress = mac
+            }
+        } else {
+            targetId = UUID().uuidString.lowercased()
+            s.hostProfiles.append(HostProfile(
+                id: targetId,
+                name: displayName,
+                host: parsed.host,
+                port: parsed.port,
+                useTls: parsed.useTls,
+                macAddress: parsed.macAddress ?? ""
+            ))
+        }
+        s.selectedHostProfileId = targetId
+        s.host = parsed.host
+        s.port = parsed.port
+        s.useTls = parsed.useTls
+        if let mac = parsed.macAddress {
+            s.macAddress = mac
+        } else if let prof = s.hostProfiles.first(where: { $0.id == targetId }) {
+            s.macAddress = prof.macAddress
+        }
+        if let token = parsed.token {
+            s.authToken = token
+        } else {
+            s.authToken = KeychainStore.loadToken(account: KeychainStore.accountName(forProfileId: targetId)) ?? ""
+        }
+        if let fp = parsed.fingerprint {
+            let key = CertificateFingerprint.hostKey(host: parsed.host, port: parsed.port)
+            s.trustedFingerprints[key] = fp
+        }
+        settings = s
+
+        var notes: [String] = []
+        if parsed.token != nil { notes.append("Token") }
+        if parsed.fingerprint != nil { notes.append("TLS 指纹") }
+        if parsed.macAddress != nil { notes.append("WoL MAC") }
+        let suffix = notes.isEmpty ? "" : "（已填入 \(notes.joined(separator: " / "))）"
+        ClientLogger.shared.info("Imported pairing code for \(displayName) (\(parsed.host):\(parsed.port))")
+        setBanner("✓ 已导入配对配置「\(displayName)」\(suffix)，点击连接即可", isError: false)
+        onStateChanged?()
+        return true
+    }
+
+    func wakeAndConnect() {
+        guard connectionState == .disconnected else {
+            setBanner("当前已连接或正在连接中", isError: false)
+            onStateChanged?()
+            return
+        }
+        let rawMac = settings.macAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let normalizedMac = WakeOnLan.normalizeMac(rawMac) else {
+            setBanner("未记录有效的 Windows 网卡 MAC 地址：请先连接一次自动获取，或在 MAC 栏手动填写", isError: true)
+            onStateChanged?()
+            return
+        }
+        let host = settings.host.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            let targets = try WakeOnLan.send(macAddress: normalizedMac, hostHint: host)
+            ClientLogger.shared.info("Sent WoL magic packet to \(normalizedMac) via \(targets.joined(separator: ", "))")
+            cancelReconnect()
+            manualDisconnectRequested = false
+            isWakeConnecting = true
+            wakeDeadline = Date().addingTimeInterval(60)
+            reconnectAttempt = 0
+            setBanner("⚡ 已向 \(normalizedMac) 发送唤醒包，等待 Windows 开机上线并自动连接…", isError: false)
+            onStateChanged?()
+            reconnectTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard let self, !Task.isCancelled, self.connectionState == .disconnected else { return }
+                self.connect(isAutoReconnect: true)
+            }
+        } catch {
+            ClientLogger.shared.error("WoL send failed: \(error.localizedDescription)")
+            setBanner("唤醒失败：\(error.localizedDescription)", isError: true)
+            onStateChanged?()
+        }
+    }
+
+    // MARK: - Always-on-Top PiP & Per-Window Audio Mute
+
+    func isWindowMuted(_ windowId: UInt64) -> Bool {
+        mutedWindowIds.contains(windowId)
+    }
+
+    func isActiveWindowMuted() -> Bool {
+        guard let wc = NSApp.keyWindow?.windowController as? RemoteWindowController else { return false }
+        return mutedWindowIds.contains(wc.windowId)
+    }
+
+    func isActiveWindowPinnedOnTop() -> Bool {
+        guard let wc = NSApp.keyWindow?.windowController as? RemoteWindowController else { return false }
+        return wc.isPinnedOnTop
+    }
+
+    func togglePinOnTopForActiveWindow() {
+        guard let wc = NSApp.keyWindow?.windowController as? RemoteWindowController else {
+            setBanner("请先选中一个正在投射的 Windows 窗口", isError: true)
+            onStateChanged?()
+            return
+        }
+        wc.togglePinOnTop()
+    }
+
+    func toggleMuteForActiveWindow() {
+        guard let wc = NSApp.keyWindow?.windowController as? RemoteWindowController else {
+            setBanner("请先选中一个正在投射的 Windows 窗口", isError: true)
+            onStateChanged?()
+            return
+        }
+        toggleMute(windowId: wc.windowId)
+    }
+
+    func toggleMute(windowId: UInt64) {
+        let nowMuted: Bool
+        if mutedWindowIds.contains(windowId) {
+            mutedWindowIds.remove(windowId)
+            nowMuted = false
+        } else {
+            mutedWindowIds.insert(windowId)
+            nowMuted = true
+        }
+        controllers[windowId]?.setAudioMuted(nowMuted)
+        if settings.audioEnabled {
+            applyAudioSetting()
+            let toast = nowMuted ? "🔇 当前窗口已静音" : "🔊 当前窗口已恢复声音"
+            controllers[windowId]?.showToast(toast, style: .progress, autoHideSeconds: 1.8)
+            setBanner(toast, isError: false)
+        } else {
+            let toast = nowMuted ? "🔇 已标记窗口静音（开启 Windows 音频后生效）" : "🔊 已取消窗口静音标记"
+            controllers[windowId]?.showToast(toast, style: .progress, autoHideSeconds: 2.0)
+            setBanner(toast, isError: false)
+        }
         onStateChanged?()
     }
 
@@ -262,7 +521,8 @@ final class AppState {
             enabled: settings.audioEnabled,
             codec: settings.audioQuality.audioCodec,
             bitrateKbps: settings.audioQuality.bitrateKbps,
-            scope: settings.audioProcessOnly ? 1 : 0
+            scope: settings.audioProcessOnly ? 1 : 0,
+            mutedWindowIds: Array(mutedWindowIds).sorted()
         )))
     }
 
@@ -389,14 +649,28 @@ final class AppState {
             do {
                 let outcome = try await conn.connect(config: config)
                 let ack = outcome.ack
+                var updatedSettings = self.settings
+                var settingsModified = false
                 if let fp = outcome.tlsFingerprint {
-                    var s = self.settings
-                    s.trustedFingerprints[hostKey] = fp
-                    self.settings = s
+                    updatedSettings.trustedFingerprints[hostKey] = fp
+                    settingsModified = true
                 }
+                if let detectedMac = WakeOnLan.normalizeMac(ack.macAddress),
+                   updatedSettings.macAddress != detectedMac {
+                    updatedSettings.macAddress = detectedMac
+                    self.syncSelectedProfileFields(in: &updatedSettings)
+                    settingsModified = true
+                }
+                if settingsModified {
+                    self.settings = updatedSettings
+                }
+                self.isWakeConnecting = false
+                self.wakeDeadline = nil
                 self.reconnectAttempt = 0
                 self.reconnectTask?.cancel()
                 self.reconnectTask = nil
+                self.connectedHostVersion = ack.hostVersion
+                self.connectedHostCapabilities = ack.capabilities
                 self.connectionState = .connected(hostName: ack.hostName, codec: ack.selectedCodec)
                 self.rttMs = nil
                 let tlsNote: String
@@ -406,8 +680,20 @@ final class AppState {
                 } else {
                     tlsNote = " · 明文"
                 }
-                ClientLogger.shared.info("Connected to \(ack.hostName) codec=\(ack.selectedCodec.displayName)\(tlsNote)")
-                self.setBanner("已连接到 \(ack.hostName)（\(ack.selectedCodec.displayName)\(tlsNote)）", isError: false)
+                let versionNotice: String
+                if ack.hostVersion.isEmpty
+                    || (ack.capabilities & (ProtocolCapabilities.perWindowMute | ProtocolCapabilities.wolMac)) == 0 {
+                    versionNotice = " · 提示：Windows 端版本较旧，更新 win-host.exe 可启用单窗静音与自动 MAC"
+                } else {
+                    versionNotice = " · v\(ack.hostVersion)"
+                }
+                ClientLogger.shared.info(
+                    "Connected to \(ack.hostName) v=\(ack.hostVersion) caps=\(ack.capabilities) mac=\(ack.macAddress) codec=\(ack.selectedCodec.displayName)\(tlsNote)"
+                )
+                self.setBanner(
+                    "已连接到 \(ack.hostName)（\(ack.selectedCodec.displayName)\(tlsNote)\(versionNotice)）",
+                    isError: false
+                )
                 self.clipboardMonitor.start()
                 self.gamepadMonitor.start()
                 if self.settings.audioEnabled {
@@ -452,6 +738,8 @@ final class AppState {
         reconnectTask?.cancel()
         reconnectTask = nil
         reconnectAttempt = 0
+        isWakeConnecting = false
+        wakeDeadline = nil
     }
 
     func resetTrustedFingerprintForCurrentHost() {
@@ -469,7 +757,15 @@ final class AppState {
     }
 
     private func shouldAutoReconnect(for error: Error?) -> Bool {
-        guard settings.autoReconnect, !manualDisconnectRequested, let error else { return false }
+        if manualDisconnectRequested { return false }
+        let allowWake = isWakeConnecting && (wakeDeadline.map { Date() < $0 } ?? false)
+        guard settings.autoReconnect || allowWake, let error else {
+            if isWakeConnecting {
+                isWakeConnecting = false
+                wakeDeadline = nil
+            }
+            return false
+        }
         if let ce = error as? ConnectionError {
             switch ce {
             case .handshakeRejected, .certificateMismatch, .localNetworkProhibited, .invalidEndpoint:
@@ -482,15 +778,21 @@ final class AppState {
     }
 
     private func scheduleAutoReconnect(lastError: Error) {
-        guard settings.autoReconnect, !manualDisconnectRequested else { return }
+        let allowWake = isWakeConnecting && (wakeDeadline.map { Date() < $0 } ?? false)
+        guard (settings.autoReconnect || allowWake), !manualDisconnectRequested else { return }
         reconnectTask?.cancel()
         reconnectAttempt += 1
-        let delaySecs = Self.reconnectDelaySeconds(forAttempt: reconnectAttempt)
+        let delaySecs = allowWake ? min(4, max(2, reconnectAttempt)) : Self.reconnectDelaySeconds(forAttempt: reconnectAttempt)
         let attempt = reconnectAttempt
-        setBanner(
-            "连接异常（\(lastError.localizedDescription)），\(delaySecs) 秒后自动重连（第 \(attempt) 次）…",
-            isError: true
-        )
+        if allowWake {
+            let remaining = max(1, Int(ceil((wakeDeadline ?? Date()).timeIntervalSinceNow)))
+            setBanner("⚡ 等待 Windows 唤醒上线中（第 \(attempt) 次尝试，剩余约 \(remaining) 秒）…", isError: false)
+        } else {
+            setBanner(
+                "连接异常（\(lastError.localizedDescription)），\(delaySecs) 秒后自动重连（第 \(attempt) 次）…",
+                isError: true
+            )
+        }
         onStateChanged?()
 
         reconnectTask = Task { @MainActor [weak self] in
@@ -597,6 +899,9 @@ final class AppState {
         availableWindows.removeAll()
         availableApps.removeAll()
         subscribedRootIds.removeAll()
+        mutedWindowIds.removeAll()
+        connectedHostVersion = ""
+        connectedHostCapabilities = 0
         activeTransferNames.removeAll()
         activeTransferTargetWindow.removeAll()
         for (_, pending) in pendingPullTargets {
@@ -752,8 +1057,12 @@ final class AppState {
 
     func unsubscribeWindow(_ windowId: UInt64) {
         subscribedRootIds.remove(windowId)
+        let wasMuted = mutedWindowIds.remove(windowId) != nil
         sendControl(.unsubscribeWindow(UnsubscribeWindow(windowId: windowId)))
         closeWindowLocally(windowId)
+        if wasMuted && settings.audioEnabled {
+            applyAudioSetting()
+        }
         onStateChanged?()
     }
 
@@ -1317,6 +1626,7 @@ final class AppState {
         case .windowClosed(let closed):
             ClientLogger.shared.info("WindowClosed 0x\(String(closed.windowId, radix: 16))")
             subscribedRootIds.remove(closed.windowId)
+            mutedWindowIds.remove(closed.windowId)
             closeWindowLocally(closed.windowId)
             onStateChanged?()
 
@@ -1420,6 +1730,8 @@ final class AppState {
         wc.onRequestQuit = { NSApp.terminate(nil) }
         wc.onOpenManager = { [weak self] in self?.onOpenManager?() }
         wc.onToggleHud = { [weak self] in self?.togglePerformanceHud() }
+        wc.onToggleMuteWindow = { [weak self] id in self?.toggleMute(windowId: id) }
+        wc.onPinOnTopChanged = { [weak self] in self?.onStateChanged?() }
         wc.onPullClipboardFiles = { [weak self] in self?.pullClipboardFilesToPasteboard(isAuto: false) }
         wc.onFilesDropped = { [weak self] winId, urls in self?.sendDroppedFiles(urls, toWindowId: winId) }
 
@@ -1470,6 +1782,7 @@ final class AppState {
         case .windowNotFound:
             prefix = "[窗口不可用] "
             subscribedRootIds.remove(err.windowId)
+            mutedWindowIds.remove(err.windowId)
             closeWindowLocally(err.windowId)
         case .captureFailed:
             prefix = "[采集失败] "

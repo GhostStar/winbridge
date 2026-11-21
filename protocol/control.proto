@@ -183,7 +183,7 @@ enum ErrorCode {
 // ============================================================================
 
 message Hello {
-  // Protocol major version. Must be 1 for v0.1.
+  // Protocol major version. Must be 1 for v0.1+.
   uint32 protocol_version = 1;
   string client_name = 2;
   // Pre-shared LAN token (may be empty if host disabled auth in dev mode).
@@ -192,6 +192,10 @@ message Hello {
   float display_scale = 4;
   // Client-supported codecs ordered by preference (first = most preferred).
   repeated VideoCodec supported_codecs = 5;
+  // Client application version string (e.g. "0.3.0") for mismatch diagnostics.
+  string app_version = 6;
+  // Bitmask of optional protocol capabilities supported by client.
+  uint32 capabilities = 7;
 }
 
 message HelloAck {
@@ -203,6 +207,12 @@ message HelloAck {
   // Codec selected by the host from Hello.supported_codecs.
   VideoCodec selected_codec = 5;
   uint32 default_fps = 6;
+  // Host application version string (e.g. "0.3.0").
+  string host_version = 7;
+  // Bitmask of optional protocol capabilities supported by host.
+  uint32 capabilities = 8;
+  // Active Windows NIC MAC address (e.g. "AA:BB:CC:DD:EE:FF") for Wake-on-LAN.
+  string mac_address = 9;
 }
 
 message Ping {
@@ -556,6 +566,9 @@ message SetAudioConfig {
   //    If a subscribed root is the desktop (or process loopback cannot be activated),
   //    the host falls back to system loopback and reports HostError.
   uint32 scope = 4;
+  // Optional list of subscribed window_ids muted by the client. The host excludes
+  // processes whose subscribed windows are all muted (or pauses audio if all are muted).
+  repeated uint64 muted_window_ids = 5;
 }
 
 message HostError {

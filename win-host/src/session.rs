@@ -83,6 +83,7 @@ struct Session {
     audio: Option<AudioWorker>,
     audio_mode: Option<AudioMode>,
     audio_per_process: bool,
+    muted_window_ids: HashSet<u64>,
     video_profile: i32,
     video_adaptive: bool,
     video_rtt_ms: u32,
@@ -338,6 +339,7 @@ impl Session {
         }
         for child in ids {
             self.windows.remove(&child);
+            self.muted_window_ids.remove(&child);
             self.mux.end(child, self.codec as u8);
             if closed || child != id {
                 self.send(Payload::WindowClosed(WindowClosed { window_id: child }))?;
@@ -473,6 +475,7 @@ impl Session {
             Payload::LaunchApp(req) => return self.launch(req).await,
             Payload::SetAudioConfig(cfg) => {
                 self.audio_per_process = cfg.scope == 1;
+                self.muted_window_ids = cfg.muted_window_ids.into_iter().collect();
                 if cfg.enabled {
                     let desired = if cfg.codec == 11 {
                         AudioMode::Opus {
@@ -655,7 +658,7 @@ impl Session {
             .filter(|sub| sub.root == sub.info.window_id)
             .map(|sub| (sub.info.window_id, sub.info.pid))
             .collect();
-        let plan = audio::capture_plan(self.audio_per_process, &roots);
+        let plan = audio::capture_plan(self.audio_per_process, &roots, &self.muted_window_ids);
         if self
             .audio
             .as_ref()
@@ -831,6 +834,7 @@ pub async fn run(
         audio: None,
         audio_mode: None,
         audio_per_process: false,
+        muted_window_ids: HashSet::new(),
         video_profile: 1,
         video_adaptive: false,
         video_rtt_ms: 0,

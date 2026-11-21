@@ -5,6 +5,7 @@ use crate::{
 use anyhow::{anyhow, bail, ensure, Result};
 use mousiki::{Application, Bitrate, Channels, Encoder};
 use std::{
+    collections::HashSet,
     ptr, slice,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -54,29 +55,85 @@ pub enum CapturePlan {
     /// Default render-endpoint loopback. Also used when the desktop is subscribed,
     /// or after process loopback fails to activate.
     System,
-    /// Per-process scope is on, but nothing is subscribed yet. Capture silence.
+    /// Per-process scope is on with nothing unmuted, or every subscribed window is muted.
     Idle,
     /// One process-loopback client per pid, mixed into the single media audio stream.
     Processes(Vec<u32>),
+    /// System loopback excluding a single muted process tree (WASAPI exclude mode).
+    ExcludeProcess(u32),
 }
 
 /// `windows` is `(window_id, pid)` for subscribed roots only.
-pub fn capture_plan(per_process: bool, windows: &[(u64, u32)]) -> CapturePlan {
+pub fn capture_plan(
+    per_process: bool,
+    windows: &[(u64, u32)],
+    muted_window_ids: &HashSet<u64>,
+) -> CapturePlan {
+    let mut unmuted: Vec<(u64, u32)> = Vec::new();
+    let mut muted: Vec<(u64, u32)> = Vec::new();
+    for &(id, pid) in windows {
+        if muted_window_ids.contains(&id) {
+            muted.push((id, pid));
+        } else {
+            unmuted.push((id, pid));
+        }
+    }
+
+    if !windows.is_empty() && unmuted.is_empty() {
+        return CapturePlan::Idle;
+    }
+
+    let mut unmuted_pids: Vec<u32> = unmuted
+        .iter()
+        .filter_map(|(id, pid)| (*id != crate::win32::DESKTOP_WINDOW_ID && *pid != 0).then_some(*pid))
+        .collect();
+    unmuted_pids.sort_unstable();
+    unmuted_pids.dedup();
+
+    let unmuted_pid_set: HashSet<u32> = unmuted_pids.iter().copied().collect();
+    let mut muted_only_pids: Vec<u32> = muted
+        .iter()
+        .filter_map(|(id, pid)| {
+            (*id != crate::win32::DESKTOP_WINDOW_ID
+                && *pid != 0
+                && !unmuted_pid_set.contains(pid))
+            .then_some(*pid)
+        })
+        .collect();
+    muted_only_pids.sort_unstable();
+    muted_only_pids.dedup();
+
+    let desktop_unmuted = unmuted
+        .iter()
+        .any(|(id, pid)| *id == crate::win32::DESKTOP_WINDOW_ID || *pid == 0);
+    let desktop_muted = muted
+        .iter()
+        .any(|(id, _)| *id == crate::win32::DESKTOP_WINDOW_ID);
+
     if !per_process {
+        if muted.is_empty() {
+            return CapturePlan::System;
+        }
+        if !desktop_muted && muted_only_pids.len() == 1 {
+            return CapturePlan::ExcludeProcess(muted_only_pids[0]);
+        }
+        if !desktop_unmuted && !unmuted_pids.is_empty() && (desktop_muted || muted_only_pids.len() > 1) {
+            return CapturePlan::Processes(unmuted_pids);
+        }
         return CapturePlan::System;
     }
-    if windows.iter().any(|(id, pid)| {
-        *id == crate::win32::DESKTOP_WINDOW_ID || *pid == 0
-    }) {
+
+    if desktop_unmuted {
+        if muted_only_pids.len() == 1 {
+            return CapturePlan::ExcludeProcess(muted_only_pids[0]);
+        }
         return CapturePlan::System;
     }
-    let mut pids: Vec<u32> = windows.iter().map(|(_, pid)| *pid).collect();
-    pids.sort_unstable();
-    pids.dedup();
-    if pids.is_empty() {
+
+    if unmuted_pids.is_empty() {
         CapturePlan::Idle
     } else {
-        CapturePlan::Processes(pids)
+        CapturePlan::Processes(unmuted_pids)
     }
 }
 
@@ -489,6 +546,24 @@ impl AudioWorker {
                             &worker_running,
                             mode,
                             pids,
+                            false,
+                            &mut |message| {
+                                if !reported_fallback {
+                                    reported_fallback = true;
+                                    let _ = replies.try_send(Payload::HostError(HostError {
+                                        window_id: 0,
+                                        code: 0,
+                                        message,
+                                    }));
+                                }
+                            },
+                        ),
+                        CapturePlan::ExcludeProcess(pid) => process::run_processes(
+                            &worker_mux,
+                            &worker_running,
+                            mode,
+                            &[*pid],
+                            true,
                             &mut |message| {
                                 if !reported_fallback {
                                     reported_fallback = true;
@@ -503,7 +578,12 @@ impl AudioWorker {
                     };
                     match step {
                         Ok(process::RunOutcome::Stopped) => {
-                            if matches!(plan, CapturePlan::System | CapturePlan::Processes(_)) {
+                            if matches!(
+                                plan,
+                                CapturePlan::System
+                                    | CapturePlan::Processes(_)
+                                    | CapturePlan::ExcludeProcess(_)
+                            ) {
                                 break;
                             }
                         }
@@ -517,7 +597,10 @@ impl AudioWorker {
                             let invalidated = e.downcast_ref::<windows::core::Error>().is_some_and(
                                 |we| we.code().0 as u32 == AUDCLNT_DEVICE_INVALIDATED,
                             );
-                            if matches!(plan, CapturePlan::Processes(_)) {
+                            if matches!(
+                                plan,
+                                CapturePlan::Processes(_) | CapturePlan::ExcludeProcess(_)
+                            ) {
                                 if !reported_fallback {
                                     reported_fallback = true;
                                     let _ = replies.try_send(Payload::HostError(HostError {
@@ -599,17 +682,48 @@ mod tests {
     }
 
     #[test]
-    fn capture_plan_uses_system_for_desktop_and_dedups_pids() {
+    fn capture_plan_uses_system_for_desktop_and_handles_per_window_mute() {
         use crate::win32::DESKTOP_WINDOW_ID;
-        assert_eq!(capture_plan(false, &[(10, 4)]), CapturePlan::System);
-        assert_eq!(capture_plan(true, &[]), CapturePlan::Idle);
+        let none = HashSet::new();
+        assert_eq!(capture_plan(false, &[(10, 4)], &none), CapturePlan::System);
+        assert_eq!(capture_plan(true, &[], &none), CapturePlan::Idle);
         assert_eq!(
-            capture_plan(true, &[(DESKTOP_WINDOW_ID, 0), (10, 4)]),
+            capture_plan(true, &[(DESKTOP_WINDOW_ID, 0), (10, 4)], &none),
             CapturePlan::System
         );
         assert_eq!(
-            capture_plan(true, &[(10, 4), (11, 4), (12, 9)]),
+            capture_plan(true, &[(10, 4), (11, 4), (12, 9)], &none),
             CapturePlan::Processes(vec![4, 9])
+        );
+
+        // Muting the only subscribed window pauses audio even in system scope.
+        let mute_10: HashSet<u64> = [10].into_iter().collect();
+        assert_eq!(capture_plan(false, &[(10, 4)], &mute_10), CapturePlan::Idle);
+
+        // Muting one of two apps in system scope excludes just that PID.
+        assert_eq!(
+            capture_plan(false, &[(10, 4), (12, 9)], &mute_10),
+            CapturePlan::ExcludeProcess(4)
+        );
+
+        // Muting one window when another window of the same PID is still unmuted keeps the PID audible.
+        assert_eq!(
+            capture_plan(true, &[(10, 4), (11, 4), (12, 9)], &mute_10),
+            CapturePlan::Processes(vec![4, 9])
+        );
+
+        // Muting all windows of PID 4 in per-process scope drops PID 4.
+        let mute_pid4: HashSet<u64> = [10, 11].into_iter().collect();
+        assert_eq!(
+            capture_plan(true, &[(10, 4), (11, 4), (12, 9)], &mute_pid4),
+            CapturePlan::Processes(vec![9])
+        );
+
+        // Muting 2+ distinct PIDs in system scope narrows to unmuted subscribed PIDs.
+        let mute_two: HashSet<u64> = [10, 12].into_iter().collect();
+        assert_eq!(
+            capture_plan(false, &[(10, 4), (12, 9), (13, 15)], &mute_two),
+            CapturePlan::Processes(vec![15])
         );
     }
 

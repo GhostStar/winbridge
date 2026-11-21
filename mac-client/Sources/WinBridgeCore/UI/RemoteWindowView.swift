@@ -34,6 +34,8 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
     var onRequestQuit: (() -> Void)?
     var onOpenManager: (() -> Void)?
     var onToggleHud: (() -> Void)?
+    var onTogglePinOnTop: (() -> Void)?
+    var onToggleMuteWindow: (() -> Void)?
     var onPullClipboardFiles: (() -> Void)?
     var onFilesDropped: (([URL]) -> Void)?
     var onGameLockStateChanged: ((GameLockState) -> Void)?
@@ -665,6 +667,16 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
         // Cmd+Shift+H toggles the Performance HUD overlay across remote windows.
         if flags == [.command, .shift], event.keyCode == UInt16(kVK_ANSI_H) {
             onToggleHud?()
+            return true
+        }
+        // Cmd+Shift+P toggles Always-on-Top PiP floating mode (staying on the current Space).
+        if flags == [.command, .shift], event.keyCode == UInt16(kVK_ANSI_P) {
+            onTogglePinOnTop?()
+            return true
+        }
+        // Cmd+Shift+M toggles per-window audio mute for this remote window.
+        if flags == [.command, .shift], event.keyCode == UInt16(kVK_ANSI_M) {
+            onToggleMuteWindow?()
             return true
         }
         // Option+Shift+Cmd+V pulls Windows clipboard files onto the macOS pasteboard (avoids colliding with Ctrl+Shift+V).

@@ -34,6 +34,8 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
     var onRequestQuit: (() -> Void)?
     var onOpenManager: (() -> Void)?
     var onToggleHud: (() -> Void)?
+    var onToggleMuteWindow: ((UInt64) -> Void)?
+    var onPinOnTopChanged: (() -> Void)?
     var onPullClipboardFiles: (() -> Void)?
     var onFilesDropped: ((UInt64, [URL]) -> Void)?
     var cmdMapsToCtrl: () -> Bool = { true }
@@ -44,6 +46,8 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
     var showPerformanceHud: () -> Bool = { false }
 
     private var baseTitle: String = ""
+    private(set) var isPinnedOnTop = false
+    private(set) var isAudioMuted = false
     private var isApplyingRemoteGeometry = false
     private var isLiveResizing = false
     private var localResizeSeq: UInt32 = 0
@@ -126,6 +130,11 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
         remoteView.onRequestQuit = { [weak self] in self?.onRequestQuit?() }
         remoteView.onOpenManager = { [weak self] in self?.onOpenManager?() }
         remoteView.onToggleHud = { [weak self] in self?.onToggleHud?() }
+        remoteView.onTogglePinOnTop = { [weak self] in self?.togglePinOnTop() }
+        remoteView.onToggleMuteWindow = { [weak self] in
+            guard let self else { return }
+            self.onToggleMuteWindow?(self.windowId)
+        }
         remoteView.onPullClipboardFiles = { [weak self] in self?.onPullClipboardFiles?() }
         remoteView.onFilesDropped = { [weak self] urls in
             guard let self else { return }
@@ -404,15 +413,53 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
         }
     }
 
+    func togglePinOnTop() {
+        setPinnedOnTop(!isPinnedOnTop)
+    }
+
+    func setPinnedOnTop(_ pinned: Bool) {
+        guard info.kind != .popup, let window else { return }
+        guard pinned != isPinnedOnTop else { return }
+        isPinnedOnTop = pinned
+        // Keep floating window pinned on the current macOS Desktop/Space only (do not add .canJoinAllSpaces).
+        window.level = pinned ? .floating : .normal
+        updateWindowTitle()
+        showToast(
+            pinned ? "📌 窗口已置顶（当前桌面）" : "窗口已取消置顶",
+            style: .progress,
+            autoHideSeconds: 1.8
+        )
+        onPinOnTopChanged?()
+    }
+
+    func setAudioMuted(_ muted: Bool) {
+        guard info.kind != .popup else { return }
+        guard muted != isAudioMuted else { return }
+        isAudioMuted = muted
+        updateWindowTitle()
+    }
+
     private func updateWindowTitle() {
         guard info.kind != .popup, let window else { return }
+        var tags: [String] = []
+        if isPinnedOnTop {
+            tags.append("置顶")
+        }
+        if isAudioMuted {
+            tags.append("静音")
+        }
         switch remoteView.gameLockState {
         case .off:
-            window.title = baseTitle
+            break
         case .confinedVisible:
-            window.title = "\(baseTitle) [游戏锁定 · 菜单指针 · Ctrl+Option 释放]"
+            tags.append("游戏锁定 · 菜单指针 · Ctrl+Option 释放")
         case .relativeLocked:
-            window.title = "\(baseTitle) [游戏锁定 · 3D 视角 · Ctrl+Option 释放]"
+            tags.append("游戏锁定 · 3D 视角 · Ctrl+Option 释放")
+        }
+        if tags.isEmpty {
+            window.title = baseTitle
+        } else {
+            window.title = "\(baseTitle) [\(tags.joined(separator: " · "))]"
         }
     }
 

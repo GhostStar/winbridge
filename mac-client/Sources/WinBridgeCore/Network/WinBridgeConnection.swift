@@ -319,7 +319,9 @@ final class WinBridgeConnection {
             clientName: config.clientName,
             authToken: config.authToken,
             displayScale: config.displayScale,
-            supportedCodecs: config.supportedCodecs
+            supportedCodecs: config.supportedCodecs,
+            appVersion: ProtocolCapabilities.currentAppVersion,
+            capabilities: ProtocolCapabilities.clientSupported
         )
         try await sendControlAsync(stream: control, payload: .hello(hello))
 

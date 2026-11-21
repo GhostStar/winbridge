@@ -6,9 +6,17 @@ import Security
 /// Keeps credentials out of plaintext `UserDefaults` plist files.
 enum KeychainStore {
     private static let service = "com.winbridge.client.auth"
-    private static let account = "default"
+    static let defaultAccount = "default"
 
-    static func loadToken() -> String? {
+    static func accountName(forProfileId profileId: String) -> String {
+        let trimmed = profileId.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty || trimmed == defaultAccount {
+            return defaultAccount
+        }
+        return "profile.\(trimmed)"
+    }
+
+    static func loadToken(account: String = defaultAccount) -> String? {
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: service,
@@ -25,10 +33,10 @@ enum KeychainStore {
     }
 
     @discardableResult
-    static func saveToken(_ token: String) -> Bool {
+    static func saveToken(_ token: String, account: String = defaultAccount) -> Bool {
         let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
-            return deleteToken()
+            return deleteToken(account: account)
         }
         guard let data = trimmed.data(using: .utf8) else { return false }
 
@@ -55,7 +63,7 @@ enum KeychainStore {
     }
 
     @discardableResult
-    static func deleteToken() -> Bool {
+    static func deleteToken(account: String = defaultAccount) -> Bool {
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: service,

@@ -1,6 +1,6 @@
 use crate::{
     config::{CaptureMode, Codec, Config},
-    net::tls,
+    net::{host_info, tls},
     security::{self, WorkerSecrets},
 };
 use anyhow::{bail, ensure, Context, Result};
@@ -166,6 +166,7 @@ pub fn install(config: &Config) -> Result<()> {
         capture_cursor: config.capture_cursor,
         log_level: config.log_level.clone(),
         list_windows: false,
+        print_pairing_code: false,
         test_capture: None,
         test_input: None,
         delay_secs: 0,
@@ -202,6 +203,7 @@ pub fn install(config: &Config) -> Result<()> {
             capture_cursor: effective.capture_cursor,
             log_level: effective.log_level.clone(),
             list_windows: false,
+            print_pairing_code: false,
             test_capture: None,
             test_input: None,
             delay_secs: 0,
@@ -336,11 +338,37 @@ pub fn install(config: &Config) -> Result<()> {
     if generated_token {
         println!("Generated Auth Token (copy to Mac client): {}", effective.token);
     }
-    if let Some(mat) = tls_mat {
+    if let Some(mat) = &tls_mat {
         println!("TLS 1.3 Enabled — SHA-256 Fingerprint: {}", mat.fingerprint);
     } else {
         println!("TLS Disabled (--no-tls).");
     }
+    let preferred_ip = if effective.bind.is_unspecified() {
+        None
+    } else {
+        Some(effective.bind)
+    };
+    let (lan_ip, mac) = host_info::detect_lan_ipv4_and_mac(preferred_ip);
+    let host_str = lan_ip
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| {
+            if effective.bind.is_unspecified() {
+                "127.0.0.1".to_owned()
+            } else {
+                effective.bind.to_string()
+            }
+        });
+    let host_name = std::env::var("COMPUTERNAME").ok();
+    let pairing_uri = host_info::build_pairing_uri(
+        &host_str,
+        effective.port,
+        &effective.token,
+        tls_mat.as_ref().map(|m| m.fingerprint.as_str()),
+        mac.as_deref(),
+        host_name.as_deref(),
+        !effective.no_tls,
+    );
+    println!("Pairing Code (paste into Mac WinBridge):\n{pairing_uri}");
     Ok(())
 }
 

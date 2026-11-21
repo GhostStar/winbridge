@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use std::time::Duration;
-use win_host::{capture, config::Config, input, net::tls, security, service, win32};
+use win_host::{capture, config::Config, input, net::{host_info, tls}, security, service, win32};
 
 fn load_cli_token(config: &mut Config) -> Result<()> {
     if !config.token.is_empty() {
@@ -111,6 +111,54 @@ fn main() -> Result<()> {
                 w.window_id, w.pid, w.process_name, w.width, w.height, w.dpi, w.title
             );
         }
+        return Ok(());
+    }
+    if config.print_pairing_code {
+        if config.token.is_empty() {
+            let _ = security::load_service_config(&mut config);
+        }
+        let fingerprint = if config.no_tls {
+            None
+        } else {
+            let candidates = [
+                config.tls_dir.clone(),
+                Some(security::program_data_dir().join("tls")),
+                Some(security::user_data_dir().join("tls")),
+            ];
+            candidates
+                .into_iter()
+                .flatten()
+                .find_map(|dir| {
+                    let pem = std::fs::read_to_string(dir.join("cert.pem")).ok()?;
+                    tls::fingerprint_from_pem(&pem).ok().map(|(full, _)| full)
+                })
+        };
+        let preferred_ip = if config.bind.is_unspecified() {
+            None
+        } else {
+            Some(config.bind)
+        };
+        let (lan_ip, mac) = host_info::detect_lan_ipv4_and_mac(preferred_ip);
+        let host_str = lan_ip
+            .map(|ip| ip.to_string())
+            .unwrap_or_else(|| {
+                if config.bind.is_unspecified() {
+                    "127.0.0.1".to_owned()
+                } else {
+                    config.bind.to_string()
+                }
+            });
+        let host_name = std::env::var("COMPUTERNAME").ok();
+        let uri = host_info::build_pairing_uri(
+            &host_str,
+            config.port,
+            &config.token,
+            fingerprint.as_deref(),
+            mac.as_deref(),
+            host_name.as_deref(),
+            !config.no_tls,
+        );
+        println!("{uri}");
         return Ok(());
     }
     if let Some(id) = config.test_capture {

@@ -5,12 +5,21 @@ import Foundation
 final class ManagerWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
     private let state: AppState
 
+    private let profilePopup = NSPopUpButton()
+    private let saveProfileButton = NSButton(title: "另存配置", target: nil, action: nil)
+    private let deleteProfileButton = NSButton(title: "删除", target: nil, action: nil)
+    private let pastePairingButton = NSButton(title: "粘贴配对码", target: nil, action: nil)
+    private let macField = NSTextField()
+    private let wolButton = NSButton(title: "唤醒并连接", target: nil, action: nil)
+
     private let hostField = NSTextField()
     private let discoveredPopup = NSPopUpButton()
     private let portField = NSTextField()
     private let tokenField = NSSecureTextField()
     private let codecPopup = NSPopUpButton()
     private let connectButton = NSButton(title: "连接", target: nil, action: nil)
+    private var lastSyncedProfileId: String = ""
+    private var lastSyncedMac: String = ""
 
     private let cmdCtrlCheck = NSButton(checkboxWithTitle: "Cmd → Ctrl", target: nil, action: nil)
     private let clipboardCheck = NSButton(checkboxWithTitle: "剪贴板同步", target: nil, action: nil)
@@ -46,13 +55,13 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
     init(state: AppState) {
         self.state = state
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 860, height: 560),
+            contentRect: NSRect(x: 0, y: 0, width: 880, height: 590),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = "WinBridge — Windows 窗口投射"
-        window.minSize = NSSize(width: 780, height: 460)
+        window.minSize = NSSize(width: 800, height: 480)
         window.isReleasedWhenClosed = false
         window.center()
         super.init(window: window)
@@ -71,6 +80,65 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         let root = NSView()
         root.translatesAutoresizingMaskIntoConstraints = false
         window.contentView = root
+
+        // --- Row 0: Multi-Host Profiles, Pairing Code & Wake-on-LAN ---
+        profilePopup.controlSize = .small
+        profilePopup.widthAnchor.constraint(equalToConstant: 152).isActive = true
+        profilePopup.target = self
+        profilePopup.action = #selector(profilePicked)
+        profilePopup.toolTip = "切换已保存的 Windows 主机配置（每台主机独立保存 Token 与 MAC）"
+
+        saveProfileButton.bezelStyle = .rounded
+        saveProfileButton.controlSize = .small
+        saveProfileButton.target = self
+        saveProfileButton.action = #selector(saveNewProfileClicked)
+        saveProfileButton.toolTip = "将当前主机地址、Token 与 MAC 另存为一个新的配置项"
+
+        deleteProfileButton.bezelStyle = .rounded
+        deleteProfileButton.controlSize = .small
+        deleteProfileButton.target = self
+        deleteProfileButton.action = #selector(deleteProfileClicked)
+        deleteProfileButton.toolTip = "删除当前选中的主机配置"
+
+        pastePairingButton.bezelStyle = .rounded
+        pastePairingButton.controlSize = .small
+        pastePairingButton.image = NSImage(systemSymbolName: "qrcode", accessibilityDescription: nil)
+        pastePairingButton.imagePosition = .imageLeading
+        pastePairingButton.target = self
+        pastePairingButton.action = #selector(pastePairingCodeClicked)
+        pastePairingButton.toolTip = "从剪贴板或对话框导入 Windows 端 --print-pairing-code 生成的 winbridge:// 配对码"
+
+        macField.controlSize = .small
+        macField.font = .monospacedSystemFont(ofSize: 11.5, weight: .regular)
+        macField.placeholderString = "自动获取 MAC (WoL)"
+        macField.widthAnchor.constraint(equalToConstant: 138).isActive = true
+        macField.toolTip = "Windows 主机有线/无线网卡 MAC 地址：首次连接后自动获取，用于远程唤醒"
+
+        wolButton.bezelStyle = .rounded
+        wolButton.controlSize = .small
+        wolButton.image = NSImage(systemSymbolName: "bolt.fill", accessibilityDescription: nil)
+        wolButton.imagePosition = .imageLeading
+        wolButton.target = self
+        wolButton.action = #selector(wakeAndConnectClicked)
+        wolButton.toolTip = "发送 Wake-on-LAN 魔术包唤醒休眠/关机的 Windows 主机并自动连接"
+
+        let profileSpacer = NSView()
+        profileSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        let profileRow = NSStackView(views: [
+            NSTextField(labelWithString: "配置:"),
+            profilePopup,
+            saveProfileButton,
+            deleteProfileButton,
+            pastePairingButton,
+            profileSpacer,
+            NSTextField(labelWithString: "MAC:"),
+            macField,
+            wolButton,
+        ])
+        profileRow.orientation = .horizontal
+        profileRow.alignment = .centerY
+        profileRow.spacing = 6
 
         // --- Row 1: Connection inputs ---
         hostField.placeholderString = "Windows IP (如 192.168.1.100)"
@@ -279,7 +347,7 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         bannerLabel.lineBreakMode = .byTruncatingTail
         bannerLabel.maximumNumberOfLines = 1
 
-        let mainStack = NSStackView(views: [connRow, optionsRow, audioStatusRow, tabRow, listContainer, bannerLabel])
+        let mainStack = NSStackView(views: [profileRow, connRow, optionsRow, audioStatusRow, tabRow, listContainer, bannerLabel])
         mainStack.orientation = .vertical
         mainStack.alignment = .leading
         mainStack.spacing = 10
@@ -291,6 +359,7 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
             mainStack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 14),
             mainStack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -14),
             mainStack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -12),
+            profileRow.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
             connRow.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
             optionsRow.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
             audioStatusRow.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
@@ -316,7 +385,7 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
 
         let colAction = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("action"))
         colAction.title = "操作"
-        colAction.width = 86
+        colAction.width = 108
 
         windowsTable.addTableColumn(colWin)
         windowsTable.addTableColumn(colMeta)
@@ -379,6 +448,10 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         hostField.stringValue = state.settings.host
         portField.stringValue = String(state.settings.port)
         tokenField.stringValue = state.settings.authToken
+        macField.stringValue = state.settings.macAddress
+        lastSyncedProfileId = state.settings.selectedHostProfileId
+        lastSyncedMac = state.settings.macAddress
+        rebuildProfilesMenu()
         if let idx = CodecPreference.allCases.firstIndex(of: state.settings.codecPreference) {
             codecPopup.selectItem(at: idx)
         }
@@ -409,6 +482,9 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
             s.port = p
         }
         s.authToken = tokenField.stringValue
+        let trimmedMac = macField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        s.macAddress = WakeOnLan.normalizeMac(trimmedMac) ?? trimmedMac
+        lastSyncedMac = s.macAddress
         let codecIdx = codecPopup.indexOfSelectedItem
         if codecIdx >= 0 && codecIdx < CodecPreference.allCases.count {
             s.codecPreference = CodecPreference.allCases[codecIdx]
@@ -435,7 +511,24 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         volumeSlider.isEnabled = s.audioEnabled
         volumeLabel.stringValue = "\(Int(round(s.audioVolume * 100)))%"
         sensLabel.stringValue = String(format: "%.1fx", s.mouseSensitivity)
+        state.syncSelectedProfileFields(in: &s)
         state.settings = s
+    }
+
+    private func rebuildProfilesMenu() {
+        profilePopup.removeAllItems()
+        var selectedIdx = 0
+        for (idx, prof) in state.settings.hostProfiles.enumerated() {
+            let label = prof.name.isEmpty ? prof.host : prof.name
+            profilePopup.addItem(withTitle: label)
+            profilePopup.lastItem?.representedObject = prof.id
+            if prof.id == state.settings.selectedHostProfileId {
+                selectedIdx = idx
+            }
+        }
+        if profilePopup.numberOfItems > 0 {
+            profilePopup.selectItem(at: selectedIdx)
+        }
     }
 
     private func rebuildFilteredApps() {
@@ -472,7 +565,26 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
     }
 
     func refreshUI() {
+        rebuildProfilesMenu()
         rebuildDiscoveredHostsMenu()
+        if state.settings.selectedHostProfileId != lastSyncedProfileId {
+            hostField.stringValue = state.settings.host
+            portField.stringValue = String(state.settings.port)
+            tokenField.stringValue = state.settings.authToken
+            macField.stringValue = state.settings.macAddress
+            lastSyncedProfileId = state.settings.selectedHostProfileId
+            lastSyncedMac = state.settings.macAddress
+        } else if state.settings.macAddress != lastSyncedMac {
+            macField.stringValue = state.settings.macAddress
+            lastSyncedMac = state.settings.macAddress
+        }
+        let isDisconnectedIdle = state.connectionState == .disconnected && !state.isReconnecting
+        profilePopup.isEnabled = isDisconnectedIdle
+        saveProfileButton.isEnabled = isDisconnectedIdle
+        deleteProfileButton.isEnabled = isDisconnectedIdle && state.settings.hostProfiles.count > 1
+        pastePairingButton.isEnabled = isDisconnectedIdle
+        macField.isEnabled = isDisconnectedIdle
+        wolButton.isEnabled = isDisconnectedIdle
         switch state.connectionState {
         case .disconnected:
             connectButton.title = state.isReconnecting ? "停止重连" : "连接"
@@ -554,6 +666,62 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
 
     // MARK: - Actions
 
+    @objc private func profilePicked() {
+        guard let id = profilePopup.selectedItem?.representedObject as? String else { return }
+        state.selectHostProfile(id: id)
+        loadFromSettings()
+    }
+
+    @objc private func saveNewProfileClicked() {
+        persistInputsToSettings()
+        let alert = NSAlert()
+        alert.messageText = "另存主机配置"
+        alert.informativeText = "为当前 Windows 主机（\(state.settings.host):\(state.settings.port)）命名，以便后续一键切换："
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        input.placeholderString = "例如：家里台式机 / 办公室 PC"
+        input.stringValue = state.settings.host
+        alert.accessoryView = input
+        alert.addButton(withTitle: "保存")
+        alert.addButton(withTitle: "取消")
+        if alert.runModal() == .alertFirstButtonReturn {
+            state.createHostProfile(named: input.stringValue)
+            loadFromSettings()
+        }
+    }
+
+    @objc private func deleteProfileClicked() {
+        state.deleteSelectedHostProfile()
+        loadFromSettings()
+    }
+
+    @objc private func pastePairingCodeClicked() {
+        let clip = NSPasteboard.general.string(forType: .string) ?? ""
+        if PairingCode.parse(clip) != nil {
+            if state.importPairingCode(clip) {
+                loadFromSettings()
+            }
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "导入 Windows 配对码"
+        alert.informativeText = "在 Windows 上运行 win-host.exe --print-pairing-code 复制 winbridge:// 链接并粘贴到下方："
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 380, height: 24))
+        input.placeholderString = "winbridge://192.168.1.100:9876?token=...&fp=...&mac=..."
+        alert.accessoryView = input
+        alert.addButton(withTitle: "导入")
+        alert.addButton(withTitle: "取消")
+        if alert.runModal() == .alertFirstButtonReturn {
+            if state.importPairingCode(input.stringValue) {
+                loadFromSettings()
+            }
+        }
+    }
+
+    @objc private func wakeAndConnectClicked() {
+        persistInputsToSettings()
+        state.wakeAndConnect()
+    }
+
     @objc private func toggleConnect() {
         persistInputsToSettings()
         switch state.connectionState {
@@ -628,6 +796,12 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         let win = state.availableWindows[row]
         let mode: CaptureMode = (sender.indexOfSelectedItem == 1) ? .monitorCrop : .window
         state.setCaptureMode(mode, for: win)
+    }
+
+    @objc private func rowMuteClicked(_ sender: NSButton) {
+        let row = sender.tag
+        guard row >= 0 && row < state.availableWindows.count else { return }
+        state.toggleMute(windowId: state.availableWindows[row].windowId)
     }
 
     @objc private func rowActionClicked(_ sender: NSButton) {
@@ -773,12 +947,39 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
             btn.tag = row
             btn.translatesAutoresizingMaskIntoConstraints = false
             let cell = NSView()
-            cell.addSubview(btn)
-            NSLayoutConstraint.activate([
-                btn.centerXAnchor.constraint(equalTo: cell.centerXAnchor),
-                btn.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-                btn.widthAnchor.constraint(equalToConstant: 64),
-            ])
+            if isOpen {
+                let muted = state.isWindowMuted(info.windowId)
+                let muteBtn = NSButton(
+                    image: NSImage(
+                        systemSymbolName: muted ? "speaker.slash.fill" : "speaker.wave.2",
+                        accessibilityDescription: muted ? "取消静音" : "静音此窗口"
+                    )!,
+                    target: self,
+                    action: #selector(rowMuteClicked(_:))
+                )
+                muteBtn.isBordered = false
+                muteBtn.contentTintColor = muted ? .systemRed : .secondaryLabelColor
+                muteBtn.tag = row
+                muteBtn.toolTip = muted ? "取消静音此窗口 (⇧⌘M)" : "静音此窗口音频 (⇧⌘M)"
+                muteBtn.translatesAutoresizingMaskIntoConstraints = false
+                cell.addSubview(muteBtn)
+                cell.addSubview(btn)
+                NSLayoutConstraint.activate([
+                    muteBtn.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+                    muteBtn.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+                    muteBtn.widthAnchor.constraint(equalToConstant: 24),
+                    btn.leadingAnchor.constraint(equalTo: muteBtn.trailingAnchor, constant: 4),
+                    btn.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+                    btn.widthAnchor.constraint(equalToConstant: 64),
+                ])
+            } else {
+                cell.addSubview(btn)
+                NSLayoutConstraint.activate([
+                    btn.centerXAnchor.constraint(equalTo: cell.centerXAnchor),
+                    btn.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+                    btn.widthAnchor.constraint(equalToConstant: 64),
+                ])
+            }
             return cell
 
         default:
