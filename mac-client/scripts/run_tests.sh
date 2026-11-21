@@ -14,7 +14,7 @@ CLT_FRAMEWORKS="/Library/Developer/CommandLineTools/Library/Developer/Frameworks
 CLT_USRLIB="/Library/Developer/CommandLineTools/Library/Developer/usr/lib"
 
 if [[ -d "$CLT_FRAMEWORKS/Testing.framework" ]]; then
-    swift test "${EXTRA_ARGS[@]}" \
+    swift test ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} \
         --disable-xctest \
         --enable-swift-testing \
         -Xswiftc -F -Xswiftc "$CLT_FRAMEWORKS" \
@@ -22,5 +22,5 @@ if [[ -d "$CLT_FRAMEWORKS/Testing.framework" ]]; then
         -Xlinker -rpath -Xlinker "$CLT_FRAMEWORKS" \
         -Xlinker -rpath -Xlinker "$CLT_USRLIB"
 else
-    swift test "${EXTRA_ARGS[@]}"
+    swift test ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
 fi

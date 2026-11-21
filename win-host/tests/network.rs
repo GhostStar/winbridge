@@ -1,5 +1,6 @@
 mod common;
 use common::*;
+use prost::Message;
 use rustls::{
     client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
     DigitallySignedStruct, SignatureScheme,

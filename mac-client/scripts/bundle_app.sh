@@ -10,7 +10,7 @@ EXTRA_ARGS=()
 if [[ "${1:-}" == "--disable-sandbox" ]]; then
     EXTRA_ARGS+=(--disable-sandbox)
 fi
-swift build -c release "${EXTRA_ARGS[@]}"
+swift build -c release ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
 
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS"
