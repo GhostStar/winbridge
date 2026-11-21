@@ -91,7 +91,7 @@ impl Resources {
                 AddClipboardFormatListener(r.hwnd) != 0,
                 "AddClipboardFormatListener failed"
             );
-            ensure!(SetTimer(r.hwnd, 1, 50, None) != 0, "SetTimer failed");
+            ensure!(SetTimer(r.hwnd, 1, 20, None) != 0, "SetTimer failed");
             for (first, last) in [
                 (EVENT_OBJECT_CREATE, EVENT_OBJECT_HIDE),
                 (EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_NAMECHANGE),

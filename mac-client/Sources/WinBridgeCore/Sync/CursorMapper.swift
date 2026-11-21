@@ -8,6 +8,27 @@ enum CursorMapper {
         return NSCursor(image: img, hotSpot: .zero)
     }()
 
+    /// Returns true when Windows has hidden the cursor (or set an all-transparent custom cursor),
+    /// which 3D games do during camera rotation and clear when showing menus or holding Alt.
+    static func isEffectivelyHidden(_ shape: CursorShape) -> Bool {
+        if shape.cursorType == .hidden {
+            return true
+        }
+        if shape.cursorType == .custom {
+            let bytes = [UInt8](shape.customRgba)
+            guard bytes.count >= 4 else { return false }
+            var i = 3
+            while i < bytes.count {
+                if bytes[i] != 0 {
+                    return false
+                }
+                i += 4
+            }
+            return true
+        }
+        return false
+    }
+
     static func cursor(from shape: CursorShape) -> NSCursor {
         switch shape.cursorType {
         case .unspecified, .arrow:

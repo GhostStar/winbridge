@@ -5,6 +5,17 @@ import CoreVideo
 import Foundation
 import QuartzCore
 
+enum GameLockState: Equatable {
+    /// Normal macOS window behavior: free cursor, absolute coordinates.
+    case off
+    /// Game Lock armed while the Windows game is showing a cursor (e.g. holding Alt or menu open):
+    /// visible game cursor confined inside the Mac window, pixel-accurate absolute coordinates.
+    case confinedVisible
+    /// Game Lock armed while the Windows game hides the cursor (3D camera / combat):
+    /// hidden disassociated cursor at window center, sending raw relative dx/dy deltas.
+    case relativeLocked
+}
+
 /// Renders decoded video frames via CoreAnimation/IOSurface and forwards mouse,
 /// trackpad scroll, physical HID keyboard, and native macOS IME (`NSTextInputClient`) input.
 @MainActor
@@ -15,9 +26,11 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
     var onSendControl: ((ControlMessage.Payload) -> Void)?
     var onRequestQuit: (() -> Void)?
     var onOpenManager: (() -> Void)?
-    var onPointerLockChanged: ((Bool) -> Void)?
+    var onGameLockStateChanged: ((GameLockState) -> Void)?
 
-    private(set) var isPointerLocked = false
+    private(set) var gameLockEnabled = false
+    private(set) var gameLockState: GameLockState = .off
+    private var remoteCursorHidden = false
     private var isCursorHidden = false
     private var pointerLockedAt: Date?
 
@@ -132,16 +145,27 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
         CATransaction.commit()
     }
 
-    func applyCursor(_ cursor: NSCursor) {
+    func applyCursorShape(_ shape: CursorShape) {
+        let hidden = CursorMapper.isEffectivelyHidden(shape)
+        let cursor = CursorMapper.cursor(from: shape)
         activeCursor = cursor
-        if mouseInside && !isPointerLocked {
+        if hidden != remoteCursorHidden {
+            remoteCursorHidden = hidden
+            if gameLockEnabled {
+                ClientLogger.shared.info(
+                    "GameLock cursor -> \(hidden ? "hidden (3D relative)" : "visible (menu pointer)") type=\(shape.cursorType)"
+                )
+            }
+            reconcileGameLockState()
+        }
+        if mouseInside && gameLockState != .relativeLocked {
             cursor.set()
         }
         window?.invalidateCursorRects(for: self)
     }
 
     override func cursorUpdate(with event: NSEvent) {
-        if !isPointerLocked {
+        if gameLockState != .relativeLocked {
             activeCursor.set()
         }
     }
@@ -150,53 +174,126 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
         addCursorRect(bounds, cursor: activeCursor)
     }
 
-    // MARK: - 3D Game Relative Mouse Lock
+    // MARK: - Smart 3D Game Mouse Lock (Auto-switches between 3D Relative & Confined Menu Pointer)
 
-    func setPointerLocked(_ locked: Bool) {
-        guard locked != isPointerLocked else { return }
-        if locked {
-            guard let window else { return }
+    func setGameLockEnabled(_ enabled: Bool) {
+        guard enabled != gameLockEnabled else { return }
+        gameLockEnabled = enabled
+        ClientLogger.shared.info(
+            "GameLock \(enabled ? "ENABLED" : "DISABLED") for window 0x\(String(windowId, radix: 16)) (remoteCursorHidden=\(remoteCursorHidden))"
+        )
+        reconcileGameLockState()
+    }
+
+    private func cocoaToCGPoint(_ cocoaScreenPoint: NSPoint) -> CGPoint {
+        let primaryHeight = NSScreen.screens.first?.frame.height
+            ?? CGDisplayBounds(CGMainDisplayID()).height
+        return CGPoint(x: cocoaScreenPoint.x, y: primaryHeight - cocoaScreenPoint.y)
+    }
+
+    private func videoRectInCocoaScreen() -> NSRect? {
+        guard let window else { return nil }
+        let rectInWin = convert(currentVideoRect, to: nil)
+        return window.convertToScreen(rectInWin)
+    }
+
+    private func warpCursorToVideoCenter() {
+        guard let screenRect = videoRectInCocoaScreen() else { return }
+        let center = NSPoint(x: screenRect.midX, y: screenRect.midY)
+        CGWarpMouseCursorPosition(cocoaToCGPoint(center))
+    }
+
+    private func confineCursorIfNeeded() {
+        guard gameLockState == .confinedVisible,
+              let screenRect = videoRectInCocoaScreen() else { return }
+        let inset = screenRect.insetBy(dx: min(4, screenRect.width * 0.1), dy: min(4, screenRect.height * 0.1))
+        guard inset.width > 0, inset.height > 0 else { return }
+        let pos = NSEvent.mouseLocation
+        let clampedX = min(max(pos.x, inset.minX), inset.maxX)
+        let clampedY = min(max(pos.y, inset.minY), inset.maxY)
+        if clampedX != pos.x || clampedY != pos.y {
+            CGWarpMouseCursorPosition(cocoaToCGPoint(NSPoint(x: clampedX, y: clampedY)))
+        }
+    }
+
+    private func reconcileGameLockState() {
+        let desired: GameLockState
+        if !gameLockEnabled {
+            desired = .off
+        } else if remoteCursorHidden {
+            desired = .relativeLocked
+        } else {
+            desired = .confinedVisible
+        }
+        guard desired != gameLockState else { return }
+        let previous = gameLockState
+        gameLockState = desired
+
+        switch desired {
+        case .relativeLocked:
+            guard let window else {
+                gameLockState = .off
+                gameLockEnabled = false
+                return
+            }
             window.makeKeyAndOrderFront(nil)
             window.makeFirstResponder(self)
-
-            // Center Windows cursor inside the target window first, then pin macOS cursor to
-            // the window's center and disassociate hardware motion so it can never leave bounds.
-            onSendControl?(.focusWindow(FocusWindow(windowId: windowId, focused: true)))
-            onSendControl?(.mouseEvent(MouseEvent(
-                windowId: windowId,
-                kind: .move,
-                normX: 0.5,
-                normY: 0.5
-            )))
-
-            let rect = currentVideoRect
-            let centerInWin = convert(NSPoint(x: rect.midX, y: rect.midY), to: nil)
-            let centerOnScreen = window.convertPoint(toScreen: centerInWin)
-            let primaryHeight = NSScreen.screens.first?.frame.height
-                ?? CGDisplayBounds(CGMainDisplayID()).height
-            let cgCenter = CGPoint(x: centerOnScreen.x, y: primaryHeight - centerOnScreen.y)
-
-            CGWarpMouseCursorPosition(cgCenter)
+            if previous == .off {
+                onSendControl?(.focusWindow(FocusWindow(windowId: windowId, focused: true)))
+                onSendControl?(.mouseEvent(MouseEvent(
+                    windowId: windowId,
+                    kind: .move,
+                    normX: 0.5,
+                    normY: 0.5
+                )))
+            }
+            warpCursorToVideoCenter()
             CGAssociateMouseAndMouseCursorPosition(0)
             if !isCursorHidden {
                 NSCursor.hide()
                 isCursorHidden = true
             }
-            isPointerLocked = true
             pointerLockedAt = Date()
-            ClientLogger.shared.info("Pointer lock ENABLED for window 0x\(String(windowId, radix: 16))")
-            onPointerLockChanged?(true)
-        } else {
-            isPointerLocked = false
+
+        case .confinedVisible:
             pointerLockedAt = nil
             CGAssociateMouseAndMouseCursorPosition(1)
             if isCursorHidden {
                 NSCursor.unhide()
                 isCursorHidden = false
             }
-            ClientLogger.shared.info("Pointer lock DISABLED for window 0x\(String(windowId, radix: 16))")
-            onPointerLockChanged?(false)
+            if previous == .relativeLocked {
+                // Game just revealed cursor (Alt / menu open): show cursor right at window center
+                // and align Windows cursor cleanly.
+                warpCursorToVideoCenter()
+                onSendControl?(.mouseEvent(MouseEvent(
+                    windowId: windowId,
+                    kind: .move,
+                    normX: 0.5,
+                    normY: 0.5
+                )))
+            } else {
+                window?.makeKeyAndOrderFront(nil)
+                window?.makeFirstResponder(self)
+                confineCursorIfNeeded()
+            }
+            activeCursor.set()
+
+        case .off:
+            pointerLockedAt = nil
+            CGAssociateMouseAndMouseCursorPosition(1)
+            if isCursorHidden {
+                NSCursor.unhide()
+                isCursorHidden = false
+            }
+            if mouseInside {
+                activeCursor.set()
+            } else {
+                NSCursor.arrow.set()
+            }
         }
+
+        onGameLockStateChanged?(desired)
     }
 
     // MARK: - Focus & Stuck-Key Safety
@@ -217,46 +314,54 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
 
     override func mouseEntered(with event: NSEvent) {
         mouseInside = true
-        if !isPointerLocked {
+        if gameLockState != .relativeLocked {
             activeCursor.set()
         }
     }
 
     override func mouseExited(with event: NSEvent) {
+        if gameLockState == .confinedVisible {
+            confineCursorIfNeeded()
+            return
+        }
         mouseInside = false
-        if !isPointerLocked {
+        if gameLockState != .relativeLocked {
             NSCursor.arrow.set()
         }
     }
 
     override func mouseMoved(with event: NSEvent) {
-        if isPointerLocked {
+        if gameLockState == .relativeLocked {
             sendRelativeMove(event: event)
         } else {
+            confineCursorIfNeeded()
             sendMouse(event: event, kind: .move, button: .unspecified)
         }
     }
 
     override func mouseDragged(with event: NSEvent) {
-        if isPointerLocked {
+        if gameLockState == .relativeLocked {
             sendRelativeMove(event: event)
         } else {
+            confineCursorIfNeeded()
             sendMouse(event: event, kind: .move, button: .left)
         }
     }
 
     override func rightMouseDragged(with event: NSEvent) {
-        if isPointerLocked {
+        if gameLockState == .relativeLocked {
             sendRelativeMove(event: event)
         } else {
+            confineCursorIfNeeded()
             sendMouse(event: event, kind: .move, button: .right)
         }
     }
 
     override func otherMouseDragged(with event: NSEvent) {
-        if isPointerLocked {
+        if gameLockState == .relativeLocked {
             sendRelativeMove(event: event)
         } else {
+            confineCursorIfNeeded()
             sendMouse(event: event, kind: .move, button: mapOtherButton(event.buttonNumber))
         }
     }
@@ -314,7 +419,7 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
             wheelDeltaX: wheelX,
             wheelDeltaY: wheelY,
             modifiers: mods,
-            isRelative: isPointerLocked
+            isRelative: gameLockState == .relativeLocked
         )))
     }
 
@@ -333,7 +438,13 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
         let rect = currentVideoRect
         let w = max(rect.width, 1.0)
         let h = max(rect.height, 1.0)
-        return (Float((local.x - rect.minX) / w), Float((local.y - rect.minY) / h))
+        var nx = Float((local.x - rect.minX) / w)
+        var ny = Float((local.y - rect.minY) / h)
+        if gameLockState == .confinedVisible {
+            nx = min(max(nx, 0.0), 1.0)
+            ny = min(max(ny, 0.0), 1.0)
+        }
+        return (nx, ny)
     }
 
     private func sendRelativeMove(event: NSEvent) {
@@ -357,7 +468,7 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
 
     private func sendMouse(event: NSEvent, kind: MouseEventKind, button: MouseButton) {
         let mods = MacKeyToHID.modifierMask(from: event.modifierFlags, cmdMapsToCtrl: cmdMapsToCtrl())
-        if isPointerLocked {
+        if gameLockState == .relativeLocked {
             onSendControl?(.mouseEvent(MouseEvent(
                 windowId: windowId,
                 kind: kind,
@@ -391,22 +502,22 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
             return super.performKeyEquivalent(with: event)
         }
 
-        // Cmd+Shift+L toggles 3D game Mouse Lock locally on the focused remote window.
+        // Cmd+Shift+L toggles Smart 3D Game Mouse Lock locally on the focused remote window.
         if flags == [.command, .shift], event.keyCode == UInt16(kVK_ANSI_L) {
-            setPointerLocked(!isPointerLocked)
+            setGameLockEnabled(!gameLockEnabled)
             return true
         }
 
         // Keep Cmd+Q (quit WinBridge) and Cmd+, (bring Manager to front) native on macOS.
         if flags == .command {
             if event.keyCode == UInt16(kVK_ANSI_Q) {
-                setPointerLocked(false)
+                setGameLockEnabled(false)
                 releaseAllHeldKeys()
                 onRequestQuit?()
                 return true
             }
             if event.keyCode == UInt16(kVK_ANSI_Comma) {
-                setPointerLocked(false)
+                setGameLockEnabled(false)
                 releaseAllHeldKeys()
                 onOpenManager?()
                 return true
@@ -418,8 +529,8 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
     }
 
     override func flagsChanged(with event: NSEvent) {
-        if isPointerLocked && event.modifierFlags.contains([.control, .option]) {
-            setPointerLocked(false)
+        if gameLockEnabled && event.modifierFlags.contains([.control, .option]) {
+            setGameLockEnabled(false)
             releaseAllHeldKeys()
             return
         }

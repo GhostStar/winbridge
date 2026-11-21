@@ -96,7 +96,7 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
         remoteView.onSendControl = { [weak self] payload in self?.onSendControl?(payload) }
         remoteView.onRequestQuit = { [weak self] in self?.onRequestQuit?() }
         remoteView.onOpenManager = { [weak self] in self?.onOpenManager?() }
-        remoteView.onPointerLockChanged = { [weak self] _ in self?.updateWindowTitle() }
+        remoteView.onGameLockStateChanged = { [weak self] _ in self?.updateWindowTitle() }
 
         updateResizeBehavior()
 
@@ -299,26 +299,29 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func applyCursor(_ shape: CursorShape) {
-        remoteView.applyCursor(CursorMapper.cursor(from: shape))
+        remoteView.applyCursorShape(shape)
     }
 
     func togglePointerLock() {
         guard info.kind != .popup else { return }
-        remoteView.setPointerLocked(!remoteView.isPointerLocked)
+        remoteView.setGameLockEnabled(!remoteView.gameLockEnabled)
     }
 
     func unlockPointerIfNeeded() {
-        if remoteView.isPointerLocked {
-            remoteView.setPointerLocked(false)
+        if remoteView.gameLockEnabled {
+            remoteView.setGameLockEnabled(false)
         }
     }
 
     private func updateWindowTitle() {
         guard info.kind != .popup, let window else { return }
-        if remoteView.isPointerLocked {
-            window.title = "\(baseTitle) [鼠标已锁定 · Ctrl+Option 或 ⇧⌘L 释放]"
-        } else {
+        switch remoteView.gameLockState {
+        case .off:
             window.title = baseTitle
+        case .confinedVisible:
+            window.title = "\(baseTitle) [游戏锁定 · 菜单指针 · Ctrl+Option 释放]"
+        case .relativeLocked:
+            window.title = "\(baseTitle) [游戏锁定 · 3D 视角 · Ctrl+Option 释放]"
         }
     }
 

@@ -159,3 +159,12 @@ import Testing
         #expect(buf.takeExact(32) == tail)
     }
 }
+
+@Test func cursorMapperDetectsHiddenAndTransparentCustomCursors() {
+    #expect(CursorMapper.isEffectivelyHidden(CursorShape(cursorType: .hidden)))
+    #expect(!CursorMapper.isEffectivelyHidden(CursorShape(cursorType: .arrow)))
+    let transparent = CursorShape(cursorType: .custom, customRgba: Data(repeating: 0, count: 16), width: 2, height: 2)
+    #expect(CursorMapper.isEffectivelyHidden(transparent))
+    let visibleCustom = CursorShape(cursorType: .custom, customRgba: Data([255, 255, 255, 255]), width: 1, height: 1)
+    #expect(!CursorMapper.isEffectivelyHidden(visibleCustom))
+}

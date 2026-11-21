@@ -42,7 +42,10 @@ impl Tracker {
             if GetCursorInfo(&mut ci) == 0 {
                 return;
             }
-            let target = GetAncestor(WindowFromPoint(ci.ptScreenPos), GA_ROOT) as usize as u64;
+            let mut target = GetAncestor(WindowFromPoint(ci.ptScreenPos), GA_ROOT) as usize as u64;
+            if target == 0 {
+                target = GetForegroundWindow() as usize as u64;
+            }
             let key = (target, ci.hCursor as usize, ci.flags);
             if self.last == Some(key) {
                 return;
@@ -51,17 +54,23 @@ impl Tracker {
                 window_id: target,
                 ..Default::default()
             };
-            if ci.flags & CURSOR_SHOWING == 0 {
+            if ci.flags & CURSOR_SHOWING == 0 || ci.hCursor.is_null() {
                 shape.cursor_type = 13;
             } else if let Some((_, kind)) = self.standard.iter().find(|(h, _)| *h == ci.hCursor) {
                 shape.cursor_type = *kind;
             } else if let Some((rgba, w, h, x, y)) = cursor_pixels(ci.hCursor) {
-                shape.cursor_type = 14;
-                shape.custom_rgba = rgba;
-                shape.width = w;
-                shape.height = h;
-                shape.hotspot_x = x;
-                shape.hotspot_y = y;
+                // Some 3D games hide the pointer using a fully transparent custom cursor.
+                let all_transparent = rgba.chunks_exact(4).all(|px| px[3] == 0);
+                if all_transparent {
+                    shape.cursor_type = 13;
+                } else {
+                    shape.cursor_type = 14;
+                    shape.custom_rgba = rgba;
+                    shape.width = w;
+                    shape.height = h;
+                    shape.hotspot_x = x;
+                    shape.hotspot_y = y;
+                }
             } else {
                 shape.cursor_type = 1;
             }

@@ -492,8 +492,23 @@ pub async fn run(
                     if session.windows.get(&id).is_some_and(|s|s.root!=id) {session.remove(id,true)?;}
                     else if session.windows.contains_key(&id) {refresh_at=Some(tokio::time::Instant::now());}
                 }
-                Some(win32::Event::Cursor(shape))=>{
-                    if session.windows.contains_key(&shape.window_id) {session.send(Payload::CursorShape(shape.clone()))?;}
+                Some(win32::Event::Cursor(mut shape))=>{
+                    if session.windows.contains_key(&shape.window_id) {
+                        session.send(Payload::CursorShape(shape.clone()))?;
+                    } else {
+                        let fg = win32::foreground_id();
+                        if fg != 0 && session.windows.contains_key(&fg) {
+                            shape.window_id = fg;
+                            session.send(Payload::CursorShape(shape.clone()))?;
+                        }
+                    }
+                    if shape.window_id != win32::DESKTOP_WINDOW_ID
+                        && session.windows.contains_key(&win32::DESKTOP_WINDOW_ID)
+                    {
+                        let mut desktop_shape = shape.clone();
+                        desktop_shape.window_id = win32::DESKTOP_WINDOW_ID;
+                        session.send(Payload::CursorShape(desktop_shape))?;
+                    }
                     session.cursor=Some(shape);
                 }
                 Some(win32::Event::Clipboard(sync))=>session.send(Payload::ClipboardSync(sync))?,
