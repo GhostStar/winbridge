@@ -36,6 +36,8 @@ message ControlMessage {
     ListAppsResponse list_apps_res = 25;         // Win -> Mac
     LaunchApp launch_app = 26;                   // Mac -> Win
     LaunchAppResult launch_app_res = 27;         // Win -> Mac
+    ListMonitorsRequest list_monitors_req = 28;  // Mac -> Win
+    ListMonitorsResponse list_monitors_res = 29; // Win -> Mac
 
     // --- Window State & Cursor (Win -> Mac) ---
     WindowUpdated window_updated = 30;           // Win -> Mac
@@ -48,6 +50,7 @@ message ControlMessage {
     CloseWindow close_window = 42;               // Mac -> Win
     WindowAction window_action = 43;             // Mac -> Win
     RequestKeyFrame request_key_frame = 44;      // Mac -> Win
+    SetVirtualDisplay set_virtual_display = 46;  // Mac -> Win
 
     // --- Input (Mac -> Win) ---
     MouseEvent mouse_event = 50;                 // Mac -> Win
@@ -308,6 +311,36 @@ message LaunchAppResult {
   string app_id = 1;
   bool started = 2;
   string message = 3;
+}
+
+message ListMonitorsRequest {}
+
+message MonitorInfo {
+  // Synthetic id: 0xFFFFFFFFFFFF0100 + enumeration index.
+  // 0xFFFFFFFFFFFF0001 remains the primary desktop and is not reused.
+  uint64 monitor_id = 1;
+  string device_name = 2;
+  string friendly_name = 3;
+  uint32 width = 4;
+  uint32 height = 5;
+  int32 x = 6;
+  int32 y = 7;
+  bool primary = 8;
+  bool virtual_adapter = 9;
+}
+
+message ListMonitorsResponse {
+  repeated MonitorInfo monitors = 1;
+}
+
+message SetVirtualDisplay {
+  bool enable = 1;
+  // 0 means 2560.
+  uint32 width = 2;
+  // 0 means 1440.
+  uint32 height = 3;
+  // 0 means 60.
+  uint32 hz = 4;
 }
 
 message WindowUpdated {
