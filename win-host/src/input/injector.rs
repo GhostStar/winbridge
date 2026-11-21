@@ -378,6 +378,31 @@ impl State {
         }
     }
 
+    fn apply_monitor(
+        &mut self,
+        target: &WindowInfo,
+        payload: Payload,
+    ) -> Result<Option<WindowUpdated>> {
+        match payload {
+            Payload::MouseEvent(ev) => self.mouse(target, ev, false)?,
+            Payload::KeyEvent(ev) => {
+                send(&[key_input(ev.hid_usage, ev.is_down)?])?;
+                if ev.is_down {
+                    self.keys.insert(ev.hid_usage);
+                } else {
+                    self.keys.remove(&ev.hid_usage);
+                }
+            }
+            Payload::TextInput(t) => text(&t.text)?,
+            Payload::ResizeWindow(_)
+            | Payload::FocusWindow(_)
+            | Payload::CloseWindow(_)
+            | Payload::WindowAction(_) => {}
+            _ => bail!("unsupported input command"),
+        }
+        Ok(None)
+    }
+
     fn apply_desktop(&mut self, payload: Payload, on_secure_desktop: bool) -> Result<Option<WindowUpdated>> {
         let desktop = if on_secure_desktop {
             // On Winlogon, primary screen metrics match the captured GDI desktop directly.
@@ -527,6 +552,9 @@ impl State {
     }
 
     fn apply(&mut self, target: &WindowInfo, payload: Payload) -> Result<Option<WindowUpdated>> {
+        if win32::is_monitor_id(target.window_id) {
+            return self.apply_monitor(target, payload);
+        }
         if crate::helper::is_configured() {
             if target.window_id == win32::DESKTOP_WINDOW_ID {
                 return match payload {
