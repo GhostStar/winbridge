@@ -18,7 +18,6 @@ use crate::{
     win32::{self, files::FileReceiver},
 };
 use anyhow::{anyhow, Result};
-use std::io::Read;
 use tokio::sync::{mpsc, Semaphore};
 
 /// Host-initiated pull transfer IDs live in the high-bit namespace so they can
@@ -111,11 +110,13 @@ fn send_pulled_files(
     bulk_replies: &mpsc::Sender<Payload>,
     cancel: &AtomicBool,
     transfer_seq: &AtomicU64,
+    request_id: u64,
     requested: &str,
 ) -> Result<()> {
     let drop_dir = win32::files::default_drop_directory();
     let roots = win32::files::allowed_read_roots(&drop_dir);
-    let (paths, skipped) = if requested.trim() == win32::files::CLIPBOARD_PULL {
+    let is_clipboard = requested.trim() == win32::files::CLIPBOARD_PULL;
+    let (paths, skipped) = if is_clipboard {
         let raw = win32::files::clipboard_file_paths()?;
         win32::files::filter_allowed_files(&roots, &raw)?
     } else {
@@ -136,7 +137,11 @@ fn send_pulled_files(
         if cancel.load(Ordering::Acquire) {
             return Ok(());
         }
-        let mut opened = win32::files::open_pull_file(&path)?;
+        let mut opened = if is_clipboard {
+            win32::files::open_pull_file(&path)?
+        } else {
+            win32::files::open_pull_target(&path)?
+        };
         let transfer_id = transfer_seq.fetch_add(1, Ordering::Relaxed);
         bulk_replies
             .blocking_send(Payload::FileTransferStart(FileTransferStart {
@@ -145,6 +150,7 @@ fn send_pulled_files(
                 file_name: opened.file_name.clone(),
                 total_bytes: opened.total_bytes,
                 direction: win32::files::FILE_DIRECTION_TO_CLIENT,
+                request_id,
             }))
             .map_err(|_| anyhow!("session disconnected"))?;
         let mut offset = 0u64;
@@ -154,7 +160,7 @@ fn send_pulled_files(
                 if cancel.load(Ordering::Acquire) {
                     return Ok(());
                 }
-                let n = opened.file.read(&mut buf)?;
+                let n = opened.read(&mut buf)?;
                 let is_last = n == 0 || offset + n as u64 >= opened.total_bytes;
                 let data = if n == 0 { Vec::new() } else { buf[..n].to_vec() };
                 let chunk_offset = offset;
@@ -182,7 +188,7 @@ fn send_pulled_files(
                     .blocking_send(Payload::FileTransferRes(FileTransferResult {
                         transfer_id,
                         success: true,
-                        saved_path: opened.file_name,
+                        saved_path: opened.file_name.clone(),
                         message: String::new(),
                     }))
                     .map_err(|_| anyhow!("session disconnected"))?;
@@ -519,13 +525,14 @@ impl Session {
                 let listed = tokio::task::spawn_blocking(move || {
                     let drop_dir = win32::files::default_drop_directory();
                     let roots = win32::files::allowed_read_roots(&drop_dir);
-                    if requested_for_task.trim().is_empty() {
+                    let trimmed = requested_for_task.trim();
+                    if trimmed.is_empty() || trimmed == win32::files::ROOT_DROP {
                         std::fs::create_dir_all(&drop_dir)?;
                     }
                     let path =
                         win32::files::resolve_host_path(&roots, &drop_dir, &requested_for_task)?;
                     let entries = win32::files::list_directory(&path)?;
-                    Ok::<_, anyhow::Error>((path.display().to_string(), entries))
+                    Ok::<_, anyhow::Error>((win32::files::clean_display_path(&path), entries))
                 })
                 .await?;
                 return match listed {
@@ -549,7 +556,17 @@ impl Session {
                 };
             }
             Payload::FilePullReq(req) => {
+                let request_id = req.request_id;
                 let Ok(permit) = self.pull_slots.clone().try_acquire_owned() else {
+                    if request_id != 0 {
+                        let _ = self.send(Payload::FileTransferRes(FileTransferResult {
+                            transfer_id: request_id,
+                            success: false,
+                            saved_path: String::new(),
+                            message: "已有正在进行的文件取回任务，请等待完成后重试".into(),
+                        }));
+                        return Ok(());
+                    }
                     return self.error(0, 0, "已有正在进行的文件取回任务，请等待完成后重试");
                 };
                 let replies = self.replies.clone();
@@ -564,14 +581,26 @@ impl Session {
                         &bulk_replies,
                         &cancel,
                         &transfer_seq,
+                        request_id,
                         &requested,
                     ) {
                         if !cancel.load(Ordering::Acquire) {
-                            let _ = replies.try_send(Payload::HostError(HostError {
-                                window_id: 0,
-                                code: 0,
-                                message: format!("取回文件失败：{e:#}"),
-                            }));
+                            if request_id != 0 {
+                                let _ = replies.try_send(Payload::FileTransferRes(
+                                    FileTransferResult {
+                                        transfer_id: request_id,
+                                        success: false,
+                                        saved_path: String::new(),
+                                        message: format!("{e:#}"),
+                                    },
+                                ));
+                            } else {
+                                let _ = replies.try_send(Payload::HostError(HostError {
+                                    window_id: 0,
+                                    code: 0,
+                                    message: format!("取回文件失败：{e:#}"),
+                                }));
+                            }
                         }
                     }
                 });
@@ -793,7 +822,7 @@ pub async fn run(
         replies,
         bulk_replies,
         pull_cancel: Arc::new(AtomicBool::new(false)),
-        pull_slots: Arc::new(Semaphore::new(2)),
+        pull_slots: Arc::new(Semaphore::new(4)),
         pull_transfer_seq: Arc::new(AtomicU64::new(HOST_PULL_TRANSFER_ID_BASE)),
         injector,
         gamepad: GamepadManager::default(),
@@ -850,6 +879,7 @@ pub async fn run(
                     session.cursor=Some(shape);
                 }
                 Some(win32::Event::Clipboard(sync))=>session.send(Payload::ClipboardSync(sync))?,
+                Some(win32::Event::ClipboardFiles(notice))=>session.send(Payload::ClipboardFilesNotice(notice))?,
                 Some(win32::Event::Error(message))=>session.error(0,0,message)?,
                 None=>anyhow::bail!("desktop observer disconnected"),
             },

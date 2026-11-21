@@ -8,6 +8,7 @@ pub use event_hook::{Event, Observer};
 pub mod files;
 mod image;
 mod window;
+mod zip_pack;
 pub use window::{candidates, foreground_id, info, list, primary_desktop_info, DESKTOP_WINDOW_ID};
 pub(crate) use window::{checked_hwnd, resize};
 

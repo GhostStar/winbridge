@@ -91,6 +91,7 @@ struct ClientSettings {
     var codecPreference: CodecPreference
     var cmdMapsToCtrl: Bool
     var syncClipboard: Bool
+    var autoPullClipboardFiles: Bool
     var followPopups: Bool
     var syncWindowResize: Bool
     var audioEnabled: Bool
@@ -146,6 +147,7 @@ enum SettingsStore {
         let codec = CodecPreference(rawValue: codecRaw) ?? .auto
         let cmdToCtrl = defaults.object(forKey: "winbridge.cmdToCtrl") as? Bool ?? true
         let clipboard = defaults.object(forKey: "winbridge.syncClipboard") as? Bool ?? true
+        let autoPullClipboardFiles = defaults.object(forKey: "winbridge.autoPullClipboardFiles") as? Bool ?? true
         let popups = defaults.object(forKey: "winbridge.followPopups") as? Bool ?? true
         let syncResize = defaults.object(forKey: "winbridge.syncWindowResize") as? Bool ?? false
         let audioEnabled = defaults.object(forKey: "winbridge.audioEnabled") as? Bool ?? false
@@ -200,6 +202,7 @@ enum SettingsStore {
             codecPreference: codec,
             cmdMapsToCtrl: cmdToCtrl,
             syncClipboard: clipboard,
+            autoPullClipboardFiles: autoPullClipboardFiles,
             followPopups: popups,
             syncWindowResize: syncResize,
             audioEnabled: audioEnabled,
@@ -236,6 +239,7 @@ enum SettingsStore {
         defaults.set(s.codecPreference.rawValue, forKey: "winbridge.codec")
         defaults.set(s.cmdMapsToCtrl, forKey: "winbridge.cmdToCtrl")
         defaults.set(s.syncClipboard, forKey: "winbridge.syncClipboard")
+        defaults.set(s.autoPullClipboardFiles, forKey: "winbridge.autoPullClipboardFiles")
         defaults.set(s.followPopups, forKey: "winbridge.followPopups")
         defaults.set(s.syncWindowResize, forKey: "winbridge.syncWindowResize")
         defaults.set(s.audioEnabled, forKey: "winbridge.audioEnabled")

@@ -34,6 +34,7 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
     var onRequestQuit: (() -> Void)?
     var onOpenManager: (() -> Void)?
     var onToggleHud: (() -> Void)?
+    var onPullClipboardFiles: (() -> Void)?
     var onFilesDropped: ((UInt64, [URL]) -> Void)?
     var cmdMapsToCtrl: () -> Bool = { true }
     var syncWindowResize: () -> Bool = { false }
@@ -125,6 +126,7 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
         remoteView.onRequestQuit = { [weak self] in self?.onRequestQuit?() }
         remoteView.onOpenManager = { [weak self] in self?.onOpenManager?() }
         remoteView.onToggleHud = { [weak self] in self?.onToggleHud?() }
+        remoteView.onPullClipboardFiles = { [weak self] in self?.onPullClipboardFiles?() }
         remoteView.onFilesDropped = { [weak self] urls in
             guard let self else { return }
             self.onFilesDropped?(self.windowId, urls)

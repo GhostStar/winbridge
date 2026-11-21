@@ -114,6 +114,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         state.toggleAudioProcessOnly()
     }
 
+    @objc private func pullClipboardFilesAction() {
+        state.pullClipboardFilesToPasteboard(isAuto: false)
+    }
+
+    @objc private func toggleAutoPullClipboardFilesAction() {
+        state.toggleAutoPullClipboardFiles()
+    }
+
     @objc private func setVideoProfileAction(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String,
               let profile = VideoProfilePreference(rawValue: raw) else { return }
@@ -197,6 +205,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         winMenu.addItem(hudItem)
         winMenu.addItem(withTitle: "刷新当前窗口关键帧 (IDR)", action: #selector(requestKeyframeAction), keyEquivalent: "")
         winMenu.addItem(withTitle: "从 Windows 取回文件…", action: #selector(showFilePullAction), keyEquivalent: "")
+        let pullClipItem = NSMenuItem(
+            title: "取回 Windows 剪贴板文件 (写入 Mac ⌘V)",
+            action: #selector(pullClipboardFilesAction),
+            keyEquivalent: "V"
+        )
+        pullClipItem.keyEquivalentModifierMask = [.command, .shift, .option]
+        winMenu.addItem(pullClipItem)
+        let autoPullItem = NSMenuItem(
+            title: "剪贴板文件自动取回 (≤20 MB)",
+            action: #selector(toggleAutoPullClipboardFilesAction),
+            keyEquivalent: ""
+        )
+        autoPullItem.state = state.settings.autoPullClipboardFiles ? .on : .off
+        winMenu.addItem(autoPullItem)
         appendVideoQualityItems(to: winMenu, includeProcess: true)
         winMenu.addItem(.separator())
         winMenu.addItem(withTitle: "脱离当前远端窗口", action: #selector(detachActiveWindowAction), keyEquivalent: "")
@@ -247,6 +269,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             processAudio.state = state.settings.audioProcessOnly ? .on : .off
             menu.addItem(processAudio)
             menu.addItem(withTitle: "从 Windows 取回文件…", action: #selector(showFilePullAction), keyEquivalent: "")
+            menu.addItem(withTitle: "取回 Windows 剪贴板文件 (⌥⇧⌘V)", action: #selector(pullClipboardFilesAction), keyEquivalent: "")
+            let autoPullStatus = NSMenuItem(
+                title: "剪贴板文件自动取回 (≤20 MB)",
+                action: #selector(toggleAutoPullClipboardFilesAction),
+                keyEquivalent: ""
+            )
+            autoPullStatus.state = state.settings.autoPullClipboardFiles ? .on : .off
+            menu.addItem(autoPullStatus)
             appendVideoQualityItems(to: menu, includeProcess: true)
 
             let pinned = state.pinnedApps

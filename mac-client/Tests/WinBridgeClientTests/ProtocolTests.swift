@@ -194,9 +194,21 @@ import Testing
         targetWindowId: 0,
         fileName: "shot.png",
         totalBytes: 12,
-        direction: FileTransferStart.directionToClient
+        direction: FileTransferStart.directionToClient,
+        requestId: 77
     )
     #expect(try FileTransferStart.decode(from: start.encode()) == start)
+    let notice = ControlMessage(
+        seq: 5,
+        timestampUs: 3,
+        payload: .clipboardFilesNotice(ClipboardFilesNotice(
+            changeId: 42,
+            files: [HostFileEntry(name: "report.pdf", sizeBytes: 1024, isDir: false)],
+            totalBytes: 1024,
+            skippedCount: 1
+        ))
+    )
+    #expect(try ControlMessage.decode(from: notice.encode()) == notice)
 }
 
 @Test func filePullHelpersHandleWindowsPathsAndUnsafeNames() {

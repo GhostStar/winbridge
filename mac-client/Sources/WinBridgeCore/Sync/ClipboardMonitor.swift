@@ -58,6 +58,17 @@ final class ClipboardMonitor {
         lastContentHash = hash
     }
 
+    /// Publishes received file URLs onto the macOS clipboard so the user can press ⌘V
+    /// directly in Finder or any app, without triggering an outbound clipboard echo.
+    func applyRemoteFiles(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.writeObjects(urls.map { $0 as NSURL })
+        lastChangeCount = pb.changeCount
+        lastContentHash = nil
+    }
+
     private func poll() {
         guard isEnabled else { return }
         let pb = NSPasteboard.general

@@ -1,5 +1,5 @@
 use super::{clipboard, cursor::Tracker};
-use crate::proto::{ClipboardSync, CursorShape};
+use crate::proto::{ClipboardFilesNotice, ClipboardSync, CursorShape, HostFileEntry};
 use anyhow::{anyhow, ensure, Context, Result};
 use std::{
     cell::RefCell,
@@ -22,6 +22,7 @@ pub enum Event {
     Hidden(u64),
     Cursor(CursorShape),
     Clipboard(ClipboardSync),
+    ClipboardFiles(ClipboardFilesNotice),
     Error(String),
 }
 
@@ -247,7 +248,32 @@ fn observer_loop(
                                 seen = seq;
                             }
                         }
-                        Ok(None) => seen = current,
+                        Ok(None) => {
+                            const CF_HDROP: u32 = 15;
+                            if current != super::files::last_self_hdrop_seq()
+                                && unsafe { IsClipboardFormatAvailable(CF_HDROP) } != 0
+                            {
+                                if let Ok(Some((files, total_bytes, skipped_count))) =
+                                    super::files::inspect_clipboard_files()
+                                {
+                                    let notice = ClipboardFilesNotice {
+                                        change_id: u64::from(current),
+                                        files: files
+                                            .into_iter()
+                                            .map(|f| HostFileEntry {
+                                                name: f.name,
+                                                size_bytes: f.size_bytes,
+                                                is_dir: f.is_dir,
+                                            })
+                                            .collect(),
+                                        total_bytes,
+                                        skipped_count,
+                                    };
+                                    let _ = events.try_send(Event::ClipboardFiles(notice));
+                                }
+                            }
+                            seen = current;
+                        }
                         Err(e) => {
                             // OpenClipboard contention can clear on the next timer tick.
                             if e.downcast_ref::<io::Error>().is_none() {

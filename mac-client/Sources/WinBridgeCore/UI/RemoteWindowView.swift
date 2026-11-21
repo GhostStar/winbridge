@@ -34,6 +34,7 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
     var onRequestQuit: (() -> Void)?
     var onOpenManager: (() -> Void)?
     var onToggleHud: (() -> Void)?
+    var onPullClipboardFiles: (() -> Void)?
     var onFilesDropped: (([URL]) -> Void)?
     var onGameLockStateChanged: ((GameLockState) -> Void)?
 
@@ -664,6 +665,11 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
         // Cmd+Shift+H toggles the Performance HUD overlay across remote windows.
         if flags == [.command, .shift], event.keyCode == UInt16(kVK_ANSI_H) {
             onToggleHud?()
+            return true
+        }
+        // Option+Shift+Cmd+V pulls Windows clipboard files onto the macOS pasteboard (avoids colliding with Ctrl+Shift+V).
+        if flags == [.command, .shift, .option], event.keyCode == UInt16(kVK_ANSI_V) {
+            onPullClipboardFiles?()
             return true
         }
 

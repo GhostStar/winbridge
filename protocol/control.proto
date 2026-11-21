@@ -65,6 +65,7 @@ message ControlMessage {
     ListHostFilesRequest list_host_files_req = 65; // Mac -> Win
     ListHostFilesResponse list_host_files_res = 66; // Win -> Mac
     FilePullRequest file_pull_req = 67;          // Mac -> Win
+    ClipboardFilesNotice clipboard_files_notice = 68; // Win -> Mac
 
     // --- Diagnostics / Errors (Win -> Mac) ---
     HostError host_error = 70;                   // Win -> Mac
@@ -471,12 +472,17 @@ message FileTransferStart {
   uint64 total_bytes = 4;
   // 0 or 1: Mac -> Windows (legacy drag-and-drop). 2: Windows -> Mac (file pull).
   uint32 direction = 5;
+  // Optional request_id echoed from FilePullRequest when direction == 2, allowing
+  // the client to correlate streamed pulls (e.g. Finder NSFilePromiseProvider drag-out).
+  uint64 request_id = 6;
 }
 
 // Mac asks the host to list a directory it is allowed to read.
 message ListHostFilesRequest {
-  // Empty = Downloads\WinBridge. A relative path stays inside that folder.
-  // An absolute path must resolve inside Downloads, Desktop, or Documents.
+  // Empty or "root:drop" = Downloads\WinBridge.
+  // "root:desktop", "root:downloads", "root:documents" resolve Windows Known Folders.
+  // A relative path stays inside Downloads\WinBridge; an absolute path must resolve
+  // inside Downloads, Desktop, or Documents.
   string path = 1;
 }
 
@@ -492,11 +498,20 @@ message ListHostFilesResponse {
   string error = 3;
 }
 
-// Mac asks the host to send one file, or every file currently on the Windows clipboard.
+// Mac asks the host to send one file (or directory zipped on the fly), or every
+// allowed regular file currently on the Windows clipboard.
 message FilePullRequest {
   uint64 request_id = 1;
   // Same path rules as ListHostFilesRequest. The literal "clipboard:" sends CF_HDROP files.
   string path = 2;
+}
+
+// Host notifies Mac when Windows clipboard gains CF_HDROP files inside allowed roots.
+message ClipboardFilesNotice {
+  uint64 change_id = 1;
+  repeated HostFileEntry files = 2;
+  uint64 total_bytes = 3;
+  uint32 skipped_count = 4;
 }
 
 message FileTransferChunk {

@@ -3,10 +3,19 @@ use anyhow::{bail, ensure, Context, Result};
 use std::{
     collections::HashMap,
     fs::{self, File},
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     ptr,
+    sync::atomic::{AtomicU32, Ordering},
 };
+
+static LAST_SELF_HDROP_SEQ: AtomicU32 = AtomicU32::new(0);
+
+/// Returns the Windows clipboard sequence number written by our own `set_clipboard_file_paths`,
+/// allowing the clipboard listener to suppress echo loops when Mac drops files onto Windows.
+pub fn last_self_hdrop_seq() -> u32 {
+    LAST_SELF_HDROP_SEQ.load(Ordering::Acquire)
+}
 
 pub const MAX_TRANSFER_BYTES: u64 = 512 * 1024 * 1024; // 512 MiB
 const MAX_CONCURRENT_TRANSFERS: usize = 4;
@@ -261,6 +270,10 @@ impl FileReceiver {
 
 pub const FILE_DIRECTION_TO_CLIENT: u32 = 2;
 pub const CLIPBOARD_PULL: &str = "clipboard:";
+pub const ROOT_DROP: &str = "root:drop";
+pub const ROOT_DESKTOP: &str = "root:desktop";
+pub const ROOT_DOWNLOADS: &str = "root:downloads";
+pub const ROOT_DOCUMENTS: &str = "root:documents";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostFileEntryInfo {
@@ -272,7 +285,61 @@ pub struct HostFileEntryInfo {
 pub struct OpenedPull {
     pub file_name: String,
     pub total_bytes: u64,
-    pub file: File,
+    file: Option<File>,
+    temp_cleanup: Option<PathBuf>,
+}
+
+impl OpenedPull {
+    pub fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self.file.as_mut() {
+            Some(f) => f.read(buf),
+            None => Ok(0),
+        }
+    }
+}
+
+impl Drop for OpenedPull {
+    fn drop(&mut self) {
+        // Close the handle before removing any temporary zip archive on Windows.
+        drop(self.file.take());
+        if let Some(tmp) = self.temp_cleanup.take() {
+            let _ = fs::remove_file(tmp);
+        }
+    }
+}
+
+/// Strips the Windows `\\?\` verbatim path prefix for cleaner display in the client UI.
+pub fn clean_display_path(path: &Path) -> String {
+    let raw = path.display().to_string();
+    raw.strip_prefix(r"\\?\").unwrap_or(&raw).to_owned()
+}
+
+fn known_shortcut_dir(alias: &str, drop_dir: &Path) -> Option<PathBuf> {
+    match alias {
+        "" | ROOT_DROP => Some(drop_dir.to_path_buf()),
+        ROOT_DESKTOP => {
+            #[cfg(windows)]
+            if let Some(dir) = known_folder(&windows_sys::Win32::UI::Shell::FOLDERID_Desktop) {
+                return Some(dir);
+            }
+            user_home().map(|h| h.join("Desktop"))
+        }
+        ROOT_DOWNLOADS => {
+            #[cfg(windows)]
+            if let Some(dir) = known_folder(&windows_sys::Win32::UI::Shell::FOLDERID_Downloads) {
+                return Some(dir);
+            }
+            user_home().map(|h| h.join("Downloads"))
+        }
+        ROOT_DOCUMENTS => {
+            #[cfg(windows)]
+            if let Some(dir) = known_folder(&windows_sys::Win32::UI::Shell::FOLDERID_Documents) {
+                return Some(dir);
+            }
+            user_home().map(|h| h.join("Documents"))
+        }
+        _ => None,
+    }
 }
 
 /// Roots the client may read: the drop folder plus the user Downloads, Desktop, and Documents.
@@ -329,12 +396,13 @@ pub fn canonicalize_in_roots(roots: &[PathBuf], candidate: &Path) -> Result<Path
     Ok(canonical)
 }
 
-/// Resolves a client path and rejects anything that escapes `roots` after canonicalization.
+/// Resolves a client path (including `root:drop|desktop|downloads|documents` aliases)
+/// and rejects anything that escapes `roots` after canonicalization.
 pub fn resolve_host_path(roots: &[PathBuf], drop_dir: &Path, requested: &str) -> Result<PathBuf> {
     let requested = requested.trim();
     ensure!(requested != CLIPBOARD_PULL, "clipboard pull is not a filesystem path");
-    let candidate = if requested.is_empty() {
-        drop_dir.to_path_buf()
+    let candidate = if let Some(shortcut) = known_shortcut_dir(requested, drop_dir) {
+        shortcut
     } else {
         let raw = Path::new(requested);
         if raw.is_absolute() {
@@ -425,8 +493,72 @@ pub fn open_pull_file(path: &Path) -> Result<OpenedPull> {
     Ok(OpenedPull {
         file_name: sanitize_file_name(&file_name),
         total_bytes: meta.len(),
-        file,
+        file: Some(file),
+        temp_cleanup: None,
     })
+}
+
+/// Opens a regular file directly, or packs a directory on the fly into a temporary `.zip` archive.
+pub fn open_pull_target(path: &Path) -> Result<OpenedPull> {
+    let meta = fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
+    if meta.is_file() {
+        return open_pull_file(path);
+    }
+    ensure!(meta.is_dir(), "unsupported file type: {}", path.display());
+    let zip = super::zip_pack::pack_directory_to_temp_zip(path, MAX_TRANSFER_BYTES)?;
+    let folder_name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "folder".into());
+    let zip_name = sanitize_file_name(&format!("{folder_name}.zip"));
+    let file = File::open(&zip.path)
+        .with_context(|| format!("open zipped folder {}", zip.path.display()))?;
+    Ok(OpenedPull {
+        file_name: zip_name,
+        total_bytes: zip.total_bytes,
+        file: Some(file),
+        temp_cleanup: Some(zip.path),
+    })
+}
+
+/// Inspects current Windows clipboard `CF_HDROP` files without reading file contents.
+/// Returns `Ok(Some((allowed_entries, total_bytes, skipped_count)))` if at least one allowed
+/// regular file is present, or `Ok(None)` if the clipboard has no allowed files.
+pub fn inspect_clipboard_files() -> Result<Option<(Vec<HostFileEntryInfo>, u64, u32)>> {
+    let raw = match clipboard_file_paths() {
+        Ok(paths) => paths,
+        Err(_) => return Ok(None),
+    };
+    let drop_dir = default_drop_directory();
+    let roots = allowed_read_roots(&drop_dir);
+    let mut entries = Vec::new();
+    let mut total_bytes = 0u64;
+    let mut skipped_count = 0u32;
+    for path in &raw {
+        match canonicalize_in_roots(&roots, path) {
+            Ok(canon) => match fs::metadata(&canon) {
+                Ok(meta) if meta.is_file() && meta.len() <= MAX_TRANSFER_BYTES => {
+                    let name = canon
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "winbridge-file.bin".into());
+                    total_bytes = total_bytes.saturating_add(meta.len());
+                    entries.push(HostFileEntryInfo {
+                        name: sanitize_file_name(&name),
+                        size_bytes: meta.len(),
+                        is_dir: false,
+                    });
+                }
+                _ => skipped_count = skipped_count.saturating_add(1),
+            },
+            Err(_) => skipped_count = skipped_count.saturating_add(1),
+        }
+    }
+    if entries.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some((entries, total_bytes, skipped_count)))
 }
 
 #[cfg(windows)]
@@ -438,7 +570,15 @@ pub fn clipboard_file_paths() -> Result<Vec<PathBuf>> {
     };
     const CF_HDROP: u32 = 15;
     unsafe {
-        ensure!(OpenClipboard(std::ptr::null_mut()) != 0, "OpenClipboard failed");
+        let mut opened = false;
+        for _ in 0..5 {
+            if OpenClipboard(std::ptr::null_mut()) != 0 {
+                opened = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        ensure!(opened, "OpenClipboard failed");
         let hdrop = GetClipboardData(CF_HDROP);
         if hdrop.is_null() {
             CloseClipboard();
@@ -487,7 +627,10 @@ pub fn set_clipboard_file_paths(paths: &[&Path]) -> Result<()> {
     use windows_sys::Win32::{
         Foundation::GlobalFree,
         System::{
-            DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData},
+            DataExchange::{
+                CloseClipboard, EmptyClipboard, GetClipboardSequenceNumber, OpenClipboard,
+                SetClipboardData,
+            },
             Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE},
         },
     };
@@ -523,6 +666,7 @@ pub fn set_clipboard_file_paths(paths: &[&Path]) -> Result<()> {
             bail!("SetClipboardData(CF_HDROP) failed");
         }
         CloseClipboard();
+        LAST_SELF_HDROP_SEQ.store(GetClipboardSequenceNumber(), Ordering::Release);
     }
     Ok(())
 }
@@ -563,6 +707,7 @@ mod tests {
                 file_name: "demo.txt".into(),
                 total_bytes: 11,
                 direction: 0,
+                request_id: 0,
             })
             .unwrap();
             assert!(rx

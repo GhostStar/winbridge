@@ -13,11 +13,21 @@ private struct RestoreWindowTarget: Equatable {
     let title: String
 }
 
+private struct PendingPullTarget {
+    let destinationURL: URL?
+    let copyToPasteboard: Bool
+    let completion: (@Sendable (Error?) -> Void)?
+}
+
 private struct IncomingPull {
+    let requestId: UInt64
     let finalURL: URL
     let partialURL: URL
     let handle: FileHandle
     let expected: UInt64
+    let customDestination: Bool
+    let copyToPasteboard: Bool
+    let completion: (@Sendable (Error?) -> Void)?
     var received: UInt64
     var lastProgressToastAt: Date
 }
@@ -87,8 +97,13 @@ final class AppState {
     private var nextTransferId: UInt64 = 1
     private var activeTransferNames: [UInt64: String] = [:]
     private var activeTransferTargetWindow: [UInt64: UInt64] = [:]
+    private var pendingPullTargets: [UInt64: PendingPullTarget] = [:]
+    private var clipboardBatchFiles: [UInt64: [URL]] = [:]
     private var incomingPulls: [UInt64: IncomingPull] = [:]
+    private var lastClipboardFilesChangeId: UInt64 = 0
+    private(set) var lastHostClipboardNotice: ClipboardFilesNotice?
     var onHostFilesListed: ((ListHostFilesResponse) -> Void)?
+    var onFilePullStatusChanged: ((String, Bool) -> Void)?
     private var lastAdaptivePush = Date.distantPast
 
     var onStateChanged: (() -> Void)?
@@ -584,9 +599,17 @@ final class AppState {
         subscribedRootIds.removeAll()
         activeTransferNames.removeAll()
         activeTransferTargetWindow.removeAll()
+        for (_, pending) in pendingPullTargets {
+            pending.completion?(ConnectionError.connectionClosed)
+        }
+        pendingPullTargets.removeAll()
+        clipboardBatchFiles.removeAll()
+        lastHostClipboardNotice = nil
+        lastClipboardFilesChangeId = 0
         for (_, pull) in incomingPulls {
             try? pull.handle.close()
             try? FileManager.default.removeItem(at: pull.partialURL)
+            pull.completion?(ConnectionError.connectionClosed)
         }
         incomingPulls.removeAll()
 
@@ -944,7 +967,47 @@ final class AppState {
         return name
     }
 
-    func pullHostFile(path: String) {
+    private static let autoPullClipboardLimitBytes: UInt64 = 20 * 1024 * 1024
+
+    func toggleAutoPullClipboardFiles() {
+        var s = settings
+        s.autoPullClipboardFiles.toggle()
+        settings = s
+        setBanner(
+            s.autoPullClipboardFiles
+                ? "已开启：Windows 复制 ≤20 MB 文件时自动取回并写入 Mac 剪贴板（按 ⌘V 直接粘贴）"
+                : "已关闭自动取回剪贴板文件（仍可按 ⌥⇧⌘V 手动取回）",
+            isError: false
+        )
+        onStateChanged?()
+    }
+
+    func pullClipboardFilesToPasteboard(isAuto: Bool = false) {
+        guard case .connected = connectionState else {
+            if !isAuto {
+                setBanner("请先连接 Windows 主机", isError: true)
+                onStateChanged?()
+            }
+            return
+        }
+        let requestId = nextTransferId
+        nextTransferId &+= 1
+        pendingPullTargets[requestId] = PendingPullTarget(
+            destinationURL: nil,
+            copyToPasteboard: true,
+            completion: nil
+        )
+        clipboardBatchFiles[requestId] = []
+        let msg = isAuto ? "⬇ 正在自动同步 Windows 剪贴板文件…" : "⬇ 正在取回 Windows 剪贴板文件…"
+        ClientLogger.shared.info("FilePull clipboard request id=\(requestId) auto=\(isAuto)")
+        setBanner(msg, isError: false)
+        showTransferToast(msg, style: .progress, autoHideSeconds: nil)
+        onFilePullStatusChanged?(msg, false)
+        onStateChanged?()
+        sendControl(.filePullReq(FilePullRequest(requestId: requestId, path: "clipboard:")))
+    }
+
+    func pullHostFile(path: String, copyToPasteboard: Bool = true) {
         guard case .connected = connectionState else {
             setBanner("请先连接 Windows 主机", isError: true)
             onStateChanged?()
@@ -952,6 +1015,14 @@ final class AppState {
         }
         let requestId = nextTransferId
         nextTransferId &+= 1
+        pendingPullTargets[requestId] = PendingPullTarget(
+            destinationURL: nil,
+            copyToPasteboard: copyToPasteboard,
+            completion: nil
+        )
+        if copyToPasteboard {
+            clipboardBatchFiles[requestId] = []
+        }
         let label: String
         if path == "clipboard:" {
             label = "剪贴板文件"
@@ -959,9 +1030,76 @@ final class AppState {
             let tail = path.split(whereSeparator: { $0 == "/" || $0 == "\\" }).last.map(String.init) ?? ""
             label = tail.isEmpty ? "文件" : tail
         }
-        setBanner("正在从 Windows 取回「\(label)」…", isError: false)
+        let msg = "⬇ 正在从 Windows 取回「\(label)」…"
+        ClientLogger.shared.info("FilePull request id=\(requestId) path=\"\(path)\"")
+        setBanner(msg, isError: false)
+        showTransferToast(msg, style: .progress, autoHideSeconds: nil)
+        onFilePullStatusChanged?(msg, false)
         onStateChanged?()
         sendControl(.filePullReq(FilePullRequest(requestId: requestId, path: path)))
+    }
+
+    /// Streams a remote file or folder (.zip) straight into a Finder-provided `NSFilePromiseProvider` destination URL.
+    func pullHostFileToDestination(
+        remotePath: String,
+        destinationURL: URL,
+        completion: @escaping @Sendable (Error?) -> Void
+    ) {
+        guard case .connected = connectionState else {
+            let err = NSError(
+                domain: "com.winbridge.client",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "未连接到 Windows 主机"]
+            )
+            completion(err)
+            return
+        }
+        let requestId = nextTransferId
+        nextTransferId &+= 1
+        pendingPullTargets[requestId] = PendingPullTarget(
+            destinationURL: destinationURL,
+            copyToPasteboard: false,
+            completion: completion
+        )
+        let msg = "⬇ 正在拖出「\(destinationURL.lastPathComponent)」…"
+        ClientLogger.shared.info(
+            "FilePull promise request id=\(requestId) remote=\"\(remotePath)\" dest=\"\(destinationURL.path)\""
+        )
+        setBanner(msg, isError: false)
+        showTransferToast(msg, style: .progress, autoHideSeconds: nil)
+        onFilePullStatusChanged?(msg, false)
+        onStateChanged?()
+        sendControl(.filePullReq(FilePullRequest(requestId: requestId, path: remotePath)))
+    }
+
+    private func handleClipboardFilesNotice(_ notice: ClipboardFilesNotice) {
+        guard !notice.files.isEmpty else { return }
+        if notice.changeId != 0 && notice.changeId == lastClipboardFilesChangeId {
+            return
+        }
+        lastClipboardFilesChangeId = notice.changeId
+        lastHostClipboardNotice = notice
+
+        let firstName = notice.files[0].name
+        let summary = notice.files.count == 1
+            ? firstName
+            : "\(firstName) 等 \(notice.files.count) 个文件"
+        let sizeStr = Self.formatByteCount(notice.totalBytes)
+        ClientLogger.shared.info(
+            "ClipboardFilesNotice seq=\(notice.changeId) count=\(notice.files.count) bytes=\(notice.totalBytes) skipped=\(notice.skippedCount)"
+        )
+
+        if settings.syncClipboard
+            && settings.autoPullClipboardFiles
+            && notice.totalBytes <= Self.autoPullClipboardLimitBytes {
+            pullClipboardFilesToPasteboard(isAuto: true)
+        } else {
+            let msg = "📋 Windows 已复制「\(summary)」(\(sizeStr)) — 按 ⌥⇧⌘V 立即取回到 Mac 剪贴板"
+            setBanner(msg, isError: false)
+            showTransferToast(msg, style: .progress, autoHideSeconds: 6.5)
+            onFilePullStatusChanged?(msg, false)
+            onStateChanged?()
+        }
     }
 
     private func macDropDirectory() -> URL {
@@ -974,49 +1112,90 @@ final class AppState {
 
     private func beginIncomingPull(_ start: FileTransferStart) {
         let name = Self.sanitizeIncomingFileName(start.fileName)
+        let pending: PendingPullTarget?
+        if start.requestId != 0, let entry = pendingPullTargets[start.requestId] {
+            pending = entry
+            // Single-file drag-out promises consume their target immediately; clipboard batches may emit multiple files.
+            if entry.destinationURL != nil {
+                pendingPullTargets.removeValue(forKey: start.requestId)
+            }
+        } else {
+            pending = nil
+        }
+
         guard start.totalBytes <= Self.maxIncomingPullBytes else {
-            setBanner("取回「\(name)」失败：文件超过 512 MiB 上限", isError: true)
+            let msg = "取回「\(name)」失败：文件超过 512 MiB 上限"
+            pending?.completion?(NSError(domain: "com.winbridge.client", code: 2, userInfo: [NSLocalizedDescriptionKey: msg]))
+            setBanner(msg, isError: true)
+            showTransferToast("✕ \(msg)", style: .error, autoHideSeconds: 5.5)
+            onFilePullStatusChanged?(msg, true)
             onStateChanged?()
             return
         }
         if let existing = incomingPulls.removeValue(forKey: start.transferId) {
             try? existing.handle.close()
             try? FileManager.default.removeItem(at: existing.partialURL)
+            existing.completion?(ConnectionError.connectionClosed)
         }
-        let dir = macDropDirectory()
-        var dest = dir.appendingPathComponent(name)
-        if FileManager.default.fileExists(atPath: dest.path) {
-            let stem = dest.deletingPathExtension().lastPathComponent
-            let ext = dest.pathExtension
-            for n in 1..<10_000 {
-                let candidateName = ext.isEmpty ? "\(stem) (\(n))" : "\(stem) (\(n)).\(ext)"
-                let candidate = dir.appendingPathComponent(candidateName)
-                if !FileManager.default.fileExists(atPath: candidate.path) {
-                    dest = candidate
-                    break
+
+        let dest: URL
+        let partialDir: URL
+        let isCustomDest: Bool
+        if let promisedURL = pending?.destinationURL {
+            dest = promisedURL
+            partialDir = promisedURL.deletingLastPathComponent()
+            isCustomDest = true
+        } else {
+            let dir = macDropDirectory()
+            var candidateDest = dir.appendingPathComponent(name)
+            if FileManager.default.fileExists(atPath: candidateDest.path) {
+                let stem = candidateDest.deletingPathExtension().lastPathComponent
+                let ext = candidateDest.pathExtension
+                for n in 1..<10_000 {
+                    let candidateName = ext.isEmpty ? "\(stem) (\(n))" : "\(stem) (\(n)).\(ext)"
+                    let candidate = dir.appendingPathComponent(candidateName)
+                    if !FileManager.default.fileExists(atPath: candidate.path) {
+                        candidateDest = candidate
+                        break
+                    }
                 }
             }
+            dest = candidateDest
+            partialDir = dir
+            isCustomDest = false
         }
-        let partial = dir.appendingPathComponent(".\(dest.lastPathComponent).\(start.transferId).winbridge.part")
+
+        let partial = partialDir.appendingPathComponent(".\(dest.lastPathComponent).\(start.transferId).winbridge.part")
         guard FileManager.default.createFile(atPath: partial.path, contents: nil),
               let handle = try? FileHandle(forWritingTo: partial) else {
-            setBanner("无法写入 \(partial.path)", isError: true)
+            let msg = "无法写入 \(partial.path)"
+            pending?.completion?(NSError(domain: "com.winbridge.client", code: 3, userInfo: [NSLocalizedDescriptionKey: msg]))
+            setBanner(msg, isError: true)
+            showTransferToast("✕ \(msg)", style: .error, autoHideSeconds: 5.5)
+            onFilePullStatusChanged?(msg, true)
             onStateChanged?()
             return
         }
         incomingPulls[start.transferId] = IncomingPull(
+            requestId: start.requestId,
             finalURL: dest,
             partialURL: partial,
             handle: handle,
             expected: start.totalBytes,
+            customDestination: isCustomDest,
+            copyToPasteboard: pending?.copyToPasteboard ?? false,
+            completion: pending?.completion,
             received: 0,
             lastProgressToastAt: .distantPast
         )
         let totalStr = Self.formatByteCount(start.totalBytes)
-        ClientLogger.shared.info("FilePull start id=\(start.transferId) name=\"\(dest.lastPathComponent)\" bytes=\(start.totalBytes)")
+        ClientLogger.shared.info(
+            "FilePull start id=\(start.transferId) req=\(start.requestId) name=\"\(dest.lastPathComponent)\" bytes=\(start.totalBytes) customDest=\(isCustomDest)"
+        )
         let msg = "⬇ 正在从 Windows 取回「\(dest.lastPathComponent)」(0% · 0 B / \(totalStr))…"
         setBanner(msg, isError: false)
         showTransferToast(msg, style: .progress, autoHideSeconds: nil)
+        onFilePullStatusChanged?(msg, false)
         onStateChanged?()
     }
 
@@ -1047,6 +1226,7 @@ final class AppState {
             let msg = "⬇ 正在取回「\(pull.finalURL.lastPathComponent)」· \(pct)% (\(Self.formatByteCount(pull.received)) / \(Self.formatByteCount(pull.expected)))"
             setBanner(msg, isError: false)
             showTransferToast(msg, style: .progress, autoHideSeconds: nil)
+            onFilePullStatusChanged?(msg, false)
         }
         incomingPulls[chunk.transferId] = pull
     }
@@ -1062,24 +1242,45 @@ final class AppState {
                     try FileManager.default.removeItem(at: pull.finalURL)
                 }
                 try FileManager.default.moveItem(at: pull.partialURL, to: pull.finalURL)
-                let msg = "✓ 文件「\(name)」已取回到 Mac：\(pull.finalURL.path)"
+                pull.completion?(nil)
                 ClientLogger.shared.info("FilePull done id=\(id) path=\"\(pull.finalURL.path)\" bytes=\(pull.received)")
+
+                let msg: String
+                if pull.customDestination {
+                    let folder = pull.finalURL.deletingLastPathComponent().lastPathComponent
+                    msg = "✓ 已拖出保存「\(name)」到 \(folder)"
+                } else if pull.copyToPasteboard {
+                    var batch = clipboardBatchFiles[pull.requestId] ?? []
+                    batch.append(pull.finalURL)
+                    clipboardBatchFiles[pull.requestId] = batch
+                    clipboardMonitor.applyRemoteFiles(batch)
+                    let batchNote = batch.count > 1 ? "（共 \(batch.count) 个文件）" : ""
+                    msg = "✓ 「\(name)」已取回并写入 Mac 剪贴板\(batchNote)，按 ⌘V 可直接粘贴"
+                } else {
+                    msg = "✓ 文件「\(name)」已取回到 Mac：\(pull.finalURL.path)"
+                }
                 setBanner(msg, isError: false)
-                showTransferToast(msg, style: .success, autoHideSeconds: 5.0)
+                showTransferToast(msg, style: .success, autoHideSeconds: 5.5)
+                onFilePullStatusChanged?(msg, false)
             } catch {
                 try? FileManager.default.removeItem(at: pull.partialURL)
+                pull.completion?(error)
                 let msg = "保存「\(name)」失败：\(error.localizedDescription)"
                 ClientLogger.shared.error("FilePull save failed id=\(id): \(error.localizedDescription)")
                 setBanner(msg, isError: true)
                 showTransferToast("✕ \(msg)", style: .error, autoHideSeconds: 5.5)
+                onFilePullStatusChanged?(msg, true)
             }
         } else {
             try? FileManager.default.removeItem(at: pull.partialURL)
             let why = message.isEmpty ? "传输不完整" : message
+            let err = NSError(domain: "com.winbridge.client", code: 4, userInfo: [NSLocalizedDescriptionKey: why])
+            pull.completion?(err)
             let msg = "取回「\(name)」失败：\(why)"
             ClientLogger.shared.error("FilePull failed id=\(id) name=\"\(name)\": \(why)")
             setBanner(msg, isError: true)
             showTransferToast("✕ \(msg)", style: .error, autoHideSeconds: 5.5)
+            onFilePullStatusChanged?(msg, true)
         }
         onStateChanged?()
     }
@@ -1125,10 +1326,14 @@ final class AppState {
         case .clipboardSync(let sync):
             clipboardMonitor.applyRemote(sync)
 
+        case .clipboardFilesNotice(let notice):
+            handleClipboardFilesNotice(notice)
+
         case .listHostFilesRes(let res):
             onHostFilesListed?(res)
             if !res.error.isEmpty {
                 setBanner("列出 Windows 文件失败：\(res.error)", isError: true)
+                onFilePullStatusChanged?("列出目录失败：\(res.error)", true)
                 onStateChanged?()
             }
 
@@ -1145,6 +1350,17 @@ final class AppState {
         case .fileTransferRes(let res):
             if incomingPulls[res.transferId] != nil {
                 finishIncoming(res.transferId, success: res.success, message: res.message)
+                break
+            }
+            if let pending = pendingPullTargets.removeValue(forKey: res.transferId) {
+                clipboardBatchFiles.removeValue(forKey: res.transferId)
+                let why = res.message.isEmpty ? "取回文件失败" : res.message
+                pending.completion?(NSError(domain: "com.winbridge.client", code: 5, userInfo: [NSLocalizedDescriptionKey: why]))
+                ClientLogger.shared.error("FilePull rejected id=\(res.transferId): \(why)")
+                setBanner("取回文件失败：\(why)", isError: true)
+                showTransferToast("✕ 取回文件失败：\(why)", style: .error, autoHideSeconds: 5.5)
+                onFilePullStatusChanged?("取回失败：\(why)", true)
+                onStateChanged?()
                 break
             }
             let targetWin = activeTransferTargetWindow.removeValue(forKey: res.transferId)
@@ -1204,6 +1420,7 @@ final class AppState {
         wc.onRequestQuit = { NSApp.terminate(nil) }
         wc.onOpenManager = { [weak self] in self?.onOpenManager?() }
         wc.onToggleHud = { [weak self] in self?.togglePerformanceHud() }
+        wc.onPullClipboardFiles = { [weak self] in self?.pullClipboardFilesToPasteboard(isAuto: false) }
         wc.onFilesDropped = { [weak self] winId, urls in self?.sendDroppedFiles(urls, toWindowId: winId) }
 
         controllers[info.windowId] = wc

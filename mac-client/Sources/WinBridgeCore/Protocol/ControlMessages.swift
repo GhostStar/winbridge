@@ -958,6 +958,7 @@ struct FileTransferStart: Equatable, Sendable {
     var fileName: String = ""
     var totalBytes: UInt64 = 0
     var direction: UInt32 = 0
+    var requestId: UInt64 = 0
 
     func encode() -> Data {
         var w = ProtoWriter()
@@ -966,6 +967,7 @@ struct FileTransferStart: Equatable, Sendable {
         w.writeString(field: 3, fileName)
         w.writeUInt64(field: 4, totalBytes)
         w.writeUInt32(field: 5, direction)
+        w.writeUInt64(field: 6, requestId)
         return w.data
     }
 
@@ -980,6 +982,7 @@ struct FileTransferStart: Equatable, Sendable {
             case 3: m.fileName = try r.readString()
             case 4: m.totalBytes = try r.readUInt64()
             case 5: m.direction = try r.readUInt32()
+            case 6: m.requestId = try r.readUInt64()
             default: try r.skip(wireType: wire)
             }
         }
@@ -1089,6 +1092,40 @@ struct FilePullRequest: Equatable, Sendable {
             switch field {
             case 1: m.requestId = try r.readUInt64()
             case 2: m.path = try r.readString()
+            default: try r.skip(wireType: wire)
+            }
+        }
+        return m
+    }
+}
+
+struct ClipboardFilesNotice: Equatable, Sendable {
+    var changeId: UInt64 = 0
+    var files: [HostFileEntry] = []
+    var totalBytes: UInt64 = 0
+    var skippedCount: UInt32 = 0
+
+    func encode() -> Data {
+        var w = ProtoWriter()
+        w.writeUInt64(field: 1, changeId)
+        for file in files {
+            w.writeMessage(field: 2, file.encode(), forceEmit: true)
+        }
+        w.writeUInt64(field: 3, totalBytes)
+        w.writeUInt32(field: 4, skippedCount)
+        return w.data
+    }
+
+    static func decode(from data: Data) throws -> ClipboardFilesNotice {
+        var r = ProtoReader(data: data)
+        var m = ClipboardFilesNotice()
+        while !r.isAtEnd {
+            let (field, wire) = try r.readTag()
+            switch field {
+            case 1: m.changeId = try r.readUInt64()
+            case 2: m.files.append(try HostFileEntry.decode(from: try r.readBytes()))
+            case 3: m.totalBytes = try r.readUInt64()
+            case 4: m.skippedCount = try r.readUInt32()
             default: try r.skip(wireType: wire)
             }
         }
@@ -1334,6 +1371,7 @@ struct ControlMessage: Equatable, Sendable {
         case listHostFilesReq(ListHostFilesRequest)    // 65
         case listHostFilesRes(ListHostFilesResponse)   // 66
         case filePullReq(FilePullRequest)              // 67
+        case clipboardFilesNotice(ClipboardFilesNotice) // 68
         case hostError(HostError)                       // 70
     }
 
@@ -1379,6 +1417,7 @@ struct ControlMessage: Equatable, Sendable {
         case .listHostFilesReq(let m): w.writeMessage(field: 65, m.encode(), forceEmit: true)
         case .listHostFilesRes(let m): w.writeMessage(field: 66, m.encode(), forceEmit: true)
         case .filePullReq(let m): w.writeMessage(field: 67, m.encode(), forceEmit: true)
+        case .clipboardFilesNotice(let m): w.writeMessage(field: 68, m.encode(), forceEmit: true)
         case .hostError(let m): w.writeMessage(field: 70, m.encode(), forceEmit: true)
         }
         return w.data
@@ -1427,6 +1466,7 @@ struct ControlMessage: Equatable, Sendable {
             case 65: payload = .listHostFilesReq(try ListHostFilesRequest.decode(from: try r.readBytes()))
             case 66: payload = .listHostFilesRes(try ListHostFilesResponse.decode(from: try r.readBytes()))
             case 67: payload = .filePullReq(try FilePullRequest.decode(from: try r.readBytes()))
+            case 68: payload = .clipboardFilesNotice(try ClipboardFilesNotice.decode(from: try r.readBytes()))
             case 70: payload = .hostError(try HostError.decode(from: try r.readBytes()))
             default: try r.skip(wireType: wire)
             }
