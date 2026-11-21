@@ -18,6 +18,10 @@ mkdir -p "$APP_DIR/Contents/Resources"
 
 cp "$ROOT_DIR/.build/release/WinBridgeClient" "$APP_DIR/Contents/MacOS/WinBridge"
 
+if [[ -f "$ROOT_DIR/Resources/AppIcon.icns" ]]; then
+    cp "$ROOT_DIR/Resources/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"
+fi
+
 cat > "$APP_DIR/Contents/Info.plist" << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -27,6 +31,8 @@ cat > "$APP_DIR/Contents/Info.plist" << 'EOF'
     <string>zh_CN</string>
     <key>CFBundleExecutable</key>
     <string>WinBridge</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
     <string>com.winbridge.client</string>
     <key>CFBundleInfoDictionaryVersion</key>
@@ -38,9 +44,9 @@ cat > "$APP_DIR/Contents/Info.plist" << 'EOF'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.2.0</string>
+    <string>0.4.0</string>
     <key>CFBundleVersion</key>
-    <string>2</string>
+    <string>4</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>NSHighResolutionCapable</key>
@@ -73,5 +79,6 @@ else
     codesign --force --deep --sign - --identifier "com.winbridge.client" "$APP_DIR"
 fi
 
+touch "$APP_DIR"
 echo "Built app bundle at: $APP_DIR"
 echo "Run with: open \"$APP_DIR\""
