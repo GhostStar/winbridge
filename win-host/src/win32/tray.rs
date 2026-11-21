@@ -84,9 +84,12 @@ fn copy_wide_into<const N: usize>(dst: &mut [u16; N], text: &str) {
 
 #[cfg(windows)]
 unsafe fn copy_text_to_clipboard(hwnd: windows_sys::Win32::Foundation::HWND, text: &str) -> bool {
-    use windows_sys::Win32::System::{
-        DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData},
-        Memory::{GlobalAlloc, GlobalFree, GlobalLock, GlobalUnlock, GMEM_MOVEABLE},
+    use windows_sys::Win32::{
+        Foundation::GlobalFree,
+        System::{
+            DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData},
+            Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE},
+        },
     };
     const CF_UNICODETEXT: u32 = 13;
 
