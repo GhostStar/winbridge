@@ -5,28 +5,103 @@ pub use injector::Injector;
 
 use crate::win32;
 use anyhow::{ensure, Context, Result};
-use std::{io, mem};
+use std::{io, mem, ptr};
 use windows_sys::Win32::{
     Foundation::HWND,
+    System::Threading::{AttachThreadInput, GetCurrentThreadId},
     UI::{Input::KeyboardAndMouse::*, WindowsAndMessaging::*},
 };
 
+fn is_foreground_or_same_process(hwnd: HWND) -> bool {
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg == hwnd {
+            return true;
+        }
+        if fg.is_null() {
+            return false;
+        }
+        let mut fg_pid = 0u32;
+        let mut target_pid = 0u32;
+        GetWindowThreadProcessId(fg, &mut fg_pid);
+        GetWindowThreadProcessId(hwnd, &mut target_pid);
+        fg_pid != 0 && fg_pid == target_pid
+    }
+}
+
 fn foreground(hwnd: HWND) -> Result<()> {
     unsafe {
-        if GetForegroundWindow() != hwnd {
-            SetForegroundWindow(hwnd);
-            // The foreground thread processes activation asynchronously.
-            for _ in 0..10 {
-                if GetForegroundWindow() == hwnd {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            ensure!(
-                GetForegroundWindow() == hwnd,
-                "Windows declined foreground activation"
+        if is_foreground_or_same_process(hwnd) {
+            return Ok(());
+        }
+        if IsIconic(hwnd) != 0 {
+            ShowWindow(hwnd, SW_RESTORE);
+        }
+        SetForegroundWindow(hwnd);
+        if is_foreground_or_same_process(hwnd) {
+            return Ok(());
+        }
+
+        // Temporarily attach thread input queues to bypass Windows' Foreground Lock Timeout
+        // when activating a target window from a background host process.
+        let cur_tid = GetCurrentThreadId();
+        let fg = GetForegroundWindow();
+        let fg_tid = if !fg.is_null() {
+            GetWindowThreadProcessId(fg, ptr::null_mut())
+        } else {
+            0
+        };
+        let target_tid = GetWindowThreadProcessId(hwnd, ptr::null_mut());
+
+        let attached_fg =
+            fg_tid != 0 && fg_tid != cur_tid && AttachThreadInput(cur_tid, fg_tid, 1) != 0;
+        let attached_target = target_tid != 0
+            && target_tid != cur_tid
+            && target_tid != fg_tid
+            && AttachThreadInput(cur_tid, target_tid, 1) != 0;
+
+        let was_topmost = (GetWindowLongW(hwnd, GWL_EXSTYLE) as u32) & WS_EX_TOPMOST != 0;
+        if !was_topmost {
+            let _ = SetWindowPos(
+                hwnd,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+            let _ = SetWindowPos(
+                hwnd,
+                HWND_NOTOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
             );
         }
+        let _ = BringWindowToTop(hwnd);
+        let _ = SetForegroundWindow(hwnd);
+
+        if attached_target {
+            let _ = AttachThreadInput(cur_tid, target_tid, 0);
+        }
+        if attached_fg {
+            let _ = AttachThreadInput(cur_tid, fg_tid, 0);
+        }
+
+        // The foreground thread processes activation asynchronously.
+        for _ in 0..10 {
+            if is_foreground_or_same_process(hwnd) {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        ensure!(
+            is_foreground_or_same_process(hwnd),
+            "Windows declined foreground activation"
+        );
         Ok(())
     }
 }

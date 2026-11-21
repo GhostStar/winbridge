@@ -1,13 +1,13 @@
 use super::{foreground, hid_scancode::scancode, keyboard, send, text};
 use crate::{
-    proto::{control_message::Payload, MouseEvent, WindowInfo, WindowUpdated},
+    proto::{control_message::Payload, FocusWindow, MouseEvent, WindowInfo, WindowUpdated},
     win32,
 };
 use anyhow::{bail, ensure, Context, Result};
 use std::{collections::BTreeSet, io, mem, ptr, sync::mpsc as sync};
 use tokio::sync::oneshot;
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, HANDLE},
+    Foundation::{CloseHandle, GetLastError, ERROR_ACCESS_DENIED, HANDLE},
     Security::*,
     System::Threading::*,
     UI::{Input::KeyboardAndMouse::*, WindowsAndMessaging::*},
@@ -97,6 +97,21 @@ fn check_access(pid: u32) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Returns true when the target process is elevated OR protected (e.g. anti-cheat stripping
+/// `OpenProcess`/`OpenProcessToken` rights from a medium-integrity user session worker),
+/// so input should be routed via the `LocalSystem + TokenUIAccess=1` secure-helper.
+fn needs_privileged_helper(pid: u32) -> bool {
+    unsafe {
+        let proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if proc.is_null() {
+            return GetLastError() == ERROR_ACCESS_DENIED;
+        }
+        let target_elevated = elevated(proc);
+        CloseHandle(proc);
+        target_elevated != Some(false) && elevated(GetCurrentProcess()) == Some(false)
+    }
 }
 
 #[derive(Default)]
@@ -370,6 +385,22 @@ impl State {
         payload: Payload,
         focus: impl Fn() -> Result<()>,
     ) -> Result<Option<WindowUpdated>> {
+        let focus_best_effort = || {
+            if let Err(err) = focus() {
+                // If an elevated window currently holds foreground, ask LocalSystem helper to switch focus.
+                if crate::helper::is_configured() {
+                    let req = Payload::FocusWindow(FocusWindow {
+                        window_id: current.window_id,
+                        focused: true,
+                    });
+                    if let Err(herr) = crate::helper::forward_input(current.window_id, &req) {
+                        tracing::debug!(window_id = current.window_id, error = %herr, "helper focus fallback declined");
+                    }
+                } else {
+                    tracing::debug!(window_id = current.window_id, error = %err, "foreground activation declined; injecting input anyway");
+                }
+            }
+        };
         match payload {
             Payload::ResizeWindow(r) => {
                 let window = win32::resize(current.window_id, r.width, r.height)?;
@@ -380,7 +411,15 @@ impl State {
             }
             Payload::FocusWindow(r) => {
                 if r.focused {
-                    focus()?;
+                    if let Err(err) = focus() {
+                        if crate::helper::is_configured() {
+                            return crate::helper::forward_input(
+                                current.window_id,
+                                &Payload::FocusWindow(r),
+                            );
+                        }
+                        return Err(err);
+                    }
                 }
             }
             Payload::CloseWindow(_) => {
@@ -399,17 +438,17 @@ impl State {
                         },
                     );
                 },
-                3 => focus()?,
+                3 => focus_best_effort(),
                 _ => bail!("unknown window action"),
             },
             Payload::MouseEvent(ev) => {
                 if ev.kind == 2 {
-                    focus()?;
+                    focus_best_effort();
                 }
                 self.mouse(current, ev, false)?;
             }
             Payload::KeyEvent(ev) => {
-                focus()?;
+                focus_best_effort();
                 send(&[key_input(ev.hid_usage, ev.is_down)?])?;
                 if ev.is_down {
                     self.keys.insert(ev.hid_usage);
@@ -418,7 +457,7 @@ impl State {
                 }
             }
             Payload::TextInput(t) => {
-                focus()?;
+                focus_best_effort();
                 text(&t.text)?;
             }
             _ => bail!("unsupported input command"),
@@ -446,8 +485,9 @@ impl State {
             let current = win32::info(target.window_id)?;
             ensure!(current.pid == target.pid, "window handle has been reused");
             let hwnd = win32::checked_hwnd(current.window_id)?;
-            if check_access(current.pid).is_err() {
-                // Target runs with Administrator privileges; forward to LocalSystem + UIAccess helper.
+            if needs_privileged_helper(current.pid) {
+                // Target runs with Administrator privileges or anti-cheat handle protection;
+                // forward to LocalSystem + UIAccess helper.
                 return crate::helper::forward_input(target.window_id, &payload);
             }
             let focus = || -> Result<()> {
