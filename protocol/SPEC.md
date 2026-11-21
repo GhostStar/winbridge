@@ -161,6 +161,7 @@ After the `WBRGMED\x01` + 16-byte `session_id` handshake returns `0x00`, Windows
   - **mDNS / Bonjour** LAN auto-discovery (`_winbridge._tcp.local.`), exponential-backoff auto-reconnect with window restoration.
   - **HEVC (`VIDEO_CODEC_HEVC_ANNEX_B = 2`)** hardware encode/decode and **Opus (`AUDIO_CODEC_OPUS = 11`)** 48 kHz stereo 20 ms low-bandwidth audio alongside PCM lossless (`10`).
   - **Smart 3D Game Relative Mouse Lock** (`MOUSE_EVENT_KIND_RELATIVE_MOVE = 5`), **Gamepad passthrough** (`GamepadState`), and **chunked Drag-and-Drop File Transfer** (`FileTransferStart` / `FileTransferChunk` / `FileTransferResult`).
+  - **Microphone uplink** (`MicChunk`, field 54): 48 kHz stereo s16le from macOS to a Windows playback endpoint whose friendly name matches `--mic-device` or contains `CABLE Input`, `VB-Audio`, or `WinBridge Mic`. If no such endpoint exists the host returns `HostError` and does not play the mic through the default speakers. Other applications can record it only when that endpoint is a virtual cable.
 - **Future (v0.3+)**:
   - Optional **QUIC** transport (`quinn` + `NWProtocolQUIC`) for per-window stream multiplexing without head-of-line blocking on lossy Wi-Fi / WAN links.
   - Per-process WASAPI audio loopback (`ActivateAudioInterfaceAsync` on Win10 20348+ / Win11).
