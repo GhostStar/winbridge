@@ -103,6 +103,10 @@ import Testing
         .launchApp(LaunchApp(appId: "0123456789abcdef", autoSubscribe: true, targetFps: 60, maxBitrateKbps: 15000, followPopups: true, captureMode: .monitorCrop)),
         .launchAppRes(LaunchAppResult(appId: "0123456789abcdef", started: true, message: "")),
         .hostError(HostError(windowId: 100, code: .displayDisconnected, message: "No monitor")),
+        .listMonitorsRes(ListMonitorsResponse(monitors: [
+            MonitorInfo(monitorId: SyntheticWindow.monitorBase, deviceName: "\\\\.\\DISPLAY2", friendlyName: "IddCx Sample", width: 2560, height: 1440, x: 1920, virtualAdapter: true),
+        ])),
+        .setVirtualDisplay(SetVirtualDisplay(enable: true, width: 2560, height: 1440, hz: 60)),
     ]
     for (i, payload) in cases.enumerated() {
         let msg = ControlMessage(seq: UInt64(i + 1), timestampUs: 500, payload: payload)
