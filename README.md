@@ -42,7 +42,7 @@ flowchart LR
 ### 1. 安全加固（Security Hardening）
 - **TLS 1.3 端到端加密 + TOFU 指纹锁定**：默认使用 `rustls`（`ring`）与 macOS `Network.framework` 对控制与媒体双通道进行 TLS 1.3 加密。首次连接自动记录主机证书 SHA-256 指纹（TOFU）；若证书发生意外变化则阻断连接并弹窗警告（支持调试模式 `--no-tls`）。
 - **零明文凭据暴露**：
-  - Windows 服务模式将口令与配置存储在仅限 `SYSTEM` 与 `Administrators` 可读的 `C:\\ProgramData\\WinBridge\\service.conf`（SDDL 强隔离），SCM `ImagePath` 与子进程命令行中**不再出现任何 Token 或私钥**（由 Session 0 通过匿名 `stdin` 管道传递给 Worker）。
+  - Windows 服务模式将口令与配置存储在仅限 `SYSTEM` 与 `Administrators` 可读的 `C:\u005cProgramData\u005cWinBridge\u005cservice.conf`（SDDL 强隔离），SCM `ImagePath` 与子进程命令行中**不再出现任何 Token 或私钥**（由 Session 0 通过匿名 `stdin` 管道传递给 Worker）。
   - macOS 客户端将 `authToken` 自动迁移并加密保存在原生 **macOS Keychain** 中。
 - **权限面最小化与防爆破**：
   - `--secure-helper` 改用 **Windows Named Pipe**（禁用远端访问 `PIPE_REJECT_REMOTE_CLIENTS`、严格 SDDL DACL）并在每次连接后通过 **`GetNamedPipeClientProcessId`** 校验调用方必须是服务启动的精确 `--session-worker` PID。
@@ -57,7 +57,7 @@ flowchart LR
   - 自动感知 Windows 游戏指针显隐（如游戏内按住 `Alt` 或弹出菜单时自动切回限域可见指针，返回 3D 战斗视角自动切换隐藏相对视角 `dx/dy`）。
   - 支持按进程记住灵敏度倍率与自动开启游戏锁定；可选「背景禁悬停」避免多窗误触。
 - **可切换性能 HUD（`⇧⌘H`）**：远端窗口右上角半透明浮层实时展示编码格式、FPS、实时码率（Mbps）、RTT 与分辨率（完全鼠标穿透）。
-- **跨设备拖放传文件（Mac → Windows）**：直接将 Mac 文件拖入任意远端窗口，分块安全传输至 Windows `Downloads\\WinBridge\\`（自动防路径穿越与重名去重，单文件上限 512 MiB）。
+- **跨设备拖放传文件（Mac → Windows）**：直接将 Mac 文件拖入任意远端窗口，分块安全传输至 Windows `Downloads\u005cWinBridge\u005c`（自动防路径穿越与重名去重，单文件上限 512 MiB）。
 - **手柄透传（可选）**：macOS 原生 `GameController.framework`（Xbox / DualSense / Switch Pro）转发至 Windows；若本机已安装 [ViGEmBus](https://github.com/nefarius/ViGEmBus) 并将 `ViGEmClient.dll` 置于同目录，自动虚拟 Xbox 360 手柄。
 - **Mac 麦克风上行（可选）**：菜单「把 Mac 麦克风发到 Windows」以 48 kHz 立体声送到一块**已经存在**的虚拟播放设备（名称含 `CABLE Input` / `VB-Audio` / `WinBridge Mic`，或 `--mic-device \"CABLE Input\"`）。没有这块设备时会报错，**不会**假装成功，也**不会**从默认扬声器放出来。其他软件要录到它，得把录音设备选成对应的线缆。
 - **固定本地代码签名脚本**：提供 `./scripts/setup_codesign.sh`，重新打包 `WinBridge.app` 后保持签名身份不变，彻底避免 macOS 15/26 反复重置「本地网络」与钥匙串权限。
@@ -95,17 +95,17 @@ cargo test --locked
 cargo build --release --locked
 
 # 推荐：以管理员 PowerShell 安装为系统服务（自动生成强随机 Token 并写入受保护的 service.conf，支持 UAC & 锁屏点击）
-.\\target\\release\\win-host.exe --install-service --bind 0.0.0.0 --port 9876
+.\u005ctarget\u005crelease\u005cwin-host.exe --install-service --bind 0.0.0.0 --port 9876
 
 # 或显式指定自定义 Token 与允许的来源网段
-.\\target\\release\\win-host.exe --install-service --bind 0.0.0.0 --port 9876 --token "your-LAN-secret" --allow-cidr 192.168.1.0/24
+.\u005ctarget\u005crelease\u005cwin-host.exe --install-service --bind 0.0.0.0 --port 9876 --token "your-LAN-secret" --allow-cidr 192.168.1.0/24
 
 # 前台直接运行（开发/单次调试；亦可通过环境变量 WINBRIDGE_TOKEN 或 --token-file 传入口令）
 $env:WINBRIDGE_TOKEN = "your-LAN-secret"
-.\\target\\release\\win-host.exe --bind 0.0.0.0 --port 9876
+.\u005ctarget\u005crelease\u005cwin-host.exe --bind 0.0.0.0 --port 9876
 
 # 停止并卸载系统服务
-.\\target\\release\\win-host.exe --uninstall-service
+.\u005ctarget\u005crelease\u005cwin-host.exe --uninstall-service
 ```
 
 常用启动参数：
@@ -139,7 +139,7 @@ open build/WinBridge.app
    - `⇧⌘L`：开启 / 关闭智能 3D 游戏鼠标锁定（`Ctrl+Option` 随时紧急释放）
    - `⇧⌘H`：显示 / 隐藏右上角实时性能 HUD（FPS / Mbps / RTT / 分辨率）
    - `⌘,`：唤出 WinBridge 管理窗口；`Option + 点红叉`（或 2 秒内连点两次）：仅在 Mac 端脱离而不关闭 Windows 软件
-   - 拖放 Mac 文件到任意远端窗口：自动发送至 Windows `Downloads\\WinBridge\\`
+   - 拖放 Mac 文件到任意远端窗口：自动发送至 Windows `Downloads\u005cWinBridge\u005c`
 
 ---
 
