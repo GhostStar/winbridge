@@ -1373,6 +1373,7 @@ struct ControlMessage: Equatable, Sendable {
         case filePullReq(FilePullRequest)              // 67
         case clipboardFilesNotice(ClipboardFilesNotice) // 68
         case hostError(HostError)                       // 70
+        case unknown(Int)                               // Forward-compatible unknown oneof field
     }
 
     var seq: UInt64 = 0
@@ -1419,6 +1420,7 @@ struct ControlMessage: Equatable, Sendable {
         case .filePullReq(let m): w.writeMessage(field: 67, m.encode(), forceEmit: true)
         case .clipboardFilesNotice(let m): w.writeMessage(field: 68, m.encode(), forceEmit: true)
         case .hostError(let m): w.writeMessage(field: 70, m.encode(), forceEmit: true)
+        case .unknown: break
         }
         return w.data
     }
@@ -1428,6 +1430,7 @@ struct ControlMessage: Equatable, Sendable {
         var seq: UInt64 = 0
         var ts: UInt64 = 0
         var payload: Payload?
+        var unknownField: Int?
         while !r.isAtEnd {
             let (field, wire) = try r.readTag()
             switch field {
@@ -1468,10 +1471,17 @@ struct ControlMessage: Equatable, Sendable {
             case 67: payload = .filePullReq(try FilePullRequest.decode(from: try r.readBytes()))
             case 68: payload = .clipboardFilesNotice(try ClipboardFilesNotice.decode(from: try r.readBytes()))
             case 70: payload = .hostError(try HostError.decode(from: try r.readBytes()))
-            default: try r.skip(wireType: wire)
+            default:
+                unknownField = field
+                try r.skip(wireType: wire)
             }
         }
-        guard let payload else { throw ProtoError.missingPayload }
-        return ControlMessage(seq: seq, timestampUs: ts, payload: payload)
+        if let payload {
+            return ControlMessage(seq: seq, timestampUs: ts, payload: payload)
+        }
+        if let unknownField {
+            return ControlMessage(seq: seq, timestampUs: ts, payload: .unknown(unknownField))
+        }
+        throw ProtoError.missingPayload
     }
 }

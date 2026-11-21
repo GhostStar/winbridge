@@ -209,6 +209,13 @@ import Testing
         ))
     )
     #expect(try ControlMessage.decode(from: notice.encode()) == notice)
+
+    // Unknown future oneof field should decode safely as `.unknown` rather than disconnecting.
+    var futureWriter = ProtoWriter()
+    futureWriter.writeUInt64(field: 1, 99)
+    futureWriter.writeMessage(field: 99, Data([0x08, 0x01]), forceEmit: true)
+    let futureDecoded = try ControlMessage.decode(from: futureWriter.data)
+    #expect(futureDecoded.payload == .unknown(99))
 }
 
 @Test func filePullHelpersHandleWindowsPathsAndUnsafeNames() {
