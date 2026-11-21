@@ -22,6 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var managerController: ManagerWindowController?
     private var filePullController: FilePullWindowController?
     private var quickLauncherController: QuickLauncherWindowController?
+    private var shortcutsController: ShortcutsWindowController?
     private var statusItem: NSStatusItem?
     private var windowMenu: NSMenu?
 
@@ -42,9 +43,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         state.onOpenManager = { [weak self] in
             self?.showManager()
         }
-        globalHotKey.registerOptionSpace { [weak self] in
-            self?.toggleQuickLauncherAction()
+        state.onShortcutsChanged = { [weak self] in
+            self?.registerConfiguredHotKey()
+            self?.rebuildWindowMenu()
+            self?.rebuildStatusMenu()
         }
+        registerConfiguredHotKey()
         state.startDiscovery()
 
         showManager()
@@ -67,6 +71,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         state.stopDiscovery()
         state.unlockAllPointers()
         state.disconnect()
+    }
+
+    private func registerConfiguredHotKey() {
+        globalHotKey.register(shortcut: state.settings.shortcuts.quickLauncher) { [weak self] in
+            self?.toggleQuickLauncherAction()
+        }
+    }
+
+    @objc private func showShortcutsAction() {
+        if shortcutsController == nil {
+            shortcutsController = ShortcutsWindowController(state: state)
+        }
+        shortcutsController?.show()
     }
 
     @objc private func toggleQuickLauncherAction() {
@@ -188,6 +205,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let appItem = NSMenuItem()
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "打开 WinBridge 管理窗口", action: #selector(showManager), keyEquivalent: ",")
+        appMenu.addItem(withTitle: "快捷键设置…", action: #selector(showShortcutsAction), keyEquivalent: "")
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "退出 WinBridge", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
@@ -226,9 +244,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func rebuildWindowMenu() {
         guard let winMenu = windowMenu else { return }
+        let sc = state.settings.shortcuts
         winMenu.removeAllItems()
         let launcherItem = NSMenuItem(
-            title: "快速启动 / 切换窗口 (⌥Space)",
+            title: "快速启动 / 切换窗口 (\(sc.quickLauncher.displayString))",
             action: #selector(toggleQuickLauncherAction),
             keyEquivalent: ""
         )
@@ -237,32 +256,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let lockItem = NSMenuItem(
             title: "锁定 / 解锁游戏鼠标 (3D 相对视角)",
             action: #selector(togglePointerLockAction),
-            keyEquivalent: "L"
+            keyEquivalent: sc.toggleGameLock.menuKeyEquivalent
         )
-        lockItem.keyEquivalentModifierMask = [.command, .shift]
+        lockItem.keyEquivalentModifierMask = sc.toggleGameLock.modifierFlags
         winMenu.addItem(lockItem)
         winMenu.addItem(withTitle: "记住当前游戏自动开启鼠标锁定", action: #selector(toggleAutoGameLockAction), keyEquivalent: "")
         let hudItem = NSMenuItem(
             title: "显示 / 隐藏性能 HUD",
             action: #selector(toggleHudAction),
-            keyEquivalent: "H"
+            keyEquivalent: sc.toggleHud.menuKeyEquivalent
         )
-        hudItem.keyEquivalentModifierMask = [.command, .shift]
+        hudItem.keyEquivalentModifierMask = sc.toggleHud.modifierFlags
         winMenu.addItem(hudItem)
         let pinItem = NSMenuItem(
             title: "窗口置顶（当前桌面）",
             action: #selector(togglePinOnTopAction),
-            keyEquivalent: "P"
+            keyEquivalent: sc.pinOnTop.menuKeyEquivalent
         )
-        pinItem.keyEquivalentModifierMask = [.command, .shift]
+        pinItem.keyEquivalentModifierMask = sc.pinOnTop.modifierFlags
         pinItem.state = state.isActiveWindowPinnedOnTop() ? .on : .off
         winMenu.addItem(pinItem)
         let muteItem = NSMenuItem(
             title: "静音当前窗口音频",
             action: #selector(toggleMuteWindowAction),
-            keyEquivalent: "M"
+            keyEquivalent: sc.muteWindow.menuKeyEquivalent
         )
-        muteItem.keyEquivalentModifierMask = [.command, .shift]
+        muteItem.keyEquivalentModifierMask = sc.muteWindow.modifierFlags
         muteItem.state = state.isActiveWindowMuted() ? .on : .off
         winMenu.addItem(muteItem)
         winMenu.addItem(withTitle: "刷新当前窗口关键帧 (IDR)", action: #selector(requestKeyframeAction), keyEquivalent: "")
@@ -270,9 +289,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let pullClipItem = NSMenuItem(
             title: "取回 Windows 剪贴板文件 (写入 Mac ⌘V)",
             action: #selector(pullClipboardFilesAction),
-            keyEquivalent: "V"
+            keyEquivalent: sc.pullClipboardFiles.menuKeyEquivalent
         )
-        pullClipItem.keyEquivalentModifierMask = [.command, .shift, .option]
+        pullClipItem.keyEquivalentModifierMask = sc.pullClipboardFiles.modifierFlags
         winMenu.addItem(pullClipItem)
         let autoPullItem = NSMenuItem(
             title: "剪贴板文件自动取回 (≤20 MB)",
@@ -283,6 +302,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         winMenu.addItem(autoPullItem)
         appendVideoQualityItems(to: winMenu, includeProcess: true)
         winMenu.addItem(.separator())
+        winMenu.addItem(withTitle: "快捷键设置…", action: #selector(showShortcutsAction), keyEquivalent: "")
         let transportItem = NSMenuItem(title: "传输通道", action: nil, keyEquivalent: "")
         let transportMenu = NSMenu()
         for pref in TransportPreference.allCases {
@@ -327,7 +347,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         menu.addItem(.separator())
         let launcherStatusItem = NSMenuItem(
-            title: "快速启动 / 切换窗口 (⌥Space)",
+            title: "快速启动 / 切换窗口 (\(state.settings.shortcuts.quickLauncher.displayString))",
             action: #selector(toggleQuickLauncherAction),
             keyEquivalent: ""
         )

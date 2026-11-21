@@ -257,3 +257,20 @@ pub(crate) fn resize(id: u64, width: u32, height: u32) -> Result<WindowInfo> {
     }
     info(id)
 }
+
+/// Gently restores a minimized window so WGC capture can immediately produce live frames.
+pub fn restore_if_minimized(id: u64) -> bool {
+    if id == DESKTOP_WINDOW_ID {
+        return false;
+    }
+    let Ok(hwnd) = checked_hwnd(id) else {
+        return false;
+    };
+    unsafe {
+        if IsIconic(hwnd) != 0 {
+            let _ = ShowWindowAsync(hwnd, SW_RESTORE);
+            return true;
+        }
+    }
+    false
+}

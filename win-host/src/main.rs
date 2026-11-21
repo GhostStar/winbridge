@@ -198,6 +198,21 @@ fn main() -> Result<()> {
         win_host::config::Codec::Auto | win_host::config::Codec::Hevc
     ) && capture::supports_hevc();
     let caps = win_host::net::VideoCaps { h264, hevc };
+    if !(config.bind.is_loopback() && config.no_discovery) {
+        win32::tray::spawn(win32::tray::TrayContext {
+            bind_ip: config.bind,
+            port: config.port,
+            token: config.token.clone(),
+            fingerprint: tls_material.as_ref().map(|m| m.fingerprint.clone()),
+            use_tls: !config.no_tls,
+            allow_exit: !config.session_worker,
+            logs_dir: if config.session_worker {
+                security::program_data_dir()
+            } else {
+                security::user_data_dir()
+            },
+        });
+    }
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?

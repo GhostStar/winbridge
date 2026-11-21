@@ -12,9 +12,9 @@ final class GlobalHotKey {
 
     private static var activeInstance: GlobalHotKey?
 
-    /// Registers `Option + Space` (`kVK_Space` + `optionKey`).
+    /// Registers a customizable global hotkey (defaults to `Option + Space`).
     @discardableResult
-    func registerOptionSpace(handler: @escaping () -> Void) -> Bool {
+    func register(shortcut: KeyShortcut, handler: @escaping () -> Void) -> Bool {
         unregister()
         self.callback = handler
         Self.activeInstance = self
@@ -58,19 +58,19 @@ final class GlobalHotKey {
 
         let id = EventHotKeyID(signature: Self.signature, id: Self.hotKeyId)
         let statusReg = RegisterEventHotKey(
-            UInt32(kVK_Space),
-            UInt32(optionKey),
+            UInt32(shortcut.keyCode),
+            shortcut.carbonModifiers,
             id,
             GetApplicationEventTarget(),
             0,
             &hotKeyRef
         )
         guard statusReg == noErr else {
-            ClientLogger.shared.error("GlobalHotKey RegisterEventHotKey(Option+Space) failed: \(statusReg)")
+            ClientLogger.shared.error("GlobalHotKey RegisterEventHotKey(\(shortcut.displayString)) failed: \(statusReg)")
             unregister()
             return false
         }
-        ClientLogger.shared.info("Registered global hotkey Option+Space for Quick Launcher")
+        ClientLogger.shared.info("Registered global hotkey \(shortcut.displayString) for Quick Launcher")
         return true
     }
 

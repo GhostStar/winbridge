@@ -60,6 +60,9 @@ final class AppState {
             if !settings.autoReconnect && oldValue.autoReconnect {
                 cancelReconnect()
             }
+            if oldValue.shortcuts != settings.shortcuts {
+                onShortcutsChanged?()
+            }
         }
     }
 
@@ -114,6 +117,7 @@ final class AppState {
 
     var onStateChanged: (() -> Void)?
     var onOpenManager: (() -> Void)?
+    var onShortcutsChanged: (() -> Void)?
 
     init() {
         self.settings = SettingsStore.load()
@@ -1747,6 +1751,7 @@ final class AppState {
         wc.cmdMapsToCtrl = { [weak self] in self?.settings.cmdMapsToCtrl ?? true }
         wc.mouseSensitivity = { [weak self] in self?.mouseSensitivity(forProcess: procName) ?? 1.0 }
         wc.suppressInactiveHover = { [weak self] in self?.settings.suppressInactiveHover ?? false }
+        wc.shortcuts = { [weak self] in self?.settings.shortcuts ?? .defaults }
         wc.showPerformanceHud = { [weak self] in self?.settings.showPerformanceHud ?? false }
         wc.currentRttMs = { [weak self] in self?.rttMs }
         wc.onSendControl = { [weak self] payload in self?.sendControl(payload) }

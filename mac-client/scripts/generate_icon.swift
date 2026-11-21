@@ -9,10 +9,13 @@ import QuartzCore
 
 let scriptURL = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
 let macClientRoot = scriptURL.deletingLastPathComponent().deletingLastPathComponent()
+let repoRoot = macClientRoot.deletingLastPathComponent()
 let resourcesDir = macClientRoot.appendingPathComponent("Resources", isDirectory: true)
 let iconsetDir = resourcesDir.appendingPathComponent("AppIcon.iconset", isDirectory: true)
 let icnsURL = resourcesDir.appendingPathComponent("AppIcon.icns")
 let masterPNGURL = resourcesDir.appendingPathComponent("AppIcon-1024.png")
+let winAssetsDir = repoRoot.appendingPathComponent("win-host/assets", isDirectory: true)
+let winIcoURL = winAssetsDir.appendingPathComponent("winbridge.ico")
 
 func pngData(_ image: CGImage) throws -> Data {
     let rep = NSBitmapImageRep(cgImage: image)
@@ -224,7 +227,7 @@ func makeDarkVectorArtwork() throws -> CGImage {
     return out
 }
 
-func renderAppleSquircle(artwork: CGImage) throws -> CGImage {
+func renderAppleSquircle(artwork: CGImage, inset: CGFloat = 100) throws -> CGImage {
     let size = 1024
     let cs = CGColorSpaceCreateDeviceRGB()
     guard let ctx = CGContext(
@@ -243,21 +246,23 @@ func renderAppleSquircle(artwork: CGImage) throws -> CGImage {
     rootLayer.frame = CGRect(x: 0, y: 0, width: size, height: size)
     rootLayer.backgroundColor = CGColor.clear
 
-    let iconFrame = CGRect(x: 100, y: 100, width: 824, height: 824)
+    let box = CGFloat(size) - inset * 2
+    let radius = box * 0.225
+    let iconFrame = CGRect(x: inset, y: inset, width: box, height: box)
     let shadowLayer = CALayer()
     shadowLayer.frame = iconFrame
     shadowLayer.backgroundColor = CGColor(red: 0.04, green: 0.06, blue: 0.12, alpha: 1.0)
-    shadowLayer.cornerRadius = 185.4
+    shadowLayer.cornerRadius = radius
     shadowLayer.cornerCurve = .continuous
     shadowLayer.shadowColor = CGColor(red: 0, green: 0, blue: 0, alpha: 1.0)
-    shadowLayer.shadowOpacity = 0.34
-    shadowLayer.shadowOffset = CGSize(width: 0, height: -14)
-    shadowLayer.shadowRadius = 22
+    shadowLayer.shadowOpacity = inset >= 80 ? 0.34 : 0.22
+    shadowLayer.shadowOffset = CGSize(width: 0, height: inset >= 80 ? -14 : -6)
+    shadowLayer.shadowRadius = inset >= 80 ? 22 : 12
     rootLayer.addSublayer(shadowLayer)
 
     let maskLayer = CALayer()
     maskLayer.frame = iconFrame
-    maskLayer.cornerRadius = 185.4
+    maskLayer.cornerRadius = radius
     maskLayer.cornerCurve = .continuous
     maskLayer.masksToBounds = true
     maskLayer.contents = artwork
@@ -298,7 +303,8 @@ if fm.fileExists(atPath: iconsetDir.path) {
     try fm.removeItem(at: iconsetDir)
 }
 
-let master = try renderAppleSquircle(artwork: try makeDarkVectorArtwork())
+let rawArtwork = try makeDarkVectorArtwork()
+let master = try renderAppleSquircle(artwork: rawArtwork, inset: 100)
 try savePNG(master, to: masterPNGURL)
 
 // Native Apple ICNS container with full 1x & @2x Retina PNG representations (16px..1024px).
@@ -340,4 +346,41 @@ withUnsafeBytes(of: &totalLen) { icns.append(contentsOf: $0) }
 icns.append(body)
 try icns.write(to: icnsURL)
 
-print("Generated \(icnsURL.path) (\(icns.count) bytes) and \(masterPNGURL.path)")
+// Also emit a matching multi-resolution Windows ICO (PNG-in-ICO, 16..256px) for win-host.exe + system tray.
+try fm.createDirectory(at: winAssetsDir, withIntermediateDirectories: true)
+let winMaster = try renderAppleSquircle(artwork: rawArtwork, inset: 48)
+let icoSizes = [16, 24, 32, 48, 64, 128, 256]
+let icoPayloads: [(Int, Data)] = try icoSizes.map { px in
+    let img = try resizedImage(winMaster, pixels: px)
+    return (px, try pngData(img))
+}
+
+func appendLE<T: FixedWidthInteger>(_ val: T, to data: inout Data) {
+    var le = val.littleEndian
+    withUnsafeBytes(of: &le) { data.append(contentsOf: $0) }
+}
+
+var ico = Data()
+appendLE(UInt16(0), to: &ico)                 // idReserved
+appendLE(UInt16(1), to: &ico)                 // idType (1 = icon)
+appendLE(UInt16(icoPayloads.count), to: &ico) // idCount
+
+var offset = UInt32(6 + icoPayloads.count * 16)
+for (px, payload) in icoPayloads {
+    let dim: UInt8 = px >= 256 ? 0 : UInt8(px)
+    ico.append(dim)                               // bWidth
+    ico.append(dim)                               // bHeight
+    ico.append(0)                                 // bColorCount
+    ico.append(0)                                 // bReserved
+    appendLE(UInt16(1), to: &ico)                 // wPlanes
+    appendLE(UInt16(32), to: &ico)                // wBitCount
+    appendLE(UInt32(payload.count), to: &ico)     // dwBytesInRes
+    appendLE(offset, to: &ico)                    // dwImageOffset
+    offset += UInt32(payload.count)
+}
+for (_, payload) in icoPayloads {
+    ico.append(payload)
+}
+try ico.write(to: winIcoURL)
+
+print("Generated \(icnsURL.path) (\(icns.count) bytes) and \(winIcoURL.path) (\(ico.count) bytes)")

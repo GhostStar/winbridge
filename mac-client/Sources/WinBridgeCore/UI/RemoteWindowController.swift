@@ -42,6 +42,7 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
     var syncWindowResize: () -> Bool = { false }
     var mouseSensitivity: () -> Float = { 1.0 }
     var suppressInactiveHover: () -> Bool = { false }
+    var shortcuts: () -> ShortcutBindings = { .defaults }
     var currentRttMs: () -> Double? = { nil }
     var showPerformanceHud: () -> Bool = { false }
 
@@ -126,6 +127,7 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
         remoteView.cmdMapsToCtrl = { [weak self] in self?.cmdMapsToCtrl() ?? true }
         remoteView.mouseSensitivity = { [weak self] in self?.mouseSensitivity() ?? 1.0 }
         remoteView.suppressInactiveHover = { [weak self] in self?.suppressInactiveHover() ?? false }
+        remoteView.shortcuts = { [weak self] in self?.shortcuts() ?? .defaults }
         remoteView.onSendControl = { [weak self] payload in self?.onSendControl?(payload) }
         remoteView.onRequestQuit = { [weak self] in self?.onRequestQuit?() }
         remoteView.onOpenManager = { [weak self] in self?.onOpenManager?() }

@@ -140,6 +140,7 @@ struct ClientSettings {
     var processAutoGameLock: [String: Bool]
     var appCaptureModes: [String: CaptureMode]
     var pinnedAppIds: [String]
+    var shortcuts: ShortcutBindings
 }
 
 enum SettingsStore {
@@ -262,6 +263,13 @@ enum SettingsStore {
             }
         }
         let pinned = defaults.stringArray(forKey: "winbridge.pinnedAppIds") ?? []
+        let shortcuts: ShortcutBindings
+        if let rawShortcuts = defaults.data(forKey: "winbridge.shortcuts"),
+           let decoded = try? JSONDecoder().decode(ShortcutBindings.self, from: rawShortcuts) {
+            shortcuts = decoded
+        } else {
+            shortcuts = .defaults
+        }
 
         return ClientSettings(
             host: host,
@@ -295,7 +303,8 @@ enum SettingsStore {
             processMouseSensitivity: procSens,
             processAutoGameLock: procAutoLock,
             appCaptureModes: appModes,
-            pinnedAppIds: pinned
+            pinnedAppIds: pinned,
+            shortcuts: shortcuts
         )
     }
 
@@ -342,5 +351,8 @@ enum SettingsStore {
         defaults.set(s.processAutoGameLock, forKey: "winbridge.processAutoGameLock")
         defaults.set(s.appCaptureModes.mapValues { Int($0.rawValue) }, forKey: "winbridge.appCaptureModes")
         defaults.set(s.pinnedAppIds, forKey: "winbridge.pinnedAppIds")
+        if let encodedShortcuts = try? JSONEncoder().encode(s.shortcuts) {
+            defaults.set(encodedShortcuts, forKey: "winbridge.shortcuts")
+        }
     }
 }

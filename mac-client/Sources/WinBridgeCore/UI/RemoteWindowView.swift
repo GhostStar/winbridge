@@ -30,6 +30,7 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
     var cmdMapsToCtrl: () -> Bool = { true }
     var mouseSensitivity: () -> Float = { 1.0 }
     var suppressInactiveHover: () -> Bool = { false }
+    var shortcuts: () -> ShortcutBindings = { .defaults }
     var onSendControl: ((ControlMessage.Payload) -> Void)?
     var onRequestQuit: (() -> Void)?
     var onOpenManager: (() -> Void)?
@@ -61,6 +62,7 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
     private var trackingArea: NSTrackingArea?
     private var activeCursor: NSCursor = .arrow
     private var mouseInside = false
+    private var pinchAccumulator: Double = 0.0
 
     // Keyboard & IME state
     private var markedText = NSMutableAttributedString()
@@ -580,6 +582,37 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
         )))
     }
 
+    /// Maps macOS two-finger trackpad pinch-to-zoom to Windows Ctrl+MouseWheel at cursor position.
+    override func magnify(with event: NSEvent) {
+        if event.phase == .began {
+            pinchAccumulator = 0
+        }
+        pinchAccumulator += Double(event.magnification)
+        let threshold = 0.045
+        if abs(pinchAccumulator) >= threshold {
+            let steps = Int((pinchAccumulator / threshold).rounded(.towardZero))
+            if steps != 0 {
+                pinchAccumulator -= Double(steps) * threshold
+                let (nx, ny) = normalizedPoint(from: event)
+                let wheelY = Float(steps) * 120.0
+                onSendControl?(.mouseEvent(MouseEvent(
+                    windowId: windowId,
+                    kind: .wheel,
+                    normX: nx,
+                    normY: ny,
+                    button: .unspecified,
+                    wheelDeltaX: 0,
+                    wheelDeltaY: wheelY,
+                    modifiers: KeyModifierMask.lCtrl.rawValue,
+                    isRelative: gameLockState == .relativeLocked
+                )))
+            }
+        }
+        if event.phase == .ended || event.phase == .cancelled {
+            pinchAccumulator = 0
+        }
+    }
+
     private func mapOtherButton(_ buttonNumber: Int) -> MouseButton {
         switch buttonNumber {
         case 2: return .middle
@@ -655,34 +688,29 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
             return super.performKeyEquivalent(with: event)
         }
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        guard flags.contains(.command) else {
-            return super.performKeyEquivalent(with: event)
-        }
-
-        // Cmd+Shift+L toggles Smart 3D Game Mouse Lock locally on the focused remote window.
-        if flags == [.command, .shift], event.keyCode == UInt16(kVK_ANSI_L) {
+        let sc = shortcuts()
+        if sc.toggleGameLock.matches(event: event) {
             setGameLockEnabled(!gameLockEnabled)
             return true
         }
-        // Cmd+Shift+H toggles the Performance HUD overlay across remote windows.
-        if flags == [.command, .shift], event.keyCode == UInt16(kVK_ANSI_H) {
+        if sc.toggleHud.matches(event: event) {
             onToggleHud?()
             return true
         }
-        // Cmd+Shift+P toggles Always-on-Top PiP floating mode (staying on the current Space).
-        if flags == [.command, .shift], event.keyCode == UInt16(kVK_ANSI_P) {
+        if sc.pinOnTop.matches(event: event) {
             onTogglePinOnTop?()
             return true
         }
-        // Cmd+Shift+M toggles per-window audio mute for this remote window.
-        if flags == [.command, .shift], event.keyCode == UInt16(kVK_ANSI_M) {
+        if sc.muteWindow.matches(event: event) {
             onToggleMuteWindow?()
             return true
         }
-        // Option+Shift+Cmd+V pulls Windows clipboard files onto the macOS pasteboard (avoids colliding with Ctrl+Shift+V).
-        if flags == [.command, .shift, .option], event.keyCode == UInt16(kVK_ANSI_V) {
+        if sc.pullClipboardFiles.matches(event: event) {
             onPullClipboardFiles?()
             return true
+        }
+        guard flags.contains(.command) else {
+            return super.performKeyEquivalent(with: event)
         }
 
         // Keep Cmd+Q (quit WinBridge) and Cmd+, (bring Manager to front) native on macOS.

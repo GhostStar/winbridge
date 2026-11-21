@@ -357,10 +357,21 @@ impl Session {
                 Err(e) => return self.error(id, 4, format!("{e:#}")),
             }
         } else {
-            let list = tokio::task::spawn_blocking(|| win32::list(false)).await??;
-            let Some(info) = list.into_iter().find(|w| w.window_id == id) else {
+            let mut list = tokio::task::spawn_blocking(|| win32::list(false)).await??;
+            let Some(mut info) = list.into_iter().find(|w| w.window_id == id) else {
                 return self.error(id, 1, "window is no longer available");
             };
+            if info.is_minimized {
+                let restored =
+                    tokio::task::spawn_blocking(move || win32::restore_if_minimized(id)).await?;
+                if restored {
+                    tokio::time::sleep(Duration::from_millis(80)).await;
+                    list = tokio::task::spawn_blocking(|| win32::list(false)).await??;
+                    if let Some(updated_info) = list.into_iter().find(|w| w.window_id == id) {
+                        info = updated_info;
+                    }
+                }
+            }
             info
         };
         if let Some(old) = self.windows.get(&id) {

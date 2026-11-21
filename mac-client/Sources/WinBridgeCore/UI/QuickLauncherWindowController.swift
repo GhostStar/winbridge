@@ -12,6 +12,7 @@ final class QuickLauncherWindowController: NSWindowController, NSWindowDelegate,
     private let state: AppState
 
     private let searchField = NSTextField()
+    private let shortcutPill = NSTextField(labelWithString: "⌥Space")
     private let hintLabel = NSTextField(labelWithString: "↑↓ 选择 · ⏎ 打开/切换 · Esc 关闭")
     private let emptyLabel = NSTextField(labelWithString: "没有匹配的 Windows 窗口或应用")
     private let tableView = NSTableView()
@@ -74,7 +75,6 @@ final class QuickLauncherWindowController: NSWindowController, NSWindowDelegate,
         searchField.delegate = self
         searchField.translatesAutoresizingMaskIntoConstraints = false
 
-        let shortcutPill = NSTextField(labelWithString: "⌥Space")
         shortcutPill.font = .monospacedSystemFont(ofSize: 11, weight: .medium)
         shortcutPill.textColor = .tertiaryLabelColor
         shortcutPill.translatesAutoresizingMaskIntoConstraints = false
@@ -184,6 +184,7 @@ final class QuickLauncherWindowController: NSWindowController, NSWindowDelegate,
 
     func show() {
         guard let window else { return }
+        shortcutPill.stringValue = state.settings.shortcuts.quickLauncher.displayString
         searchField.stringValue = ""
         positionOnActiveScreen(window)
         refreshResults()

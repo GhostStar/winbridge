@@ -127,6 +127,7 @@ impl Drop for Lease<'_> {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take();
+        crate::win32::tray::set_status(format!("WinBridge — 监听中 :{}", self.0.config.port));
     }
 }
 
@@ -207,6 +208,13 @@ pub(super) async fn handshake_control(
         if let Some(mac) = mac {
             ack.mac_address = mac;
         }
+        let who = if hello.client_name.trim().is_empty() {
+            peer_ip.to_string()
+        } else {
+            hello.client_name.trim().to_owned()
+        };
+        let proto = if media_prebound { "QUIC" } else { "TCP" };
+        crate::win32::tray::set_status(format!("WinBridge — 已连接 {who} ({proto})"));
     }
     (ack, active)
 }

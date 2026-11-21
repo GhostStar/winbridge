@@ -47,6 +47,64 @@ use windows_sys::Win32::{
 
 const SERVICE_NAME: &str = "WinBridgeHost";
 const SERVICE_DISPLAY_NAME: &str = "WinBridge Remote Window Host";
+const FW_RULE_TCP: &str = "WinBridge Host (TCP)";
+const FW_RULE_UDP: &str = "WinBridge Host (QUIC/UDP)";
+
+fn configure_firewall_rules(port: u16) {
+    use std::process::Command;
+    for (name, proto) in [(FW_RULE_TCP, "TCP"), (FW_RULE_UDP, "UDP")] {
+        let _ = Command::new("netsh")
+            .args([
+                "advfirewall",
+                "firewall",
+                "delete",
+                "rule",
+                &format!("name={name}"),
+            ])
+            .output();
+        let status = Command::new("netsh")
+            .args([
+                "advfirewall",
+                "firewall",
+                "add",
+                "rule",
+                &format!("name={name}"),
+                "dir=in",
+                "action=allow",
+                &format!("protocol={proto}"),
+                &format!("localport={port}"),
+                "profile=private,domain",
+            ])
+            .output();
+        match status {
+            Ok(out) if out.status.success() => {
+                println!("Firewall rule configured: {name} ({proto} {port})");
+            }
+            Ok(out) => {
+                let msg = String::from_utf8_lossy(&out.stderr);
+                tracing::warn!(rule = name, error = %msg.trim(), "netsh firewall rule warning");
+            }
+            Err(e) => {
+                tracing::warn!(rule = name, error = %e, "failed to invoke netsh for firewall rule");
+            }
+        }
+    }
+}
+
+fn remove_firewall_rules() {
+    use std::process::Command;
+    for name in [FW_RULE_TCP, FW_RULE_UDP] {
+        let _ = Command::new("netsh")
+            .args([
+                "advfirewall",
+                "firewall",
+                "delete",
+                "rule",
+                &format!("name={name}"),
+            ])
+            .output();
+    }
+}
 
 static SERVICE_CONFIG: OnceLock<Config> = OnceLock::new();
 static STATUS_HANDLE: OnceLock<usize> = OnceLock::new();
@@ -334,6 +392,7 @@ pub fn install(config: &Config) -> Result<()> {
         "Service '{SERVICE_NAME}' is running on {}:{} (UAC / Secure Desktop enabled).",
         effective.bind, effective.port
     );
+    configure_firewall_rules(effective.port);
     println!("Config file (SYSTEM/Admins ACL): {}", conf_path.display());
     if generated_token {
         println!("Generated Auth Token (copy to Mac client): {}", effective.token);
@@ -401,6 +460,7 @@ pub fn uninstall() -> Result<()> {
         CloseServiceHandle(svc);
         CloseServiceHandle(scm);
     }
+    remove_firewall_rules();
     println!("Stopped and uninstalled Windows Service '{SERVICE_NAME}'.");
     Ok(())
 }
