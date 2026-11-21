@@ -7,6 +7,7 @@ import Foundation
 
 enum SyntheticWindow {
     static let primaryDesktop: UInt64 = 0xFFFF_FFFF_FFFF_0001
+    static let monitorBase: UInt64 = 0xFFFF_FFFF_FFFF_0100
 }
 
 enum VideoCodec: Int32, CaseIterable, Sendable {
@@ -1104,6 +1105,122 @@ struct SetAudioConfig: Equatable, Sendable {
     }
 }
 
+struct MonitorInfo: Equatable, Sendable {
+    var monitorId: UInt64 = 0
+    var deviceName: String = ""
+    var friendlyName: String = ""
+    var width: UInt32 = 0
+    var height: UInt32 = 0
+    var x: Int32 = 0
+    var y: Int32 = 0
+    var primary: Bool = false
+    var virtualAdapter: Bool = false
+
+    func encode() -> Data {
+        var w = ProtoWriter()
+        w.writeUInt64(field: 1, monitorId)
+        w.writeString(field: 2, deviceName)
+        w.writeString(field: 3, friendlyName)
+        w.writeUInt32(field: 4, width)
+        w.writeUInt32(field: 5, height)
+        w.writeInt32(field: 6, x)
+        w.writeInt32(field: 7, y)
+        w.writeBool(field: 8, primary)
+        w.writeBool(field: 9, virtualAdapter)
+        return w.data
+    }
+
+    static func decode(from data: Data) throws -> MonitorInfo {
+        var r = ProtoReader(data: data)
+        var m = MonitorInfo()
+        while !r.isAtEnd {
+            let (field, wire) = try r.readTag()
+            switch field {
+            case 1: m.monitorId = try r.readUInt64()
+            case 2: m.deviceName = try r.readString()
+            case 3: m.friendlyName = try r.readString()
+            case 4: m.width = try r.readUInt32()
+            case 5: m.height = try r.readUInt32()
+            case 6: m.x = try r.readInt32()
+            case 7: m.y = try r.readInt32()
+            case 8: m.primary = try r.readBool()
+            case 9: m.virtualAdapter = try r.readBool()
+            default: try r.skip(wireType: wire)
+            }
+        }
+        return m
+    }
+}
+
+struct ListMonitorsRequest: Equatable, Sendable {
+    func encode() -> Data { Data() }
+    static func decode(from data: Data) throws -> ListMonitorsRequest {
+        var r = ProtoReader(data: data)
+        while !r.isAtEnd {
+            let (_, wire) = try r.readTag()
+            try r.skip(wireType: wire)
+        }
+        return ListMonitorsRequest()
+    }
+}
+
+struct ListMonitorsResponse: Equatable, Sendable {
+    var monitors: [MonitorInfo] = []
+
+    func encode() -> Data {
+        var w = ProtoWriter()
+        for monitor in monitors {
+            w.writeMessage(field: 1, monitor.encode(), forceEmit: true)
+        }
+        return w.data
+    }
+
+    static func decode(from data: Data) throws -> ListMonitorsResponse {
+        var r = ProtoReader(data: data)
+        var m = ListMonitorsResponse()
+        while !r.isAtEnd {
+            let (field, wire) = try r.readTag()
+            switch field {
+            case 1: m.monitors.append(try MonitorInfo.decode(from: try r.readBytes()))
+            default: try r.skip(wireType: wire)
+            }
+        }
+        return m
+    }
+}
+
+struct SetVirtualDisplay: Equatable, Sendable {
+    var enable: Bool = false
+    var width: UInt32 = 0
+    var height: UInt32 = 0
+    var hz: UInt32 = 0
+
+    func encode() -> Data {
+        var w = ProtoWriter()
+        w.writeBool(field: 1, enable)
+        w.writeUInt32(field: 2, width)
+        w.writeUInt32(field: 3, height)
+        w.writeUInt32(field: 4, hz)
+        return w.data
+    }
+
+    static func decode(from data: Data) throws -> SetVirtualDisplay {
+        var r = ProtoReader(data: data)
+        var m = SetVirtualDisplay()
+        while !r.isAtEnd {
+            let (field, wire) = try r.readTag()
+            switch field {
+            case 1: m.enable = try r.readBool()
+            case 2: m.width = try r.readUInt32()
+            case 3: m.height = try r.readUInt32()
+            case 4: m.hz = try r.readUInt32()
+            default: try r.skip(wireType: wire)
+            }
+        }
+        return m
+    }
+}
+
 struct HostError: Equatable, Sendable {
     var windowId: UInt64 = 0
     var code: HostErrorCode = .unspecified
@@ -1149,6 +1266,8 @@ struct ControlMessage: Equatable, Sendable {
         case listAppsRes(ListAppsResponse)              // 25
         case launchApp(LaunchApp)                       // 26
         case launchAppRes(LaunchAppResult)              // 27
+        case listMonitorsReq(ListMonitorsRequest)       // 28
+        case listMonitorsRes(ListMonitorsResponse)      // 29
         case windowUpdated(WindowUpdated)               // 30
         case windowClosed(WindowClosed)                 // 31
         case cursorShape(CursorShape)                   // 32
@@ -1157,6 +1276,7 @@ struct ControlMessage: Equatable, Sendable {
         case closeWindow(CloseWindow)                   // 42
         case windowAction(WindowAction)                 // 43
         case requestKeyFrame(RequestKeyFrame)           // 44
+        case setVirtualDisplay(SetVirtualDisplay)       // 46
         case mouseEvent(MouseEvent)                     // 50
         case keyEvent(KeyEvent)                         // 51
         case textInput(TextInput)                       // 52
@@ -1190,6 +1310,8 @@ struct ControlMessage: Equatable, Sendable {
         case .listAppsRes(let m): w.writeMessage(field: 25, m.encode(), forceEmit: true)
         case .launchApp(let m): w.writeMessage(field: 26, m.encode(), forceEmit: true)
         case .launchAppRes(let m): w.writeMessage(field: 27, m.encode(), forceEmit: true)
+        case .listMonitorsReq(let m): w.writeMessage(field: 28, m.encode(), forceEmit: true)
+        case .listMonitorsRes(let m): w.writeMessage(field: 29, m.encode(), forceEmit: true)
         case .windowUpdated(let m): w.writeMessage(field: 30, m.encode(), forceEmit: true)
         case .windowClosed(let m): w.writeMessage(field: 31, m.encode(), forceEmit: true)
         case .cursorShape(let m): w.writeMessage(field: 32, m.encode(), forceEmit: true)
@@ -1198,6 +1320,7 @@ struct ControlMessage: Equatable, Sendable {
         case .closeWindow(let m): w.writeMessage(field: 42, m.encode(), forceEmit: true)
         case .windowAction(let m): w.writeMessage(field: 43, m.encode(), forceEmit: true)
         case .requestKeyFrame(let m): w.writeMessage(field: 44, m.encode(), forceEmit: true)
+        case .setVirtualDisplay(let m): w.writeMessage(field: 46, m.encode(), forceEmit: true)
         case .mouseEvent(let m): w.writeMessage(field: 50, m.encode(), forceEmit: true)
         case .keyEvent(let m): w.writeMessage(field: 51, m.encode(), forceEmit: true)
         case .textInput(let m): w.writeMessage(field: 52, m.encode(), forceEmit: true)
@@ -1234,6 +1357,8 @@ struct ControlMessage: Equatable, Sendable {
             case 25: payload = .listAppsRes(try ListAppsResponse.decode(from: try r.readBytes()))
             case 26: payload = .launchApp(try LaunchApp.decode(from: try r.readBytes()))
             case 27: payload = .launchAppRes(try LaunchAppResult.decode(from: try r.readBytes()))
+            case 28: payload = .listMonitorsReq(try ListMonitorsRequest.decode(from: try r.readBytes()))
+            case 29: payload = .listMonitorsRes(try ListMonitorsResponse.decode(from: try r.readBytes()))
             case 30: payload = .windowUpdated(try WindowUpdated.decode(from: try r.readBytes()))
             case 31: payload = .windowClosed(try WindowClosed.decode(from: try r.readBytes()))
             case 32: payload = .cursorShape(try CursorShape.decode(from: try r.readBytes()))
@@ -1242,6 +1367,7 @@ struct ControlMessage: Equatable, Sendable {
             case 42: payload = .closeWindow(try CloseWindow.decode(from: try r.readBytes()))
             case 43: payload = .windowAction(try WindowAction.decode(from: try r.readBytes()))
             case 44: payload = .requestKeyFrame(try RequestKeyFrame.decode(from: try r.readBytes()))
+            case 46: payload = .setVirtualDisplay(try SetVirtualDisplay.decode(from: try r.readBytes()))
             case 50: payload = .mouseEvent(try MouseEvent.decode(from: try r.readBytes()))
             case 51: payload = .keyEvent(try KeyEvent.decode(from: try r.readBytes()))
             case 52: payload = .textInput(try TextInput.decode(from: try r.readBytes()))
