@@ -218,6 +218,12 @@ impl Session {
                 Ok(info) => info,
                 Err(e) => return self.error(id, 4, format!("{e:#}")),
             }
+        } else if win32::is_monitor_id(id) {
+            req.follow_popups = false;
+            match tokio::task::spawn_blocking(move || win32::monitor_window_info(id)).await? {
+                Ok(info) => info,
+                Err(e) => return self.error(id, 4, format!("{e:#}")),
+            }
         } else {
             let list = tokio::task::spawn_blocking(|| win32::list(false)).await??;
             let Some(info) = list.into_iter().find(|w| w.window_id == id) else {
@@ -232,6 +238,7 @@ impl Session {
             self.remove(id, false)?;
         }
         let monitor_crop = id != win32::DESKTOP_WINDOW_ID
+            && !win32::is_monitor_id(id)
             && match req.capture_mode {
                 1 => false,
                 2 => true,
@@ -335,6 +342,30 @@ impl Session {
                 return self.send(Payload::ListAppsRes(ListAppsResponse { apps }));
             }
             Payload::LaunchApp(req) => return self.launch(req).await,
+            Payload::ListMonitorsReq(_) => {
+                let monitors = tokio::task::spawn_blocking(win32::list_monitors).await??;
+                return self.send(Payload::ListMonitorsRes(ListMonitorsResponse { monitors }));
+            }
+            Payload::SetVirtualDisplay(req) => {
+                if !req.enable {
+                    return self.error(
+                        0,
+                        4,
+                        "WinBridge 不会卸载虚拟适配器。关闭虚拟屏请在 Windows 显示设置里禁用，或退出安装它的软件。",
+                    );
+                }
+                let width = req.width;
+                let height = req.height;
+                let hz = req.hz;
+                return match tokio::task::spawn_blocking(move || {
+                    win32::apply_virtual_mode(width, height, hz)
+                })
+                .await?
+                {
+                    Ok(message) => self.error(0, 0, message),
+                    Err(e) => self.error(0, 4, format!("{e:#}")),
+                };
+            }
             Payload::SetAudioConfig(cfg) => {
                 if cfg.enabled {
                     let desired = if cfg.codec == 11 {
