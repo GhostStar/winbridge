@@ -47,6 +47,8 @@ cat > "$APP_DIR/Contents/Info.plist" << 'EOF'
     <true/>
     <key>NSLocalNetworkUsageDescription</key>
     <string>WinBridge 需要访问局域网以发现并连接您的 Windows 主机，投射应用窗口。</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>WinBridge 把 Mac 麦克风发到 Windows 上已安装的虚拟声卡，供远程会议或录音使用。没有虚拟声卡时不会出声。</string>
     <key>NSBonjourServices</key>
     <array>
         <string>_winbridge._tcp</string>
