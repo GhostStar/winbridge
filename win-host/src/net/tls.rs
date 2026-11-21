@@ -8,8 +8,11 @@ use std::{
     net::IpAddr,
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},
+    time::Duration,
 };
 use tokio_rustls::TlsAcceptor;
+
+pub const QUIC_ALPN: &[u8] = b"winbridge-v1";
 
 fn ensure_crypto_provider() {
     static INSTALLED: OnceLock<()> = OnceLock::new();
@@ -27,8 +30,7 @@ pub struct TlsMaterial {
 }
 
 impl TlsMaterial {
-    pub fn build_acceptor(&self) -> Result<TlsAcceptor> {
-        ensure_crypto_provider();
+    fn parse_cert_and_key(&self) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
         let certs: Vec<CertificateDer<'static>> =
             CertificateDer::pem_slice_iter(self.cert_pem.as_bytes())
                 .collect::<std::result::Result<Vec<_>, _>>()
@@ -38,11 +40,48 @@ impl TlsMaterial {
         }
         let key = PrivateKeyDer::from_pem_slice(self.key_pem.as_bytes())
             .context("parse TLS private key PEM")?;
+        Ok((certs, key))
+    }
+
+    pub fn build_acceptor(&self) -> Result<TlsAcceptor> {
+        ensure_crypto_provider();
+        let (certs, key) = self.parse_cert_and_key()?;
         let server_config = ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(certs, key)
             .context("build rustls ServerConfig")?;
         Ok(TlsAcceptor::from(Arc::new(server_config)))
+    }
+
+    pub fn build_quic_server_config(&self) -> Result<quinn::ServerConfig> {
+        ensure_crypto_provider();
+        let (certs, key) = self.parse_cert_and_key()?;
+        let mut tls_config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .context("build rustls ServerConfig for QUIC")?;
+        tls_config.alpn_protocols = vec![QUIC_ALPN.to_vec()];
+        // Allow TLS 1.3 0-RTT early data on QUIC session resumption.
+        tls_config.max_early_data_size = u32::MAX;
+
+        let quic_crypto = quinn::crypto::rustls::QuicServerConfig::try_from(Arc::new(tls_config))
+            .context("convert rustls ServerConfig into QuicServerConfig")?;
+        let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(quic_crypto));
+
+        let mut transport = quinn::TransportConfig::default();
+        transport.keep_alive_interval(Some(Duration::from_secs(5)));
+        transport.max_idle_timeout(Some(
+            quinn::IdleTimeout::try_from(Duration::from_secs(15))
+                .context("configure QUIC idle timeout")?,
+        ));
+        transport.max_concurrent_bidi_streams(128u32.into());
+        transport.max_concurrent_uni_streams(128u32.into());
+        transport.stream_receive_window(quinn::VarInt::from_u32(8 * 1024 * 1024));
+        transport.receive_window(quinn::VarInt::from_u32(32 * 1024 * 1024));
+        transport.send_window(32 * 1024 * 1024);
+        server_config.transport_config(Arc::new(transport));
+
+        Ok(server_config)
     }
 }
 
@@ -156,6 +195,8 @@ mod tests {
         assert_eq!(mat.short_fingerprint.len(), 16);
         let acceptor = mat.build_acceptor().unwrap();
         drop(acceptor);
+        let quic_cfg = mat.build_quic_server_config().unwrap();
+        drop(quic_cfg);
         let reparsed = from_pem_pair(mat.cert_pem.clone(), mat.key_pem.clone()).unwrap();
         assert_eq!(reparsed.fingerprint, mat.fingerprint);
     }

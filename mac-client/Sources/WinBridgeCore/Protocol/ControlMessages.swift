@@ -132,7 +132,7 @@ enum HostErrorCode: Int32, Sendable {
 // MARK: - Messages
 
 enum ProtocolCapabilities {
-    static let currentAppVersion = "0.3.0"
+    static let currentAppVersion = "0.4.0"
     static let processAudio: UInt32 = 1 << 0
     static let filePull: UInt32 = 1 << 1
     static let clipboardFiles: UInt32 = 1 << 2
@@ -142,7 +142,7 @@ enum ProtocolCapabilities {
     static let quic: UInt32 = 1 << 6
 
     static let clientSupported: UInt32 =
-        processAudio | filePull | clipboardFiles | adaptiveVideo | perWindowMute | wolMac
+        processAudio | filePull | clipboardFiles | adaptiveVideo | perWindowMute | wolMac | quic
 }
 
 struct Hello: Equatable, Sendable {

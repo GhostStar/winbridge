@@ -629,7 +629,8 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
             refreshButton.isEnabled = true
             desktopButton.isEnabled = true
             desktopButton.title = state.isDesktopOpen ? "关闭桌面窗口" : "查看完整桌面"
-            statusLabel.stringValue = "● \(hostName)（\(codec.displayName)）"
+            let transportTag = state.activeTransport.map { " · \($0.rawValue)" } ?? ""
+            statusLabel.stringValue = "● \(hostName)（\(codec.displayName)\(transportTag)）"
             statusLabel.textColor = .systemGreen
             if let rtt = state.rttMs {
                 rttLabel.stringValue = String(format: "%.1f ms", rtt)

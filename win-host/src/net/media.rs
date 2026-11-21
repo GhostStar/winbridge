@@ -20,19 +20,19 @@ const MAX_AUDIO_QUEUE: usize = 12;
 const KEY: u8 = 1;
 const EOS: u8 = 4;
 
-struct Frame {
-    id: u64,
+pub(crate) struct Frame {
+    pub(crate) id: u64,
     time: u64,
     width: u16,
     height: u16,
     codec: u8,
     flags: u8,
     seq: u16,
-    bytes: Vec<u8>,
+    pub(crate) bytes: Vec<u8>,
 }
 
 impl Frame {
-    fn header(&self) -> [u8; 32] {
+    pub(crate) fn header(&self) -> [u8; 32] {
         let mut h = [0; 32];
         h[..4].copy_from_slice(b"WBMF");
         h[4..12].copy_from_slice(&self.id.to_be_bytes());
@@ -44,6 +44,10 @@ impl Frame {
         h[26..28].copy_from_slice(&self.seq.to_be_bytes());
         h[28..].copy_from_slice(&(self.bytes.len() as u32).to_be_bytes());
         h
+    }
+
+    pub(crate) fn is_eos(&self) -> bool {
+        (self.flags & EOS) != 0
     }
 }
 
@@ -70,6 +74,8 @@ struct Slots {
 pub struct Mux {
     slots: Mutex<Slots>,
     wake: Notify,
+    audio_wake: Notify,
+    video_wake: Notify,
 }
 
 impl Mux {
@@ -134,6 +140,7 @@ impl Mux {
             bytes,
         });
         self.wake.notify_one();
+        self.video_wake.notify_one();
     }
 
     pub fn end(&self, id: u64, codec: u8) {
@@ -153,6 +160,7 @@ impl Mux {
             });
             slot.seq = slot.seq.wrapping_add(1);
             self.wake.notify_one();
+            self.video_wake.notify_one();
         }
     }
 
@@ -177,6 +185,7 @@ impl Mux {
             bytes,
         });
         self.wake.notify_one();
+        self.audio_wake.notify_one();
     }
 
     pub fn clear_audio(&self) {
@@ -197,6 +206,54 @@ impl Mux {
             slot.wait_idr = true;
             slot.force.store(true, Ordering::Release);
         }
+    }
+
+    pub(crate) fn request_keyframe(&self, id: u64) {
+        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(slot) = slots.by_id.get_mut(&id).filter(|s| !s.closed) {
+            slot.wait_idr = true;
+            slot.force.store(true, Ordering::Release);
+        }
+    }
+
+    pub(crate) fn pop_audio(&self) -> Option<Frame> {
+        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        slots.audio.pop_front()
+    }
+
+    pub(crate) fn pop_video(&self) -> Option<(u64, bool, Frame)> {
+        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        let ready =
+            |id: &u64| slots.by_id[id].pending_end.is_some() || !slots.by_id[id].queue.is_empty();
+        let preferred = slots
+            .prefer_popup
+            .then(|| {
+                slots
+                    .order
+                    .iter()
+                    .position(|id| ready(id) && slots.by_id[id].popup)
+            })
+            .flatten();
+        let ix = preferred.or_else(|| slots.order.iter().position(ready))?;
+        let id = slots.order.remove(ix)?;
+        let slot = slots.by_id.get_mut(&id)?;
+        let popup = slot.popup;
+        let frame = slot.pending_end.take().or_else(|| slot.queue.pop_front());
+        if slot.closed {
+            slots.by_id.remove(&id);
+        } else {
+            slots.order.push_back(id);
+        }
+        slots.prefer_popup = !slots.prefer_popup;
+        frame.map(|f| (id, popup, f))
+    }
+
+    pub(crate) fn audio_notified(&self) -> tokio::sync::futures::Notified<'_> {
+        self.audio_wake.notified()
+    }
+
+    pub(crate) fn video_notified(&self) -> tokio::sync::futures::Notified<'_> {
+        self.video_wake.notified()
     }
 
     fn pop(&self) -> Option<Frame> {

@@ -1,6 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr};
 
-pub const HOST_VERSION: &str = "0.3.0";
+pub const HOST_VERSION: &str = "0.4.0";
 
 pub const CAP_PROCESS_AUDIO: u32 = 1 << 0;
 pub const CAP_FILE_PULL: u32 = 1 << 1;
@@ -8,7 +8,6 @@ pub const CAP_CLIPBOARD_FILES: u32 = 1 << 2;
 pub const CAP_ADAPTIVE_VIDEO: u32 = 1 << 3;
 pub const CAP_PER_WINDOW_MUTE: u32 = 1 << 4;
 pub const CAP_WOL_MAC: u32 = 1 << 5;
-#[allow(dead_code)]
 pub const CAP_QUIC: u32 = 1 << 6;
 
 pub const HOST_CAPABILITIES: u32 = CAP_PROCESS_AUDIO
@@ -16,7 +15,8 @@ pub const HOST_CAPABILITIES: u32 = CAP_PROCESS_AUDIO
     | CAP_CLIPBOARD_FILES
     | CAP_ADAPTIVE_VIDEO
     | CAP_PER_WINDOW_MUTE
-    | CAP_WOL_MAC;
+    | CAP_WOL_MAC
+    | CAP_QUIC;
 
 const IF_TYPE_ETHERNET_CSMACD: u32 = 6;
 const IF_TYPE_SOFTWARE_LOOPBACK: u32 = 24;

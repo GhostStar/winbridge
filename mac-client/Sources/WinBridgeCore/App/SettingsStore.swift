@@ -79,6 +79,25 @@ enum VideoProfilePreference: String, CaseIterable {
     }
 }
 
+enum TransportPreference: String, CaseIterable, Sendable {
+    case auto = "auto"
+    case quic = "quic"
+    case tcp  = "tcp"
+
+    var title: String {
+        switch self {
+        case .auto: return "自动 (QUIC 优先)"
+        case .quic: return "仅 QUIC (UDP)"
+        case .tcp:  return "仅 TCP"
+        }
+    }
+}
+
+enum ActiveTransport: String, Equatable, Sendable {
+    case quic = "QUIC"
+    case tcp  = "TCP"
+}
+
 struct HostProfile: Codable, Equatable, Sendable {
     var id: String
     var name: String
@@ -93,6 +112,7 @@ struct ClientSettings {
     var port: UInt16
     var authToken: String
     var useTls: Bool
+    var transportPreference: TransportPreference
     var macAddress: String
     var hostProfiles: [HostProfile]
     var selectedHostProfileId: String
@@ -190,6 +210,8 @@ enum SettingsStore {
         }
 
         let trustedFingerprints = defaults.dictionary(forKey: "winbridge.trustedFingerprints") as? [String: String] ?? [:]
+        let transportRaw = defaults.string(forKey: "winbridge.transport") ?? TransportPreference.auto.rawValue
+        let transportPreference = TransportPreference(rawValue: transportRaw) ?? .auto
         let autoReconnect = defaults.object(forKey: "winbridge.autoReconnect") as? Bool ?? true
         let showPerformanceHud = defaults.object(forKey: "winbridge.showPerformanceHud") as? Bool ?? false
         let suppressInactiveHover = defaults.object(forKey: "winbridge.suppressInactiveHover") as? Bool ?? false
@@ -246,6 +268,7 @@ enum SettingsStore {
             port: port,
             authToken: token,
             useTls: useTls,
+            transportPreference: transportPreference,
             macAddress: macAddress,
             hostProfiles: hostProfiles,
             selectedHostProfileId: selectedProfileId,
@@ -294,6 +317,7 @@ enum SettingsStore {
             defaults.set(s.authToken, forKey: legacyTokenKey)
         }
         defaults.set(s.useTls, forKey: "winbridge.useTls")
+        defaults.set(s.transportPreference.rawValue, forKey: "winbridge.transport")
         defaults.set(s.trustedFingerprints, forKey: "winbridge.trustedFingerprints")
         defaults.set(s.autoReconnect, forKey: "winbridge.autoReconnect")
         defaults.set(s.showPerformanceHud, forKey: "winbridge.showPerformanceHud")

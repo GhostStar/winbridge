@@ -219,3 +219,123 @@ fn tls_13_encrypts_control_and_media_and_rate_limits_auth_failures() {
 
     let _ = std::fs::remove_dir_all(&tls_dir);
 }
+
+#[test]
+fn quic_multistream_handshake_bulk_bind_and_ping_roundtrip() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let tls_dir = std::env::temp_dir().join(format!("winbridge-quic-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tls_dir);
+    let tls_dir_str = tls_dir.to_string_lossy().into_owned();
+    let host = Host::start_with_args("jpeg", &["--tls-dir", &tls_dir_str]);
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let mut tls_client = rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(AcceptAnySelfSigned))
+            .with_no_client_auth();
+        tls_client.alpn_protocols = vec![win_host::net::tls::QUIC_ALPN.to_vec()];
+        let quic_crypto = quinn::crypto::rustls::QuicClientConfig::try_from(Arc::new(tls_client))
+            .unwrap();
+        let client_cfg = quinn::ClientConfig::new(Arc::new(quic_crypto));
+
+        let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+        endpoint.set_default_client_config(client_cfg);
+
+        // Give the spawned QUIC server task a brief window to finish binding UDP.
+        let mut conn = None;
+        for _ in 0..20 {
+            if let Ok(connecting) = endpoint.connect(host.addr, "localhost") {
+                if let Ok(c) = connecting.await {
+                    conn = Some(c);
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let conn = conn.expect("QUIC handshake to win-host failed");
+
+        // 1. Control stream Hello -> HelloAck
+        let (mut ctl_send, mut ctl_recv) = conn.open_bi().await.unwrap();
+        ctl_send.write_all(b"WBRGCTL\x01").await.unwrap();
+        let hello_bytes = ControlMessage {
+            seq: 1,
+            timestamp_us: 0,
+            payload: Some(Payload::Hello(Hello {
+                protocol_version: 1,
+                client_name: "quic-test".into(),
+                auth_token: TOKEN.into(),
+                supported_codecs: vec![3],
+                app_version: "0.4.0".into(),
+                capabilities: win_host::net::host_info::HOST_CAPABILITIES,
+                ..Default::default()
+            })),
+        }
+        .encode_to_vec();
+        ctl_send
+            .write_all(&(hello_bytes.len() as u32).to_be_bytes())
+            .await
+            .unwrap();
+        ctl_send.write_all(&hello_bytes).await.unwrap();
+
+        let mut lb = [0u8; 4];
+        ctl_recv.read_exact(&mut lb).await.unwrap();
+        let mut body = vec![0u8; u32::from_be_bytes(lb) as usize];
+        ctl_recv.read_exact(&mut body).await.unwrap();
+        let Payload::HelloAck(ack) = ControlMessage::decode(body.as_slice())
+            .unwrap()
+            .payload
+            .unwrap()
+        else {
+            panic!("expected HelloAck over QUIC");
+        };
+        assert!(ack.accepted);
+        assert_eq!(ack.session_id.len(), 16);
+        assert_ne!(
+            ack.capabilities & win_host::net::host_info::CAP_QUIC,
+            0,
+            "host should advertise CAP_QUIC"
+        );
+
+        // 2. Bind isolated Bulk File stream (WBRGFLS\x01 + session_id)
+        let (mut bulk_send, mut bulk_recv) = conn.open_bi().await.unwrap();
+        bulk_send.write_all(b"WBRGFLS\x01").await.unwrap();
+        bulk_send.write_all(&ack.session_id).await.unwrap();
+        let mut status = [0xFFu8; 1];
+        bulk_recv.read_exact(&mut status).await.unwrap();
+        assert_eq!(status[0], 0, "QUIC bulk stream bind should succeed");
+
+        // 3. Ping / Pong over Control stream
+        let ping_bytes = ControlMessage {
+            seq: 2,
+            timestamp_us: 0,
+            payload: Some(Payload::Ping(Ping {
+                echo_timestamp_us: 424242,
+            })),
+        }
+        .encode_to_vec();
+        ctl_send
+            .write_all(&(ping_bytes.len() as u32).to_be_bytes())
+            .await
+            .unwrap();
+        ctl_send.write_all(&ping_bytes).await.unwrap();
+
+        loop {
+            ctl_recv.read_exact(&mut lb).await.unwrap();
+            let mut raw = vec![0u8; u32::from_be_bytes(lb) as usize];
+            ctl_recv.read_exact(&mut raw).await.unwrap();
+            if let Some(Payload::Pong(p)) = ControlMessage::decode(raw.as_slice()).unwrap().payload {
+                assert_eq!(p.echo_timestamp_us, 424242);
+                break;
+            }
+        }
+
+        conn.close(0u32.into(), b"done");
+        endpoint.wait_idle().await;
+    });
+
+    let _ = std::fs::remove_dir_all(&tls_dir);
+}

@@ -72,6 +72,7 @@ final class AppState {
     private(set) var mutedWindowIds: Set<UInt64> = []
     private(set) var connectedHostVersion: String = ""
     private(set) var connectedHostCapabilities: UInt32 = 0
+    private(set) var activeTransport: ActiveTransport?
     private(set) var lastBannerMessage: String = ""
     private(set) var lastBannerIsError: Bool = false
 
@@ -406,6 +407,14 @@ final class AppState {
         onStateChanged?()
     }
 
+    func setTransportPreference(_ pref: TransportPreference) {
+        var s = settings
+        s.transportPreference = pref
+        settings = s
+        setBanner("传输通道已设为：\(pref.title)（重新连接后生效）", isError: false)
+        onStateChanged?()
+    }
+
     func toggleAudioEnabled() {
         var s = settings
         s.audioEnabled.toggle()
@@ -639,6 +648,7 @@ final class AppState {
             port: settings.port,
             authToken: settings.authToken.trimmingCharacters(in: .whitespacesAndNewlines),
             useTls: settings.useTls,
+            transport: settings.transportPreference,
             expectedFingerprint: settings.trustedFingerprints[hostKey],
             clientName: Host.current().localizedName ?? "macOS",
             displayScale: displayScale,
@@ -671,8 +681,16 @@ final class AppState {
                 self.reconnectTask = nil
                 self.connectedHostVersion = ack.hostVersion
                 self.connectedHostCapabilities = ack.capabilities
+                self.activeTransport = outcome.transport
                 self.connectionState = .connected(hostName: ack.hostName, codec: ack.selectedCodec)
                 self.rttMs = nil
+                let transportNote: String
+                switch outcome.transport {
+                case .quic:
+                    transportNote = " · QUIC 多流"
+                case .tcp:
+                    transportNote = outcome.fellBackToTcp ? " · TCP (QUIC 回退)" : " · TCP"
+                }
                 let tlsNote: String
                 if let fp = outcome.tlsFingerprint {
                     let shortFp = CertificateFingerprint.shortDisplay(fp)
@@ -683,15 +701,15 @@ final class AppState {
                 let versionNotice: String
                 if ack.hostVersion.isEmpty
                     || (ack.capabilities & (ProtocolCapabilities.perWindowMute | ProtocolCapabilities.wolMac)) == 0 {
-                    versionNotice = " · 提示：Windows 端版本较旧，更新 win-host.exe 可启用单窗静音与自动 MAC"
+                    versionNotice = " · 提示：Windows 端版本较旧，更新 win-host.exe 可启用 QUIC / 单窗静音 / 自动 MAC"
                 } else {
                     versionNotice = " · v\(ack.hostVersion)"
                 }
                 ClientLogger.shared.info(
-                    "Connected to \(ack.hostName) v=\(ack.hostVersion) caps=\(ack.capabilities) mac=\(ack.macAddress) codec=\(ack.selectedCodec.displayName)\(tlsNote)"
+                    "Connected to \(ack.hostName) transport=\(outcome.transport.rawValue) fellBack=\(outcome.fellBackToTcp) v=\(ack.hostVersion) caps=\(ack.capabilities) mac=\(ack.macAddress) codec=\(ack.selectedCodec.displayName)\(tlsNote)"
                 )
                 self.setBanner(
-                    "已连接到 \(ack.hostName)（\(ack.selectedCodec.displayName)\(tlsNote)\(versionNotice)）",
+                    "已连接到 \(ack.hostName)（\(ack.selectedCodec.displayName)\(transportNote)\(tlsNote)\(versionNotice)）",
                     isError: false
                 )
                 self.clipboardMonitor.start()
@@ -902,6 +920,7 @@ final class AppState {
         mutedWindowIds.removeAll()
         connectedHostVersion = ""
         connectedHostCapabilities = 0
+        activeTransport = nil
         activeTransferNames.removeAll()
         activeTransferTargetWindow.removeAll()
         for (_, pending) in pendingPullTargets {
@@ -1192,7 +1211,7 @@ final class AppState {
                     self.showTransferToast(startMsg, style: .progress, windowId: windowId, autoHideSeconds: nil)
                     self.onStateChanged?()
 
-                    try await conn.sendAsync(.fileTransferStart(FileTransferStart(
+                    try await conn.sendBulkAsync(.fileTransferStart(FileTransferStart(
                         transferId: transferId,
                         targetWindowId: windowId,
                         fileName: name,
@@ -1204,7 +1223,7 @@ final class AppState {
                     var offset: UInt64 = 0
                     var lastProgressUI = Date.distantPast
                     if fileSize == 0 {
-                        try await conn.sendAsync(.fileTransferChunk(FileTransferChunk(
+                        try await conn.sendBulkAsync(.fileTransferChunk(FileTransferChunk(
                             transferId: transferId,
                             offset: 0,
                             data: Data(),
@@ -1218,7 +1237,7 @@ final class AppState {
                             }
                             let nextOffset = offset + UInt64(data.count)
                             let isLast = nextOffset >= fileSize
-                            try await conn.sendAsync(.fileTransferChunk(FileTransferChunk(
+                            try await conn.sendBulkAsync(.fileTransferChunk(FileTransferChunk(
                                 transferId: transferId,
                                 offset: offset,
                                 data: data,

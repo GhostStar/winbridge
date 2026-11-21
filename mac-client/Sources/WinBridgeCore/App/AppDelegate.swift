@@ -125,6 +125,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         state.wakeAndConnect()
     }
 
+    @objc private func setTransportPreferenceAction(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let pref = TransportPreference(rawValue: raw) else { return }
+        state.setTransportPreference(pref)
+    }
+
     @objc private func disconnectAction() {
         state.disconnect()
     }
@@ -277,6 +283,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         winMenu.addItem(autoPullItem)
         appendVideoQualityItems(to: winMenu, includeProcess: true)
         winMenu.addItem(.separator())
+        let transportItem = NSMenuItem(title: "传输通道", action: nil, keyEquivalent: "")
+        let transportMenu = NSMenu()
+        for pref in TransportPreference.allCases {
+            let item = NSMenuItem(
+                title: pref.title,
+                action: #selector(setTransportPreferenceAction(_:)),
+                keyEquivalent: ""
+            )
+            item.representedObject = pref.rawValue
+            item.state = state.settings.transportPreference == pref ? .on : .off
+            transportMenu.addItem(item)
+        }
+        transportItem.submenu = transportMenu
+        winMenu.addItem(transportItem)
+        winMenu.addItem(.separator())
         winMenu.addItem(withTitle: "脱离当前远端窗口", action: #selector(detachActiveWindowAction), keyEquivalent: "")
         winMenu.addItem(.separator())
         winMenu.addItem(withTitle: "重置当前主机 TLS 证书信任", action: #selector(resetTrustAction), keyEquivalent: "")
@@ -301,7 +322,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .connecting:
             menu.addItem(withTitle: "状态：连接中…", action: nil, keyEquivalent: "")
         case .connected(let host, let codec):
-            menu.addItem(withTitle: "已连接：\(host) (\(codec.displayName))", action: nil, keyEquivalent: "")
+            let transport = state.activeTransport.map { " · \($0.rawValue)" } ?? ""
+            menu.addItem(withTitle: "已连接：\(host) (\(codec.displayName)\(transport))", action: nil, keyEquivalent: "")
         }
         menu.addItem(.separator())
         let launcherStatusItem = NSMenuItem(

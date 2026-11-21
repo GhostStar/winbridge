@@ -1,6 +1,7 @@
 pub mod discovery;
 pub mod host_info;
 mod media;
+pub mod quic;
 pub mod tls;
 
 use crate::{
@@ -30,7 +31,7 @@ use tokio::{
 use tokio_rustls::TlsAcceptor;
 use uuid::Uuid;
 
-const IDLE: Duration = Duration::from_secs(15);
+pub(super) const IDLE: Duration = Duration::from_secs(15);
 const MAX_CONTROL: usize = 16 << 20;
 
 pub(crate) fn micros() -> u64 {
@@ -38,7 +39,7 @@ pub(crate) fn micros() -> u64 {
     BASE.get_or_init(Instant::now).elapsed().as_micros() as u64
 }
 
-async fn read_message(reader: &mut (impl AsyncRead + Unpin)) -> Result<Payload> {
+pub(super) async fn read_message(reader: &mut (impl AsyncRead + Unpin)) -> Result<Payload> {
     let len = reader.read_u32().await? as usize;
     ensure!(
         len > 0 && len <= MAX_CONTROL,
@@ -51,7 +52,7 @@ async fn read_message(reader: &mut (impl AsyncRead + Unpin)) -> Result<Payload> 
         .context("empty control message")
 }
 
-async fn write_message(
+pub(super) async fn write_message(
     writer: &mut (impl AsyncWrite + Unpin),
     seq: u64,
     payload: Payload,
@@ -72,11 +73,11 @@ async fn write_message(
     Ok(())
 }
 
-struct Active {
-    id: Uuid,
-    media_bound: AtomicBool,
-    stop: watch::Sender<bool>,
-    mux: Arc<Mux>,
+pub(super) struct Active {
+    pub(super) id: Uuid,
+    pub(super) media_bound: AtomicBool,
+    pub(super) stop: watch::Sender<bool>,
+    pub(super) mux: Arc<Mux>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -85,12 +86,12 @@ pub struct VideoCaps {
     pub hevc: bool,
 }
 
-struct Server {
-    config: Arc<Config>,
+pub(super) struct Server {
+    pub(super) config: Arc<Config>,
     active: Mutex<Option<Arc<Active>>>,
     caps: VideoCaps,
     auth_limiter: AuthLimiter,
-    allowlist: IpAllowlist,
+    pub(super) allowlist: IpAllowlist,
     tls: Option<TlsAcceptor>,
 }
 
@@ -109,7 +110,15 @@ fn negotiate(pref: Codec, offered: &[i32], caps: VideoCaps) -> Option<i32> {
     })
 }
 
-struct Lease<'a>(&'a Server, Arc<Active>);
+pub(super) struct Lease<'a>(&'a Server, Arc<Active>);
+impl<'a> Lease<'a> {
+    pub(super) fn new(server: &'a Server, active: Arc<Active>) -> Self {
+        Self(server, active)
+    }
+    pub(super) fn active(&self) -> &Arc<Active> {
+        &self.1
+    }
+}
 impl Drop for Lease<'_> {
     fn drop(&mut self) {
         self.1.stop.send_replace(true);
@@ -121,20 +130,19 @@ impl Drop for Lease<'_> {
     }
 }
 
-async fn control<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+pub(super) async fn handshake_control(
     server: &Server,
     peer_ip: IpAddr,
     local_ip: Option<IpAddr>,
-    mut socket: S,
-) -> Result<()> {
-    let Payload::Hello(hello) = timeout(IDLE, read_message(&mut socket)).await?? else {
-        bail!("expected Hello")
-    };
+    hello: Hello,
+    media_prebound: bool,
+) -> (HelloAck, Option<Arc<Active>>) {
     tracing::info!(
         %peer_ip,
         client_name = %hello.client_name,
         client_version = %hello.app_version,
         client_caps = hello.capabilities,
+        quic = media_prebound,
         "client Hello received"
     );
     let codec = negotiate(server.config.codec, &hello.supported_codecs, server.caps);
@@ -176,7 +184,7 @@ async fn control<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
             ack.selected_codec = selected;
             let active = Arc::new(Active {
                 id,
-                media_bound: AtomicBool::new(false),
+                media_bound: AtomicBool::new(media_prebound),
                 stop: watch::channel(false).0,
                 mux: Arc::new(Mux::default()),
             });
@@ -200,8 +208,21 @@ async fn control<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
             ack.mac_address = mac;
         }
     }
+    (ack, active)
+}
+
+async fn control<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+    server: &Server,
+    peer_ip: IpAddr,
+    local_ip: Option<IpAddr>,
+    mut socket: S,
+) -> Result<()> {
+    let Payload::Hello(hello) = timeout(IDLE, read_message(&mut socket)).await?? else {
+        bail!("expected Hello")
+    };
+    let (ack, active) = handshake_control(server, peer_ip, local_ip, hello, false).await;
     let selected = ack.selected_codec;
-    let lease = active.map(|active| Lease(server, active));
+    let lease = active.map(|active| Lease::new(server, active));
     timeout(IDLE, write_message(&mut socket, 1, Payload::HelloAck(ack))).await??;
     let Some(lease) = lease else { return Ok(()) };
     let (mut reader, mut writer) = tokio::io::split(socket);
@@ -346,6 +367,14 @@ pub async fn serve(
         allowlist,
         tls: tls_acceptor,
     });
+    if let Some(mat) = tls_material {
+        let quic_state = state.clone();
+        tokio::spawn(async move {
+            if let Err(e) = quic::serve_quic(quic_state, mat, local_addr).await {
+                tracing::warn!(%local_addr, error = %e, "QUIC listener unavailable; continuing with TCP+TLS");
+            }
+        });
+    }
     let connections = Arc::new(Semaphore::new(64));
     loop {
         let (socket, peer) = listener.accept().await?;
