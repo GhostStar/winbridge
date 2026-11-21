@@ -169,3 +169,44 @@ import Testing
     let visibleCustom = CursorShape(cursorType: .custom, customRgba: Data([255, 255, 255, 255]), width: 1, height: 1)
     #expect(!CursorMapper.isEffectivelyHidden(visibleCustom))
 }
+
+@Test func filePullMessagesRoundTrip() throws {
+    let list = ControlMessage(
+        seq: 3,
+        timestampUs: 1,
+        payload: .listHostFilesRes(ListHostFilesResponse(
+            path: "C:\\Users\\me\\Downloads\\WinBridge",
+            entries: [HostFileEntry(name: "shot.png", sizeBytes: 12, isDir: false)],
+            error: ""
+        ))
+    )
+    #expect(try ControlMessage.decode(from: list.encode()) == list)
+    let pull = ControlMessage(
+        seq: 4,
+        timestampUs: 2,
+        payload: .filePullReq(FilePullRequest(requestId: 9, path: "clipboard:"))
+    )
+    #expect(try ControlMessage.decode(from: pull.encode()) == pull)
+    let start = FileTransferStart(
+        transferId: 9,
+        targetWindowId: 0,
+        fileName: "shot.png",
+        totalBytes: 12,
+        direction: FileTransferStart.directionToClient
+    )
+    #expect(try FileTransferStart.decode(from: start.encode()) == start)
+}
+
+@Test func filePullHelpersHandleWindowsPathsAndUnsafeNames() {
+    #expect(FilePullWindowController.parentHostPath(#"C:\Users\me\Downloads\WinBridge"#) == #"C:\Users\me\Downloads"#)
+    #expect(FilePullWindowController.parentHostPath(#"C:\Users\me\Downloads\"#) == #"C:\Users\me"#)
+    #expect(FilePullWindowController.parentHostPath(#"C:\Users"#) == #"C:\"#)
+    #expect(FilePullWindowController.parentHostPath(#"C:\"#) == #"C:\"#)
+    #expect(FilePullWindowController.parentHostPath("/Users/me/Downloads") == "/Users/me")
+    #expect(FilePullWindowController.parentHostPath("/") == "/")
+
+    #expect(AppState.sanitizeIncomingFileName(#"C:\evil\..\..\notes.txt"#) == "notes.txt")
+    #expect(AppState.sanitizeIncomingFileName("..") == "winbridge-file.bin")
+    #expect(AppState.sanitizeIncomingFileName(".") == "winbridge-file.bin")
+    #expect(AppState.sanitizeIncomingFileName("") == "winbridge-file.bin")
+}

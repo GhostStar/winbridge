@@ -19,6 +19,7 @@ public enum WinBridgeAppLauncher {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let state = AppState()
     private var managerController: ManagerWindowController?
+    private var filePullController: FilePullWindowController?
     private var statusItem: NSStatusItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -70,6 +71,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func requestKeyframeAction() {
         state.requestKeyFrameForActiveWindow()
+    }
+
+    @objc private func showFilePullAction() {
+        if filePullController == nil {
+            filePullController = FilePullWindowController(state: state)
+        }
+        filePullController?.show()
     }
 
     @objc private func detachActiveWindowAction() {
@@ -159,6 +167,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hudItem.keyEquivalentModifierMask = [.command, .shift]
         winMenu.addItem(hudItem)
         winMenu.addItem(withTitle: "刷新当前窗口关键帧 (IDR)", action: #selector(requestKeyframeAction), keyEquivalent: "")
+        winMenu.addItem(withTitle: "从 Windows 取回文件…", action: #selector(showFilePullAction), keyEquivalent: "")
         winMenu.addItem(withTitle: "脱离当前远端窗口", action: #selector(detachActiveWindowAction), keyEquivalent: "")
         winMenu.addItem(.separator())
         winMenu.addItem(withTitle: "重置当前主机 TLS 证书信任", action: #selector(resetTrustAction), keyEquivalent: "")

@@ -13,6 +13,14 @@ private struct RestoreWindowTarget: Equatable {
     let title: String
 }
 
+private struct IncomingPull {
+    let finalURL: URL
+    let partialURL: URL
+    let handle: FileHandle
+    let expected: UInt64
+    var received: UInt64
+}
+
 @MainActor
 final class AppState {
     var settings: ClientSettings {
@@ -74,6 +82,8 @@ final class AppState {
     private var pendingRestoreTargets: [RestoreWindowTarget] = []
     private var nextTransferId: UInt64 = 1
     private var activeTransferNames: [UInt64: String] = [:]
+    private var incomingPulls: [UInt64: IncomingPull] = [:]
+    var onHostFilesListed: ((ListHostFilesResponse) -> Void)?
 
     var onStateChanged: (() -> Void)?
     var onOpenManager: (() -> Void)?
@@ -487,6 +497,11 @@ final class AppState {
         availableApps.removeAll()
         subscribedRootIds.removeAll()
         activeTransferNames.removeAll()
+        for (_, pull) in incomingPulls {
+            try? pull.handle.close()
+            try? FileManager.default.removeItem(at: pull.partialURL)
+        }
+        incomingPulls.removeAll()
 
         for (_, controller) in controllers {
             controller.forceCloseLocally()
@@ -741,6 +756,149 @@ final class AppState {
         }
     }
 
+    func requestHostFileList(path: String) {
+        guard case .connected = connectionState else {
+            setBanner("请先连接 Windows 主机", isError: true)
+            onStateChanged?()
+            return
+        }
+        sendControl(.listHostFilesReq(ListHostFilesRequest(path: path)))
+    }
+
+    private static let maxIncomingPullBytes: UInt64 = 512 * 1024 * 1024
+
+    nonisolated static func sanitizeIncomingFileName(_ raw: String) -> String {
+        let last = raw.split(whereSeparator: { $0 == "/" || $0 == "\\" }).last.map(String.init) ?? ""
+        let cleaned = last
+            .unicodeScalars
+            .filter { !CharacterSet.controlCharacters.contains($0) }
+            .map { Character($0) }
+        var name = String(cleaned).trimmingCharacters(in: .whitespacesAndNewlines)
+        if name.isEmpty || name == "." || name == ".." {
+            return "winbridge-file.bin"
+        }
+        if name.count > 180 {
+            name = String(name.prefix(180))
+        }
+        return name
+    }
+
+    func pullHostFile(path: String) {
+        guard case .connected = connectionState else {
+            setBanner("请先连接 Windows 主机", isError: true)
+            onStateChanged?()
+            return
+        }
+        let requestId = nextTransferId
+        nextTransferId &+= 1
+        let label: String
+        if path == "clipboard:" {
+            label = "剪贴板文件"
+        } else {
+            let tail = path.split(whereSeparator: { $0 == "/" || $0 == "\\" }).last.map(String.init) ?? ""
+            label = tail.isEmpty ? "文件" : tail
+        }
+        setBanner("正在从 Windows 取回「\(label)」…", isError: false)
+        onStateChanged?()
+        sendControl(.filePullReq(FilePullRequest(requestId: requestId, path: path)))
+    }
+
+    private func macDropDirectory() -> URL {
+        let base = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        let dir = base.appendingPathComponent("WinBridge", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    private func beginIncomingPull(_ start: FileTransferStart) {
+        let name = Self.sanitizeIncomingFileName(start.fileName)
+        guard start.totalBytes <= Self.maxIncomingPullBytes else {
+            setBanner("取回「\(name)」失败：文件超过 512 MiB 上限", isError: true)
+            onStateChanged?()
+            return
+        }
+        if let existing = incomingPulls.removeValue(forKey: start.transferId) {
+            try? existing.handle.close()
+            try? FileManager.default.removeItem(at: existing.partialURL)
+        }
+        let dir = macDropDirectory()
+        var dest = dir.appendingPathComponent(name)
+        if FileManager.default.fileExists(atPath: dest.path) {
+            let stem = dest.deletingPathExtension().lastPathComponent
+            let ext = dest.pathExtension
+            for n in 1..<10_000 {
+                let candidateName = ext.isEmpty ? "\(stem) (\(n))" : "\(stem) (\(n)).\(ext)"
+                let candidate = dir.appendingPathComponent(candidateName)
+                if !FileManager.default.fileExists(atPath: candidate.path) {
+                    dest = candidate
+                    break
+                }
+            }
+        }
+        let partial = dir.appendingPathComponent(".\(dest.lastPathComponent).\(start.transferId).winbridge.part")
+        guard FileManager.default.createFile(atPath: partial.path, contents: nil),
+              let handle = try? FileHandle(forWritingTo: partial) else {
+            setBanner("无法写入 \(partial.path)", isError: true)
+            onStateChanged?()
+            return
+        }
+        incomingPulls[start.transferId] = IncomingPull(
+            finalURL: dest,
+            partialURL: partial,
+            handle: handle,
+            expected: start.totalBytes,
+            received: 0
+        )
+    }
+
+    private func appendIncomingChunk(_ chunk: FileTransferChunk) {
+        guard var pull = incomingPulls[chunk.transferId] else { return }
+        if chunk.offset != pull.received {
+            finishIncoming(chunk.transferId, success: false, message: "分块偏移不连续（预期 \(pull.received)，实际 \(chunk.offset)）")
+            return
+        }
+        let nextTotal = pull.received + UInt64(chunk.data.count)
+        if nextTotal > pull.expected || nextTotal > Self.maxIncomingPullBytes {
+            finishIncoming(chunk.transferId, success: false, message: "收到超限分块数据")
+            return
+        }
+        if !chunk.data.isEmpty {
+            do {
+                try pull.handle.write(contentsOf: chunk.data)
+            } catch {
+                finishIncoming(chunk.transferId, success: false, message: "写入磁盘失败：\(error.localizedDescription)")
+                return
+            }
+            pull.received = nextTotal
+        }
+        incomingPulls[chunk.transferId] = pull
+    }
+
+    private func finishIncoming(_ id: UInt64, success: Bool, message: String) {
+        guard let pull = incomingPulls.removeValue(forKey: id) else { return }
+        try? pull.handle.close()
+        let name = pull.finalURL.lastPathComponent
+        let complete = success && pull.received == pull.expected
+        if complete {
+            do {
+                if FileManager.default.fileExists(atPath: pull.finalURL.path) {
+                    try FileManager.default.removeItem(at: pull.finalURL)
+                }
+                try FileManager.default.moveItem(at: pull.partialURL, to: pull.finalURL)
+                setBanner("文件「\(name)」已取回到 Mac：\(pull.finalURL.path)", isError: false)
+            } catch {
+                try? FileManager.default.removeItem(at: pull.partialURL)
+                setBanner("保存「\(name)」失败：\(error.localizedDescription)", isError: true)
+            }
+        } else {
+            try? FileManager.default.removeItem(at: pull.partialURL)
+            let why = message.isEmpty ? "传输不完整" : message
+            setBanner("取回「\(name)」失败：\(why)", isError: true)
+        }
+        onStateChanged?()
+    }
+
     // MARK: - Inbound Control Dispatch
 
     private func handleControlMessage(_ msg: ControlMessage) {
@@ -782,14 +940,39 @@ final class AppState {
         case .clipboardSync(let sync):
             clipboardMonitor.applyRemote(sync)
 
-        case .fileTransferRes(let res):
-            let name = activeTransferNames.removeValue(forKey: res.transferId) ?? "文件"
-            if res.success {
-                setBanner("文件「\(name)」已保存到 Windows：\(res.savedPath)", isError: false)
-            } else {
-                setBanner("文件「\(name)」传输失败：\(res.message)", isError: true)
+        case .listHostFilesRes(let res):
+            onHostFilesListed?(res)
+            if !res.error.isEmpty {
+                setBanner("列出 Windows 文件失败：\(res.error)", isError: true)
+                onStateChanged?()
             }
-            onStateChanged?()
+
+        case .fileTransferStart(let start):
+            if start.direction == FileTransferStart.directionToClient {
+                beginIncomingPull(start)
+            }
+
+        case .fileTransferChunk(let chunk):
+            if incomingPulls[chunk.transferId] != nil {
+                appendIncomingChunk(chunk)
+            }
+
+        case .fileTransferRes(let res):
+            if incomingPulls[res.transferId] != nil {
+                finishIncoming(res.transferId, success: res.success, message: res.message)
+                break
+            }
+            if let name = activeTransferNames.removeValue(forKey: res.transferId) {
+                if res.success {
+                    setBanner("文件「\(name)」已保存到 Windows：\(res.savedPath)", isError: false)
+                } else {
+                    setBanner("文件「\(name)」传输失败：\(res.message)", isError: true)
+                }
+                onStateChanged?()
+            } else if !res.success {
+                setBanner("文件传输失败：\(res.message)", isError: true)
+                onStateChanged?()
+            }
 
         case .hostError(let err):
             handleHostError(err)
@@ -882,7 +1065,7 @@ final class AppState {
         onStateChanged?()
     }
 
-    private func setBanner(_ message: String, isError: Bool) {
+    func setBanner(_ message: String, isError: Bool) {
         lastBannerMessage = message
         lastBannerIsError = isError
     }

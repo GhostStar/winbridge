@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     time::{Duration, Instant},
@@ -18,7 +18,12 @@ use crate::{
     win32::{self, files::FileReceiver},
 };
 use anyhow::{anyhow, Result};
-use tokio::sync::mpsc;
+use std::io::Read;
+use tokio::sync::{mpsc, Semaphore};
+
+/// Host-initiated pull transfer IDs live in the high-bit namespace so they can
+/// never collide with client-initiated push transfer IDs (1, 2, 3, ...).
+const HOST_PULL_TRANSFER_ID_BASE: u64 = 0x8000_0000_0000_0001;
 
 struct Subscription {
     info: WindowInfo,
@@ -66,6 +71,10 @@ struct Session {
     pending_launches: Vec<PendingLaunch>,
     notices: mpsc::UnboundedSender<Notice>,
     replies: mpsc::Sender<Payload>,
+    bulk_replies: mpsc::Sender<Payload>,
+    pull_cancel: Arc<AtomicBool>,
+    pull_slots: Arc<Semaphore>,
+    pull_transfer_seq: Arc<AtomicU64>,
     injector: Injector,
     gamepad: GamepadManager,
     files: FileReceiver,
@@ -78,6 +87,7 @@ struct Session {
 }
 impl Drop for Session {
     fn drop(&mut self) {
+        self.pull_cancel.store(true, Ordering::Release);
         // Stop all capture threads in parallel before their JoinHandles are joined on drop.
         for sub in self.windows.values() {
             sub.running.store(false, Ordering::Release);
@@ -89,6 +99,109 @@ fn updated(info: WindowInfo, ack: u32) -> Payload {
         window: Some(info),
         ack_resize_seq: ack,
     })
+}
+
+fn send_pulled_files(
+    replies: &mpsc::Sender<Payload>,
+    bulk_replies: &mpsc::Sender<Payload>,
+    cancel: &AtomicBool,
+    transfer_seq: &AtomicU64,
+    requested: &str,
+) -> Result<()> {
+    let drop_dir = win32::files::default_drop_directory();
+    let roots = win32::files::allowed_read_roots(&drop_dir);
+    let (paths, skipped) = if requested.trim() == win32::files::CLIPBOARD_PULL {
+        let raw = win32::files::clipboard_file_paths()?;
+        win32::files::filter_allowed_files(&roots, &raw)?
+    } else {
+        (
+            vec![win32::files::resolve_host_path(&roots, &drop_dir, requested)?],
+            Vec::new(),
+        )
+    };
+    if !skipped.is_empty() {
+        let _ = replies.try_send(Payload::HostError(HostError {
+            window_id: 0,
+            code: 0,
+            message: format!("剪贴板部分项目未取回：{}", skipped.join("；")),
+        }));
+    }
+    ensure_pull_nonempty(&paths)?;
+    for path in paths {
+        if cancel.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let mut opened = win32::files::open_pull_file(&path)?;
+        let transfer_id = transfer_seq.fetch_add(1, Ordering::Relaxed);
+        bulk_replies
+            .blocking_send(Payload::FileTransferStart(FileTransferStart {
+                transfer_id,
+                target_window_id: 0,
+                file_name: opened.file_name.clone(),
+                total_bytes: opened.total_bytes,
+                direction: win32::files::FILE_DIRECTION_TO_CLIENT,
+            }))
+            .map_err(|_| anyhow!("session disconnected"))?;
+        let mut offset = 0u64;
+        let mut buf = vec![0u8; 64 * 1024];
+        let stream_res: Result<()> = (|| {
+            loop {
+                if cancel.load(Ordering::Acquire) {
+                    return Ok(());
+                }
+                let n = opened.file.read(&mut buf)?;
+                let is_last = n == 0 || offset + n as u64 >= opened.total_bytes;
+                let data = if n == 0 { Vec::new() } else { buf[..n].to_vec() };
+                let chunk_offset = offset;
+                offset += n as u64;
+                bulk_replies
+                    .blocking_send(Payload::FileTransferChunk(FileTransferChunk {
+                        transfer_id,
+                        offset: chunk_offset,
+                        data,
+                        is_last,
+                    }))
+                    .map_err(|_| anyhow!("session disconnected"))?;
+                if is_last {
+                    break;
+                }
+            }
+            Ok(())
+        })();
+        if cancel.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        match stream_res {
+            Ok(()) => {
+                bulk_replies
+                    .blocking_send(Payload::FileTransferRes(FileTransferResult {
+                        transfer_id,
+                        success: true,
+                        saved_path: opened.file_name,
+                        message: String::new(),
+                    }))
+                    .map_err(|_| anyhow!("session disconnected"))?;
+            }
+            Err(e) => {
+                let _ = bulk_replies.blocking_send(Payload::FileTransferRes(FileTransferResult {
+                    transfer_id,
+                    success: false,
+                    saved_path: String::new(),
+                    message: format!("{e:#}"),
+                }));
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn ensure_pull_nonempty(paths: &[std::path::PathBuf]) -> Result<()> {
+    if paths.is_empty() {
+        Err(anyhow!("nothing to send"))
+    } else {
+        Ok(())
+    }
 }
 
 impl Session {
@@ -367,6 +480,9 @@ impl Session {
             }
             Payload::FileTransferStart(req) => {
                 let id = req.transfer_id;
+                if req.direction == win32::files::FILE_DIRECTION_TO_CLIENT {
+                    return self.error(0, 0, "client cannot start a host-to-client transfer");
+                }
                 if let Err(e) = self.files.start(req) {
                     return self.send(Payload::FileTransferRes(FileTransferResult {
                         transfer_id: id,
@@ -381,6 +497,70 @@ impl Session {
                 if let Some(res) = self.files.chunk(chunk) {
                     return self.send(Payload::FileTransferRes(res));
                 }
+                return Ok(());
+            }
+            Payload::ListHostFilesReq(req) => {
+                let requested = req.path;
+                let requested_for_task = requested.clone();
+                let listed = tokio::task::spawn_blocking(move || {
+                    let drop_dir = win32::files::default_drop_directory();
+                    let roots = win32::files::allowed_read_roots(&drop_dir);
+                    if requested_for_task.trim().is_empty() {
+                        std::fs::create_dir_all(&drop_dir)?;
+                    }
+                    let path =
+                        win32::files::resolve_host_path(&roots, &drop_dir, &requested_for_task)?;
+                    let entries = win32::files::list_directory(&path)?;
+                    Ok::<_, anyhow::Error>((path.display().to_string(), entries))
+                })
+                .await?;
+                return match listed {
+                    Ok((path, entries)) => self.send(Payload::ListHostFilesRes(ListHostFilesResponse {
+                        path,
+                        entries: entries
+                            .into_iter()
+                            .map(|e| HostFileEntry {
+                                name: e.name,
+                                size_bytes: e.size_bytes,
+                                is_dir: e.is_dir,
+                            })
+                            .collect(),
+                        error: String::new(),
+                    })),
+                    Err(e) => self.send(Payload::ListHostFilesRes(ListHostFilesResponse {
+                        path: requested,
+                        entries: Vec::new(),
+                        error: format!("{e:#}"),
+                    })),
+                };
+            }
+            Payload::FilePullReq(req) => {
+                let Ok(permit) = self.pull_slots.clone().try_acquire_owned() else {
+                    return self.error(0, 0, "已有正在进行的文件取回任务，请等待完成后重试");
+                };
+                let replies = self.replies.clone();
+                let bulk_replies = self.bulk_replies.clone();
+                let cancel = self.pull_cancel.clone();
+                let transfer_seq = self.pull_transfer_seq.clone();
+                let requested = req.path;
+                tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    if let Err(e) = send_pulled_files(
+                        &replies,
+                        &bulk_replies,
+                        &cancel,
+                        &transfer_seq,
+                        &requested,
+                    ) {
+                        if !cancel.load(Ordering::Acquire) {
+                            let _ = replies.try_send(Payload::HostError(HostError {
+                                window_id: 0,
+                                code: 0,
+                                message: format!("取回文件失败：{e:#}"),
+                            }));
+                        }
+                    }
+                });
                 return Ok(());
             }
             Payload::RequestKeyFrame(ref req) => req.window_id,
@@ -517,6 +697,7 @@ pub async fn run(
     mux: Arc<Mux>,
     mut rx: mpsc::Receiver<Payload>,
     replies: mpsc::Sender<Payload>,
+    bulk_replies: mpsc::Sender<Payload>,
 ) -> Result<()> {
     let (notices, mut reports) = mpsc::unbounded_channel();
     let injector = Injector::new()?;
@@ -529,6 +710,10 @@ pub async fn run(
         pending_launches: Vec::new(),
         notices,
         replies,
+        bulk_replies,
+        pull_cancel: Arc::new(AtomicBool::new(false)),
+        pull_slots: Arc::new(Semaphore::new(2)),
+        pull_transfer_seq: Arc::new(AtomicU64::new(HOST_PULL_TRANSFER_ID_BASE)),
         injector,
         gamepad: GamepadManager::default(),
         files: FileReceiver::default(),

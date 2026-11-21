@@ -45,27 +45,33 @@ pub fn sanitize_file_name(raw: &str) -> String {
     cleaned
 }
 
+#[cfg(windows)]
+fn known_folder(id: &windows_sys::core::GUID) -> Option<PathBuf> {
+    use windows_sys::Win32::{System::Com::CoTaskMemFree, UI::Shell::SHGetKnownFolderPath};
+    unsafe {
+        let mut raw: *mut u16 = ptr::null_mut();
+        let hr = SHGetKnownFolderPath(id, 0, ptr::null_mut(), &mut raw);
+        if hr >= 0 && !raw.is_null() {
+            let mut len = 0usize;
+            while *raw.add(len) != 0 {
+                len += 1;
+            }
+            let path = PathBuf::from(String::from_utf16_lossy(std::slice::from_raw_parts(
+                raw, len,
+            )));
+            CoTaskMemFree(raw.cast_const().cast());
+            return Some(path);
+        }
+    }
+    None
+}
+
 /// Returns `%USERPROFILE%\Downloads\WinBridge` (resolving Windows Known Folder Downloads).
 pub fn default_drop_directory() -> PathBuf {
     #[cfg(windows)]
     {
-        use windows_sys::Win32::{
-            System::Com::CoTaskMemFree,
-            UI::Shell::{FOLDERID_Downloads, SHGetKnownFolderPath},
-        };
-        unsafe {
-            let mut raw: *mut u16 = ptr::null_mut();
-            let hr = SHGetKnownFolderPath(&FOLDERID_Downloads, 0, ptr::null_mut(), &mut raw);
-            if hr >= 0 && !raw.is_null() {
-                let mut len = 0usize;
-                while *raw.add(len) != 0 {
-                    len += 1;
-                }
-                let downloads =
-                    PathBuf::from(String::from_utf16_lossy(std::slice::from_raw_parts(raw, len)));
-                CoTaskMemFree(raw.cast_const().cast());
-                return downloads.join("WinBridge");
-            }
+        if let Some(downloads) = known_folder(&windows_sys::Win32::UI::Shell::FOLDERID_Downloads) {
+            return downloads.join("WinBridge");
         }
     }
     std::env::var_os("USERPROFILE")
@@ -250,6 +256,212 @@ impl FileReceiver {
     }
 }
 
+pub const FILE_DIRECTION_TO_CLIENT: u32 = 2;
+pub const CLIPBOARD_PULL: &str = "clipboard:";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostFileEntryInfo {
+    pub name: String,
+    pub size_bytes: u64,
+    pub is_dir: bool,
+}
+
+pub struct OpenedPull {
+    pub file_name: String,
+    pub total_bytes: u64,
+    pub file: File,
+}
+
+/// Roots the client may read: the drop folder plus the user Downloads, Desktop, and Documents.
+pub fn allowed_read_roots(drop_dir: &Path) -> Vec<PathBuf> {
+    let mut roots = vec![drop_dir.to_path_buf()];
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::Shell::{
+            FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads,
+        };
+        for id in [&FOLDERID_Downloads, &FOLDERID_Desktop, &FOLDERID_Documents] {
+            if let Some(dir) = known_folder(id) {
+                if !roots.contains(&dir) {
+                    roots.push(dir);
+                }
+            }
+        }
+    }
+    if let Some(home) = user_home() {
+        for name in ["Downloads", "Desktop", "Documents"] {
+            let dir = home.join(name);
+            if !roots.contains(&dir) {
+                roots.push(dir);
+            }
+        }
+    }
+    roots
+}
+
+fn user_home() -> Option<PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+}
+
+/// Canonicalizes `candidate` and rejects anything that resolves outside `roots`.
+pub fn canonicalize_in_roots(roots: &[PathBuf], candidate: &Path) -> Result<PathBuf> {
+    if !candidate.exists() {
+        bail!("path does not exist: {}", candidate.display());
+    }
+    let canonical = candidate
+        .canonicalize()
+        .with_context(|| format!("canonicalize {}", candidate.display()))?;
+    let allowed = roots.iter().any(|root| {
+        let Ok(root_canon) = root.canonicalize() else {
+            return false;
+        };
+        canonical.starts_with(&root_canon)
+    });
+    ensure!(
+        allowed,
+        "path is outside the allowed folders (Downloads, Desktop, Documents, WinBridge drop)"
+    );
+    Ok(canonical)
+}
+
+/// Resolves a client path and rejects anything that escapes `roots` after canonicalization.
+pub fn resolve_host_path(roots: &[PathBuf], drop_dir: &Path, requested: &str) -> Result<PathBuf> {
+    let requested = requested.trim();
+    ensure!(requested != CLIPBOARD_PULL, "clipboard pull is not a filesystem path");
+    let candidate = if requested.is_empty() {
+        drop_dir.to_path_buf()
+    } else {
+        let raw = Path::new(requested);
+        if raw.is_absolute() {
+            raw.to_path_buf()
+        } else {
+            ensure!(
+                !requested.split(['/', '\\']).any(|part| part == ".."),
+                "relative path may not contain '..'"
+            );
+            drop_dir.join(raw)
+        }
+    };
+    canonicalize_in_roots(roots, &candidate)
+}
+
+/// Filters clipboard paths to regular files that canonicalize inside `roots`.
+/// Returns `(allowed_files, skipped_reasons)`.
+pub fn filter_allowed_files(
+    roots: &[PathBuf],
+    raw_paths: &[PathBuf],
+) -> Result<(Vec<PathBuf>, Vec<String>)> {
+    let mut allowed = Vec::new();
+    let mut skipped = Vec::new();
+    for raw in raw_paths {
+        match canonicalize_in_roots(roots, raw) {
+            Ok(canon) => match fs::metadata(&canon) {
+                Ok(meta) if meta.is_file() => allowed.push(canon),
+                Ok(_) => skipped.push(format!(
+                    "{}（已跳过文件夹）",
+                    raw.file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| raw.display().to_string())
+                )),
+                Err(e) => skipped.push(format!("{}（无法读取：{e}）", raw.display())),
+            },
+            Err(_) => skipped.push(format!(
+                "{}（不在允许目录 Downloads/Desktop/Documents 内）",
+                raw.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| raw.display().to_string())
+            )),
+        }
+    }
+    ensure!(
+        !allowed.is_empty(),
+        "剪贴板中没有允许取回的文件{}",
+        if skipped.is_empty() {
+            String::new()
+        } else {
+            format!("：{}", skipped.join("；"))
+        }
+    );
+    Ok((allowed, skipped))
+}
+
+pub fn list_directory(path: &Path) -> Result<Vec<HostFileEntryInfo>> {
+    let mut entries = Vec::new();
+    let rd = fs::read_dir(path).with_context(|| format!("read {}", path.display()))?;
+    for item in rd {
+        let item = item?;
+        let name = item.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') {
+            continue;
+        }
+        let meta = item.metadata()?;
+        entries.push(HostFileEntryInfo {
+            name,
+            size_bytes: if meta.is_file() { meta.len() } else { 0 },
+            is_dir: meta.is_dir(),
+        });
+    }
+    entries.sort_by(|a, b| a.is_dir.cmp(&b.is_dir).reverse().then(a.name.cmp(&b.name)));
+    Ok(entries)
+}
+
+pub fn open_pull_file(path: &Path) -> Result<OpenedPull> {
+    let meta = fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
+    ensure!(meta.is_file(), "not a file: {}", path.display());
+    ensure!(
+        meta.len() <= MAX_TRANSFER_BYTES,
+        "file exceeds maximum transfer size of 512 MiB"
+    );
+    let file_name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "winbridge-file.bin".into());
+    let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    Ok(OpenedPull {
+        file_name: sanitize_file_name(&file_name),
+        total_bytes: meta.len(),
+        file,
+    })
+}
+
+#[cfg(windows)]
+pub fn clipboard_file_paths() -> Result<Vec<PathBuf>> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::{
+        System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard},
+        UI::Shell::{DragQueryFileW, HDROP},
+    };
+    const CF_HDROP: u32 = 15;
+    unsafe {
+        ensure!(OpenClipboard(std::ptr::null_mut()) != 0, "OpenClipboard failed");
+        let hdrop = GetClipboardData(CF_HDROP);
+        if hdrop.is_null() {
+            CloseClipboard();
+            bail!("Windows clipboard has no files");
+        }
+        let drop = hdrop as HDROP;
+        let count = DragQueryFileW(drop, 0xFFFF_FFFF, std::ptr::null_mut(), 0);
+        let mut paths = Vec::with_capacity(count as usize);
+        for i in 0..count {
+            let len = DragQueryFileW(drop, i, std::ptr::null_mut(), 0);
+            let mut buf = vec![0u16; len as usize + 1];
+            DragQueryFileW(drop, i, buf.as_mut_ptr(), buf.len() as u32);
+            buf.truncate(len as usize);
+            paths.push(PathBuf::from(std::ffi::OsString::from_wide(&buf)));
+        }
+        CloseClipboard();
+        ensure!(!paths.is_empty(), "Windows clipboard has no files");
+        Ok(paths)
+    }
+}
+
+#[cfg(not(windows))]
+pub fn clipboard_file_paths() -> Result<Vec<PathBuf>> {
+    bail!("clipboard file pull is only available on Windows")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,6 +487,7 @@ mod tests {
                 target_window_id: 0,
                 file_name: "demo.txt".into(),
                 total_bytes: 11,
+                direction: 0,
             })
             .unwrap();
             assert!(rx
@@ -299,5 +512,50 @@ mod tests {
         assert!(dir.join("demo.txt").exists());
         assert!(dir.join("demo (1).txt").exists());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rejects_paths_outside_allowed_roots_and_lists_a_child() {
+        let root = std::env::temp_dir().join(format!("winbridge-pull-{}", std::process::id()));
+        let drop_dir = root.join("WinBridge");
+        let outside = std::env::temp_dir().join(format!("winbridge-pull-out-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&outside);
+        fs::create_dir_all(&drop_dir).unwrap();
+        fs::create_dir_all(drop_dir.join("notes")).unwrap();
+        fs::write(drop_dir.join("notes").join("a.txt"), b"abc").unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), b"nope").unwrap();
+
+        let roots = vec![drop_dir.clone()];
+        let listed = resolve_host_path(&roots, &drop_dir, "notes").unwrap();
+        assert!(listed.ends_with("notes"));
+        let entries = list_directory(&listed).unwrap();
+        assert_eq!(entries[0].name, "a.txt");
+        assert_eq!(entries[0].size_bytes, 3);
+        assert!(!entries[0].is_dir);
+
+        let escaped = outside.join("secret.txt");
+        let err = resolve_host_path(&roots, &drop_dir, escaped.to_str().unwrap()).unwrap_err();
+        assert!(err.to_string().contains("outside"), "{err}");
+        assert!(resolve_host_path(&roots, &drop_dir, "notes/../../secret.txt").is_err());
+
+        let opened = open_pull_file(&listed.join("a.txt")).unwrap();
+        assert_eq!(opened.file_name, "a.txt");
+        assert_eq!(opened.total_bytes, 3);
+
+        // Clipboard file filter must enforce the same allowed-roots jail and skip directories.
+        let (allowed, skipped) = filter_allowed_files(
+            &roots,
+            &[listed.join("a.txt"), listed.clone(), escaped.clone()],
+        )
+        .unwrap();
+        assert_eq!(allowed.len(), 1);
+        assert!(allowed[0].ends_with("a.txt"));
+        assert_eq!(skipped.len(), 2);
+        assert!(filter_allowed_files(&roots, &[escaped]).is_err());
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&outside);
     }
 }

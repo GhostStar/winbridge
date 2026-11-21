@@ -190,6 +190,7 @@ async fn control<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     let (mut reader, mut writer) = tokio::io::split(socket);
     let (requests, rx) = mpsc::channel(32);
     let (replies, mut tx) = mpsc::channel(64);
+    let (bulk_replies, mut bulk_tx) = mpsc::channel(16);
     let read = async move {
         loop {
             let msg = timeout(IDLE, read_message(&mut reader)).await??;
@@ -200,7 +201,18 @@ async fn control<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     };
     let write = async move {
         let mut seq = 2u64;
-        while let Some(msg) = tx.recv().await {
+        loop {
+            let msg = tokio::select! {
+                biased;
+                msg = tx.recv() => match msg {
+                    Some(msg) => msg,
+                    None => break,
+                },
+                msg = bulk_tx.recv() => match msg {
+                    Some(msg) => msg,
+                    None => break,
+                },
+            };
             timeout(IDLE, write_message(&mut writer, seq, msg)).await??;
             seq = seq.wrapping_add(1);
         }
@@ -209,7 +221,7 @@ async fn control<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     tokio::select! {
         res = read => res,
         res = write => res,
-        res = session::run(server.config.clone(), selected, lease.1.mux.clone(), rx, replies) => res,
+        res = session::run(server.config.clone(), selected, lease.1.mux.clone(), rx, replies, bulk_replies) => res,
     }
 }
 

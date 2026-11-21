@@ -58,9 +58,12 @@ message ControlMessage {
     // --- Clipboard, Audio & File Transfer ---
     ClipboardSync clipboard_sync = 60;           // Bidirectional
     SetAudioConfig set_audio_config = 61;        // Mac -> Win
-    FileTransferStart file_transfer_start = 62;  // Mac -> Win
-    FileTransferChunk file_transfer_chunk = 63;  // Mac -> Win
-    FileTransferResult file_transfer_res = 64;   // Win -> Mac
+    FileTransferStart file_transfer_start = 62;  // Mac -> Win, or Win -> Mac when direction = TO_CLIENT
+    FileTransferChunk file_transfer_chunk = 63;  // Same direction as the matching FileTransferStart
+    FileTransferResult file_transfer_res = 64;   // Receiver -> sender
+    ListHostFilesRequest list_host_files_req = 65; // Mac -> Win
+    ListHostFilesResponse list_host_files_res = 66; // Win -> Mac
+    FilePullRequest file_pull_req = 67;          // Mac -> Win
 
     // --- Diagnostics / Errors (Win -> Mac) ---
     HostError host_error = 70;                   // Win -> Mac
@@ -443,6 +446,34 @@ message FileTransferStart {
   uint64 target_window_id = 2;
   string file_name = 3;
   uint64 total_bytes = 4;
+  // 0 or 1: Mac -> Windows (legacy drag-and-drop). 2: Windows -> Mac (file pull).
+  uint32 direction = 5;
+}
+
+// Mac asks the host to list a directory it is allowed to read.
+message ListHostFilesRequest {
+  // Empty = Downloads\WinBridge. A relative path stays inside that folder.
+  // An absolute path must resolve inside Downloads, Desktop, or Documents.
+  string path = 1;
+}
+
+message HostFileEntry {
+  string name = 1;
+  uint64 size_bytes = 2;
+  bool is_dir = 3;
+}
+
+message ListHostFilesResponse {
+  string path = 1;
+  repeated HostFileEntry entries = 2;
+  string error = 3;
+}
+
+// Mac asks the host to send one file, or every file currently on the Windows clipboard.
+message FilePullRequest {
+  uint64 request_id = 1;
+  // Same path rules as ListHostFilesRequest. The literal "clipboard:" sends CF_HDROP files.
+  string path = 2;
 }
 
 message FileTransferChunk {

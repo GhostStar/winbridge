@@ -943,10 +943,14 @@ struct GamepadState: Equatable, Sendable {
 }
 
 struct FileTransferStart: Equatable, Sendable {
+    static let directionToHost: UInt32 = 1
+    static let directionToClient: UInt32 = 2
+
     var transferId: UInt64 = 0
     var targetWindowId: UInt64 = 0
     var fileName: String = ""
     var totalBytes: UInt64 = 0
+    var direction: UInt32 = 0
 
     func encode() -> Data {
         var w = ProtoWriter()
@@ -954,6 +958,7 @@ struct FileTransferStart: Equatable, Sendable {
         w.writeUInt64(field: 2, targetWindowId)
         w.writeString(field: 3, fileName)
         w.writeUInt64(field: 4, totalBytes)
+        w.writeUInt32(field: 5, direction)
         return w.data
     }
 
@@ -967,6 +972,116 @@ struct FileTransferStart: Equatable, Sendable {
             case 2: m.targetWindowId = try r.readUInt64()
             case 3: m.fileName = try r.readString()
             case 4: m.totalBytes = try r.readUInt64()
+            case 5: m.direction = try r.readUInt32()
+            default: try r.skip(wireType: wire)
+            }
+        }
+        return m
+    }
+}
+
+struct HostFileEntry: Equatable, Sendable {
+    var name: String = ""
+    var sizeBytes: UInt64 = 0
+    var isDir: Bool = false
+
+    func encode() -> Data {
+        var w = ProtoWriter()
+        w.writeString(field: 1, name)
+        w.writeUInt64(field: 2, sizeBytes)
+        w.writeBool(field: 3, isDir)
+        return w.data
+    }
+
+    static func decode(from data: Data) throws -> HostFileEntry {
+        var r = ProtoReader(data: data)
+        var m = HostFileEntry()
+        while !r.isAtEnd {
+            let (field, wire) = try r.readTag()
+            switch field {
+            case 1: m.name = try r.readString()
+            case 2: m.sizeBytes = try r.readUInt64()
+            case 3: m.isDir = try r.readBool()
+            default: try r.skip(wireType: wire)
+            }
+        }
+        return m
+    }
+}
+
+struct ListHostFilesRequest: Equatable, Sendable {
+    var path: String = ""
+
+    func encode() -> Data {
+        var w = ProtoWriter()
+        w.writeString(field: 1, path)
+        return w.data
+    }
+
+    static func decode(from data: Data) throws -> ListHostFilesRequest {
+        var r = ProtoReader(data: data)
+        var m = ListHostFilesRequest()
+        while !r.isAtEnd {
+            let (field, wire) = try r.readTag()
+            switch field {
+            case 1: m.path = try r.readString()
+            default: try r.skip(wireType: wire)
+            }
+        }
+        return m
+    }
+}
+
+struct ListHostFilesResponse: Equatable, Sendable {
+    var path: String = ""
+    var entries: [HostFileEntry] = []
+    var error: String = ""
+
+    func encode() -> Data {
+        var w = ProtoWriter()
+        w.writeString(field: 1, path)
+        for entry in entries {
+            w.writeMessage(field: 2, entry.encode(), forceEmit: true)
+        }
+        w.writeString(field: 3, error)
+        return w.data
+    }
+
+    static func decode(from data: Data) throws -> ListHostFilesResponse {
+        var r = ProtoReader(data: data)
+        var m = ListHostFilesResponse()
+        while !r.isAtEnd {
+            let (field, wire) = try r.readTag()
+            switch field {
+            case 1: m.path = try r.readString()
+            case 2: m.entries.append(try HostFileEntry.decode(from: try r.readBytes()))
+            case 3: m.error = try r.readString()
+            default: try r.skip(wireType: wire)
+            }
+        }
+        return m
+    }
+}
+
+struct FilePullRequest: Equatable, Sendable {
+    var requestId: UInt64 = 0
+    var path: String = ""
+
+    func encode() -> Data {
+        var w = ProtoWriter()
+        w.writeUInt64(field: 1, requestId)
+        w.writeString(field: 2, path)
+        return w.data
+    }
+
+    static func decode(from data: Data) throws -> FilePullRequest {
+        var r = ProtoReader(data: data)
+        var m = FilePullRequest()
+        while !r.isAtEnd {
+            let (field, wire) = try r.readTag()
+            switch field {
+            case 1: m.requestId = try r.readUInt64()
+            case 2: m.path = try r.readString()
             default: try r.skip(wireType: wire)
             }
         }
@@ -1170,6 +1285,9 @@ struct ControlMessage: Equatable, Sendable {
         case fileTransferStart(FileTransferStart)       // 62
         case fileTransferChunk(FileTransferChunk)       // 63
         case fileTransferRes(FileTransferResult)        // 64
+        case listHostFilesReq(ListHostFilesRequest)    // 65
+        case listHostFilesRes(ListHostFilesResponse)   // 66
+        case filePullReq(FilePullRequest)              // 67
         case hostError(HostError)                       // 70
     }
 
@@ -1211,6 +1329,9 @@ struct ControlMessage: Equatable, Sendable {
         case .fileTransferStart(let m): w.writeMessage(field: 62, m.encode(), forceEmit: true)
         case .fileTransferChunk(let m): w.writeMessage(field: 63, m.encode(), forceEmit: true)
         case .fileTransferRes(let m): w.writeMessage(field: 64, m.encode(), forceEmit: true)
+        case .listHostFilesReq(let m): w.writeMessage(field: 65, m.encode(), forceEmit: true)
+        case .listHostFilesRes(let m): w.writeMessage(field: 66, m.encode(), forceEmit: true)
+        case .filePullReq(let m): w.writeMessage(field: 67, m.encode(), forceEmit: true)
         case .hostError(let m): w.writeMessage(field: 70, m.encode(), forceEmit: true)
         }
         return w.data
@@ -1255,6 +1376,9 @@ struct ControlMessage: Equatable, Sendable {
             case 62: payload = .fileTransferStart(try FileTransferStart.decode(from: try r.readBytes()))
             case 63: payload = .fileTransferChunk(try FileTransferChunk.decode(from: try r.readBytes()))
             case 64: payload = .fileTransferRes(try FileTransferResult.decode(from: try r.readBytes()))
+            case 65: payload = .listHostFilesReq(try ListHostFilesRequest.decode(from: try r.readBytes()))
+            case 66: payload = .listHostFilesRes(try ListHostFilesResponse.decode(from: try r.readBytes()))
+            case 67: payload = .filePullReq(try FilePullRequest.decode(from: try r.readBytes()))
             case 70: payload = .hostError(try HostError.decode(from: try r.readBytes()))
             default: try r.skip(wireType: wire)
             }

@@ -57,7 +57,7 @@ flowchart LR
   - 自动感知 Windows 游戏指针显隐（如游戏内按住 `Alt` 或弹出菜单时自动切回限域可见指针，返回 3D 战斗视角自动切换隐藏相对视角 `dx/dy`）。
   - 支持按进程记住灵敏度倍率与自动开启游戏锁定；可选「背景禁悬停」避免多窗误触。
 - **可切换性能 HUD（`⇧⌘H`）**：远端窗口右上角半透明浮层实时展示编码格式、FPS、实时码率（Mbps）、RTT 与分辨率（完全鼠标穿透）。
-- **跨设备拖放传文件（Mac → Windows）**：直接将 Mac 文件拖入任意远端窗口，分块安全传输至 Windows `Downloads\WinBridge\`（自动防路径穿越与重名去重，单文件上限 512 MiB）。
+- **跨设备拖放传文件（双向）**：把 Mac 文件拖入任意远端窗口，分块传到 Windows `Downloads\WinBridge\`。菜单「从 Windows 取回文件…」可以浏览该目录以及下载、桌面、文档（拒绝目录穿越），把文件取回到 Mac 的 `Downloads/WinBridge`，也可以取回 Windows 剪贴板里的文件。单文件上限 512 MiB。
 - **手柄透传（可选）**：macOS 原生 `GameController.framework`（Xbox / DualSense / Switch Pro）转发至 Windows；若本机已安装 [ViGEmBus](https://github.com/nefarius/ViGEmBus) 并将 `ViGEmClient.dll` 置于同目录，自动虚拟 Xbox 360 手柄。
 - **固定本地代码签名脚本**：提供 `./scripts/setup_codesign.sh`，重新打包 `WinBridge.app` 后保持签名身份不变，彻底避免 macOS 15/26 反复重置「本地网络」与钥匙串权限。
 
