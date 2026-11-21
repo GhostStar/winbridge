@@ -16,6 +16,12 @@ enum GameLockState: Equatable {
     case relativeLocked
 }
 
+enum TransferToastStyle: Equatable {
+    case progress
+    case success
+    case error
+}
+
 /// Renders decoded video frames via CoreAnimation/IOSurface and forwards mouse,
 /// trackpad scroll, physical HID keyboard, and native macOS IME (`NSTextInputClient`) input.
 @MainActor
@@ -40,6 +46,12 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
     private let videoLayer = CALayer()
     private let hudContainer = NSView()
     private let hudLabel = NSTextField(labelWithString: "")
+    private let dropOverlay = NSView()
+    private let dropBadge = NSView()
+    private let dropLabel = NSTextField(labelWithString: "")
+    private let toastContainer = NSView()
+    private let toastLabel = NSTextField(wrappingLabelWithString: "")
+    private var toastHideTask: Task<Void, Never>?
     private var retainedFrame: DecodedImage?
     private var sourceSize: CGSize = .zero
     private var preserveAspectRatio: Bool = true
@@ -76,6 +88,7 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
         layer?.addSublayer(videoLayer)
 
         setupHudOverlay()
+        setupDropAndToastOverlays()
         registerForDraggedTypes([.fileURL])
     }
 
@@ -102,6 +115,98 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
             hudContainer.topAnchor.constraint(equalTo: topAnchor, constant: 10),
             hudContainer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
         ])
+    }
+
+    private func setupDropAndToastOverlays() {
+        // Drop highlight overlay sits above videoLayer so drag feedback is always visible.
+        dropOverlay.wantsLayer = true
+        dropOverlay.layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.14).cgColor
+        dropOverlay.layer?.borderWidth = 3
+        dropOverlay.layer?.borderColor = NSColor.controlAccentColor.cgColor
+        dropOverlay.translatesAutoresizingMaskIntoConstraints = false
+        dropOverlay.isHidden = true
+
+        dropBadge.wantsLayer = true
+        dropBadge.layer?.backgroundColor = NSColor(calibratedWhite: 0.08, alpha: 0.86).cgColor
+        dropBadge.layer?.cornerRadius = 10
+        dropBadge.layer?.borderWidth = 1
+        dropBadge.layer?.borderColor = NSColor.controlAccentColor.withAlphaComponent(0.8).cgColor
+        dropBadge.translatesAutoresizingMaskIntoConstraints = false
+
+        dropLabel.font = .systemFont(ofSize: 14, weight: .semibold)
+        dropLabel.textColor = .white
+        dropLabel.alignment = .center
+        dropLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        dropBadge.addSubview(dropLabel)
+        dropOverlay.addSubview(dropBadge)
+        addSubview(dropOverlay)
+
+        // Bottom-center transfer progress / result toast (click-through, sits above videoLayer).
+        toastContainer.wantsLayer = true
+        toastContainer.layer?.backgroundColor = NSColor(calibratedWhite: 0.08, alpha: 0.86).cgColor
+        toastContainer.layer?.cornerRadius = 8
+        toastContainer.layer?.borderWidth = 1
+        toastContainer.layer?.borderColor = NSColor(calibratedWhite: 1.0, alpha: 0.22).cgColor
+        toastContainer.translatesAutoresizingMaskIntoConstraints = false
+        toastContainer.isHidden = true
+
+        toastLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        toastLabel.textColor = .white
+        toastLabel.alignment = .center
+        toastLabel.maximumNumberOfLines = 3
+        toastLabel.lineBreakMode = .byTruncatingMiddle
+        toastLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        toastContainer.addSubview(toastLabel)
+        addSubview(toastContainer)
+
+        NSLayoutConstraint.activate([
+            dropOverlay.leadingAnchor.constraint(equalTo: leadingAnchor),
+            dropOverlay.trailingAnchor.constraint(equalTo: trailingAnchor),
+            dropOverlay.topAnchor.constraint(equalTo: topAnchor),
+            dropOverlay.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+            dropBadge.centerXAnchor.constraint(equalTo: dropOverlay.centerXAnchor),
+            dropBadge.centerYAnchor.constraint(equalTo: dropOverlay.centerYAnchor),
+            dropLabel.leadingAnchor.constraint(equalTo: dropBadge.leadingAnchor, constant: 18),
+            dropLabel.trailingAnchor.constraint(equalTo: dropBadge.trailingAnchor, constant: -18),
+            dropLabel.topAnchor.constraint(equalTo: dropBadge.topAnchor, constant: 10),
+            dropLabel.bottomAnchor.constraint(equalTo: dropBadge.bottomAnchor, constant: -10),
+
+            toastContainer.centerXAnchor.constraint(equalTo: centerXAnchor),
+            toastContainer.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -16),
+            toastContainer.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: -32),
+            toastLabel.leadingAnchor.constraint(equalTo: toastContainer.leadingAnchor, constant: 14),
+            toastLabel.trailingAnchor.constraint(equalTo: toastContainer.trailingAnchor, constant: -14),
+            toastLabel.topAnchor.constraint(equalTo: toastContainer.topAnchor, constant: 8),
+            toastLabel.bottomAnchor.constraint(equalTo: toastContainer.bottomAnchor, constant: -8),
+        ])
+    }
+
+    func showToast(_ text: String, style: TransferToastStyle, autoHideSeconds: TimeInterval?) {
+        toastHideTask?.cancel()
+        toastHideTask = nil
+        toastLabel.stringValue = text
+        switch style {
+        case .progress:
+            toastContainer.layer?.borderColor = NSColor.controlAccentColor.withAlphaComponent(0.75).cgColor
+            toastLabel.textColor = .white
+        case .success:
+            toastContainer.layer?.borderColor = NSColor.systemGreen.withAlphaComponent(0.85).cgColor
+            toastLabel.textColor = NSColor(calibratedRed: 0.78, green: 1.0, blue: 0.84, alpha: 1.0)
+        case .error:
+            toastContainer.layer?.borderColor = NSColor.systemRed.withAlphaComponent(0.85).cgColor
+            toastLabel.textColor = NSColor(calibratedRed: 1.0, green: 0.76, blue: 0.76, alpha: 1.0)
+        }
+        toastContainer.isHidden = false
+        if let delay = autoHideSeconds, delay > 0 {
+            toastHideTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                guard !Task.isCancelled else { return }
+                self?.toastContainer.isHidden = true
+            }
+        }
     }
 
     func setHudVisible(_ visible: Bool) {
@@ -784,38 +889,82 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
 
     // MARK: - Drag & Drop File Transfer (Mac -> Windows Downloads\WinBridge)
 
-    private func extractDroppedFileURLs(from info: NSDraggingInfo) -> [URL] {
+    private func inspectDroppedURLs(from info: NSDraggingInfo) -> (files: [URL], skippedDirs: Int) {
         guard let items = info.draggingPasteboard.readObjects(
             forClasses: [NSURL.self],
             options: [.urlReadingFileURLsOnly: true]
         ) as? [URL] else {
-            return []
+            return ([], 0)
         }
-        return items.filter { url in
+        var files: [URL] = []
+        var skippedDirs = 0
+        for raw in items {
+            let resolved = raw.standardizedFileURL.resolvingSymlinksInPath()
             var isDir: ObjCBool = false
-            return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) && !isDir.boolValue
+            if FileManager.default.fileExists(atPath: resolved.path, isDirectory: &isDir) {
+                if isDir.boolValue {
+                    skippedDirs += 1
+                } else {
+                    files.append(resolved)
+                }
+            }
         }
+        return (files, skippedDirs)
+    }
+
+    private func updateDropOverlay(for info: NSDraggingInfo) -> NSDragOperation {
+        let (files, skippedDirs) = inspectDroppedURLs(from: info)
+        if !files.isEmpty {
+            let countText = files.count == 1
+                ? "松开鼠标发送「\(files[0].lastPathComponent)」到 Windows"
+                : "松开鼠标发送 \(files.count) 个文件到 Windows"
+            dropLabel.stringValue = skippedDirs > 0
+                ? "\(countText)（将跳过 \(skippedDirs) 个文件夹）"
+                : countText
+            dropOverlay.isHidden = false
+            return .copy
+        }
+        if skippedDirs > 0 {
+            dropLabel.stringValue = "暂不支持直接拖放文件夹，请先压缩或拖入文件"
+            dropOverlay.isHidden = false
+            return .copy
+        }
+        dropOverlay.isHidden = true
+        return []
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        let urls = extractDroppedFileURLs(from: sender)
-        guard !urls.isEmpty else { return [] }
-        layer?.borderWidth = 2.5
-        layer?.borderColor = NSColor.controlAccentColor.cgColor
-        return .copy
+        updateDropOverlay(for: sender)
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        updateDropOverlay(for: sender)
     }
 
     override func draggingExited(_ sender: NSDraggingInfo?) {
-        layer?.borderWidth = 0
-        layer?.borderColor = nil
+        dropOverlay.isHidden = true
+    }
+
+    override func draggingEnded(_ sender: NSDraggingInfo) {
+        dropOverlay.isHidden = true
     }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        layer?.borderWidth = 0
-        layer?.borderColor = nil
-        let urls = extractDroppedFileURLs(from: sender)
-        guard !urls.isEmpty else { return false }
-        onFilesDropped?(urls)
+        dropOverlay.isHidden = true
+        let (files, skippedDirs) = inspectDroppedURLs(from: sender)
+        ClientLogger.shared.info(
+            "FileDrop on window 0x\(String(windowId, radix: 16)): files=\(files.count) skippedDirs=\(skippedDirs)"
+        )
+        if files.isEmpty {
+            if skippedDirs > 0 {
+                showToast("暂不支持直接拖放文件夹，请先压缩为 zip 或拖入单个/多个文件", style: .error, autoHideSeconds: 4.5)
+            }
+            return false
+        }
+        if skippedDirs > 0 {
+            showToast("已跳过 \(skippedDirs) 个文件夹，正在发送 \(files.count) 个文件…", style: .progress, autoHideSeconds: nil)
+        }
+        onFilesDropped?(files)
         return true
     }
 }

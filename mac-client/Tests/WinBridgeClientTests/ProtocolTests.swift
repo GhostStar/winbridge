@@ -211,4 +211,7 @@ import Testing
     #expect(AppState.sanitizeIncomingFileName("..") == "winbridge-file.bin")
     #expect(AppState.sanitizeIncomingFileName(".") == "winbridge-file.bin")
     #expect(AppState.sanitizeIncomingFileName("") == "winbridge-file.bin")
+    #expect(AppState.formatByteCount(512) == "512 B")
+    #expect(AppState.formatByteCount(2048) == "2.0 KB")
+    #expect(AppState.formatByteCount(5 * 1024 * 1024) == "5.0 MB")
 }

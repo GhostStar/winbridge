@@ -381,6 +381,11 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
         remoteView.applyCursorShape(shape)
     }
 
+    func showToast(_ text: String, style: TransferToastStyle, autoHideSeconds: TimeInterval?) {
+        guard info.kind != .popup else { return }
+        remoteView.showToast(text, style: style, autoHideSeconds: autoHideSeconds)
+    }
+
     func setPointerLock(_ enabled: Bool) {
         guard info.kind != .popup else { return }
         remoteView.setGameLockEnabled(enabled)

@@ -251,6 +251,9 @@ impl FileReceiver {
             let _ = fs::remove_file(&part);
             format!("finalize dropped file to {}", final_path.display())
         })?;
+        if let Err(e) = set_clipboard_file_paths(&[&final_path]) {
+            tracing::debug!(error = %e, "could not publish dropped file to Windows clipboard");
+        }
         tracing::info!(path = %final_path.display(), "received dragged file from macOS");
         Ok(Some(final_path))
     }
@@ -457,6 +460,78 @@ pub fn clipboard_file_paths() -> Result<Vec<PathBuf>> {
     }
 }
 
+/// Builds a Win32 `DROPFILES` (UTF-16LE, double-NUL terminated) memory block for `CF_HDROP`.
+pub fn build_dropfiles_blob(paths: &[&Path]) -> Vec<u8> {
+    // DROPFILES struct: pFiles(u32=20), pt.x(i32=0), pt.y(i32=0), fNC(i32=0), fWide(i32=1)
+    let mut out = Vec::with_capacity(20 + paths.len() * 64);
+    out.extend_from_slice(&20u32.to_le_bytes());
+    out.extend_from_slice(&0i32.to_le_bytes());
+    out.extend_from_slice(&0i32.to_le_bytes());
+    out.extend_from_slice(&0i32.to_le_bytes());
+    out.extend_from_slice(&1i32.to_le_bytes());
+    for path in paths {
+        let text = path.as_os_str().to_string_lossy();
+        for unit in text.encode_utf16() {
+            if unit != 0 {
+                out.extend_from_slice(&unit.to_le_bytes());
+            }
+        }
+        out.extend_from_slice(&0u16.to_le_bytes());
+    }
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out
+}
+
+#[cfg(windows)]
+pub fn set_clipboard_file_paths(paths: &[&Path]) -> Result<()> {
+    use windows_sys::Win32::{
+        Foundation::GlobalFree,
+        System::{
+            DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData},
+            Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE},
+        },
+    };
+    const CF_HDROP: u32 = 15;
+    ensure!(!paths.is_empty(), "no file paths to place on clipboard");
+    let blob = build_dropfiles_blob(paths);
+    unsafe {
+        let mut opened = false;
+        for _ in 0..5 {
+            if OpenClipboard(ptr::null_mut()) != 0 {
+                opened = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        ensure!(opened, "OpenClipboard failed");
+        let hmem = GlobalAlloc(GMEM_MOVEABLE, blob.len());
+        if hmem.is_null() {
+            CloseClipboard();
+            bail!("GlobalAlloc failed for CF_HDROP");
+        }
+        let dst = GlobalLock(hmem);
+        if dst.is_null() {
+            GlobalFree(hmem);
+            CloseClipboard();
+            bail!("GlobalLock failed for CF_HDROP");
+        }
+        ptr::copy_nonoverlapping(blob.as_ptr(), dst.cast(), blob.len());
+        GlobalUnlock(hmem);
+        if EmptyClipboard() == 0 || SetClipboardData(CF_HDROP, hmem).is_null() {
+            GlobalFree(hmem);
+            CloseClipboard();
+            bail!("SetClipboardData(CF_HDROP) failed");
+        }
+        CloseClipboard();
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn set_clipboard_file_paths(_paths: &[&Path]) -> Result<()> {
+    Ok(())
+}
+
 #[cfg(not(windows))]
 pub fn clipboard_file_paths() -> Result<Vec<PathBuf>> {
     bail!("clipboard file pull is only available on Windows")
@@ -557,5 +632,21 @@ mod tests {
 
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn builds_valid_utf16_dropfiles_blob() {
+        let p1 = Path::new(r"C:\Users\me\Downloads\WinBridge\a.png");
+        let blob = build_dropfiles_blob(&[p1]);
+        assert_eq!(u32::from_le_bytes(blob[0..4].try_into().unwrap()), 20);
+        assert_eq!(i32::from_le_bytes(blob[16..20].try_into().unwrap()), 1);
+        let units: Vec<u16> = blob[20..]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        // Ends with double NUL terminator
+        assert_eq!(units[units.len() - 2..], [0, 0]);
+        let decoded = String::from_utf16(&units[..units.len() - 2]).unwrap();
+        assert_eq!(decoded, r"C:\Users\me\Downloads\WinBridge\a.png");
     }
 }

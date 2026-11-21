@@ -19,6 +19,7 @@ private struct IncomingPull {
     let handle: FileHandle
     let expected: UInt64
     var received: UInt64
+    var lastProgressToastAt: Date
 }
 
 @MainActor
@@ -85,6 +86,7 @@ final class AppState {
     private var pendingRestoreTargets: [RestoreWindowTarget] = []
     private var nextTransferId: UInt64 = 1
     private var activeTransferNames: [UInt64: String] = [:]
+    private var activeTransferTargetWindow: [UInt64: UInt64] = [:]
     private var incomingPulls: [UInt64: IncomingPull] = [:]
     var onHostFilesListed: ((ListHostFilesResponse) -> Void)?
     private var lastAdaptivePush = Date.distantPast
@@ -581,6 +583,7 @@ final class AppState {
         availableApps.removeAll()
         subscribedRootIds.removeAll()
         activeTransferNames.removeAll()
+        activeTransferTargetWindow.removeAll()
         for (_, pull) in incomingPulls {
             try? pull.handle.close()
             try? FileManager.default.removeItem(at: pull.partialURL)
@@ -769,31 +772,89 @@ final class AppState {
 
     // MARK: - Drag & Drop File Transfer (Mac -> Windows)
 
+    nonisolated static func formatByteCount(_ bytes: UInt64) -> String {
+        if bytes < 1024 {
+            return "\(bytes) B"
+        } else if bytes < 1024 * 1024 {
+            return String(format: "%.1f KB", Double(bytes) / 1024.0)
+        } else if bytes < 1024 * 1024 * 1024 {
+            return String(format: "%.1f MB", Double(bytes) / (1024.0 * 1024.0))
+        }
+        return String(format: "%.2f GB", Double(bytes) / (1024.0 * 1024.0 * 1024.0))
+    }
+
+    private func showTransferToast(
+        _ text: String,
+        style: TransferToastStyle,
+        windowId: UInt64? = nil,
+        autoHideSeconds: TimeInterval? = nil
+    ) {
+        if let wid = windowId, let wc = controllers[wid] {
+            if wc.info.kind == .popup, wc.info.ownerWindowId != 0, let owner = controllers[wc.info.ownerWindowId] {
+                owner.showToast(text, style: style, autoHideSeconds: autoHideSeconds)
+                return
+            }
+            wc.showToast(text, style: style, autoHideSeconds: autoHideSeconds)
+            return
+        }
+        if let keyWC = NSApp.keyWindow?.windowController as? RemoteWindowController {
+            keyWC.showToast(text, style: style, autoHideSeconds: autoHideSeconds)
+            return
+        }
+        if let fallback = controllers.values.first(where: { $0.info.kind != .popup }) {
+            fallback.showToast(text, style: style, autoHideSeconds: autoHideSeconds)
+        }
+    }
+
     func sendDroppedFiles(_ urls: [URL], toWindowId windowId: UInt64) {
-        guard case .connected = connectionState else { return }
+        guard case .connected = connectionState, let conn = connection else { return }
         let maxBytes: UInt64 = 512 * 1024 * 1024
-        let chunkSize = 64 * 1024
+        let chunkSize = 128 * 1024
 
         Task { @MainActor [weak self] in
             guard let self else { return }
-            for url in urls {
+            let totalFiles = urls.count
+            for (idx, rawURL) in urls.enumerated() {
                 guard case .connected = self.connectionState else { break }
+                let url = rawURL.standardizedFileURL.resolvingSymlinksInPath()
+                let name = url.lastPathComponent
+                let batchPrefix = totalFiles > 1 ? "[\(idx + 1)/\(totalFiles)] " : ""
+                var startedTransferId: UInt64?
                 do {
-                    let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
-                    let fileSize = (attrs[.size] as? NSNumber)?.uint64Value ?? 0
+                    let values = try url.resourceValues(forKeys: [.fileSizeKey, .isDirectoryKey])
+                    if values.isDirectory == true {
+                        let msg = "\(batchPrefix)已跳过文件夹「\(name)」"
+                        ClientLogger.shared.info("FileTransfer skip directory: \(url.path)")
+                        self.setBanner(msg, isError: true)
+                        self.showTransferToast(msg, style: .error, windowId: windowId, autoHideSeconds: 4.0)
+                        self.onStateChanged?()
+                        continue
+                    }
+                    let fileSize = UInt64(max(0, values.fileSize ?? 0))
                     guard fileSize <= maxBytes else {
-                        self.setBanner("文件「\(url.lastPathComponent)」超过 512 MiB 上限，已跳过", isError: true)
+                        let msg = "\(batchPrefix)文件「\(name)」超过 512 MiB 上限，已跳过"
+                        ClientLogger.shared.error("FileTransfer rejected oversized file \(name) (\(fileSize) bytes)")
+                        self.setBanner(msg, isError: true)
+                        self.showTransferToast(msg, style: .error, windowId: windowId, autoHideSeconds: 5.0)
                         self.onStateChanged?()
                         continue
                     }
                     let transferId = self.nextTransferId
                     self.nextTransferId &+= 1
-                    let name = url.lastPathComponent
+                    startedTransferId = transferId
                     self.activeTransferNames[transferId] = name
-                    self.setBanner("正在传输「\(name)」到 Windows…", isError: false)
+                    self.activeTransferTargetWindow[transferId] = windowId
+
+                    let totalStr = Self.formatByteCount(fileSize)
+                    let startMsg = "⬆ \(batchPrefix)正在发送「\(name)」(0% · 0 B / \(totalStr))…"
+                    ClientLogger.shared.info(
+                        "FileTransfer start id=\(transferId) name=\"\(name)\" bytes=\(fileSize) window=0x\(String(windowId, radix: 16))"
+                    )
+                    self.setBanner(startMsg, isError: false)
+                    self.showTransferToast(startMsg, style: .progress, windowId: windowId, autoHideSeconds: nil)
                     self.onStateChanged?()
 
-                    self.sendControl(.fileTransferStart(FileTransferStart(
+                    try await conn.sendAsync(.fileTransferStart(FileTransferStart(
                         transferId: transferId,
                         targetWindowId: windowId,
                         fileName: name,
@@ -803,9 +864,9 @@ final class AppState {
                     let handle = try FileHandle(forReadingFrom: url)
                     defer { try? handle.close() }
                     var offset: UInt64 = 0
-                    var chunksSinceYield = 0
+                    var lastProgressUI = Date.distantPast
                     if fileSize == 0 {
-                        self.sendControl(.fileTransferChunk(FileTransferChunk(
+                        try await conn.sendAsync(.fileTransferChunk(FileTransferChunk(
                             transferId: transferId,
                             offset: 0,
                             data: Data(),
@@ -814,26 +875,42 @@ final class AppState {
                     } else {
                         while offset < fileSize {
                             guard case .connected = self.connectionState else { break }
-                            let data = handle.readData(ofLength: chunkSize)
-                            if data.isEmpty { break }
+                            guard let data = try handle.read(upToCount: chunkSize), !data.isEmpty else {
+                                break
+                            }
                             let nextOffset = offset + UInt64(data.count)
                             let isLast = nextOffset >= fileSize
-                            self.sendControl(.fileTransferChunk(FileTransferChunk(
+                            try await conn.sendAsync(.fileTransferChunk(FileTransferChunk(
                                 transferId: transferId,
                                 offset: offset,
                                 data: data,
                                 isLast: isLast
                             )))
                             offset = nextOffset
-                            chunksSinceYield += 1
-                            if chunksSinceYield >= 8 {
-                                chunksSinceYield = 0
-                                await Task.yield()
+                            let now = Date()
+                            if isLast || now.timeIntervalSince(lastProgressUI) >= 0.12 {
+                                lastProgressUI = now
+                                let pct = min(100, Int((Double(offset) * 100.0) / Double(max(1, fileSize))))
+                                let sentStr = Self.formatByteCount(offset)
+                                let progressMsg = isLast
+                                    ? "⬆ \(batchPrefix)「\(name)」已发送 100% (\(totalStr))，等待 Windows 保存…"
+                                    : "⬆ \(batchPrefix)正在发送「\(name)」· \(pct)% (\(sentStr) / \(totalStr))"
+                                self.setBanner(progressMsg, isError: false)
+                                self.showTransferToast(progressMsg, style: .progress, windowId: windowId, autoHideSeconds: nil)
+                                self.onStateChanged?()
                             }
                         }
                     }
+                    ClientLogger.shared.info("FileTransfer sent all chunks id=\(transferId) bytes=\(offset)")
                 } catch {
-                    self.setBanner("读取拖放文件失败：\(error.localizedDescription)", isError: true)
+                    if let tid = startedTransferId {
+                        self.activeTransferNames.removeValue(forKey: tid)
+                        self.activeTransferTargetWindow.removeValue(forKey: tid)
+                    }
+                    let msg = "发送「\(name)」失败：\(error.localizedDescription)"
+                    ClientLogger.shared.error("FileTransfer send error name=\"\(name)\": \(error.localizedDescription)")
+                    self.setBanner(msg, isError: true)
+                    self.showTransferToast("✕ \(msg)", style: .error, windowId: windowId, autoHideSeconds: 5.5)
                     self.onStateChanged?()
                 }
             }
@@ -932,8 +1009,15 @@ final class AppState {
             partialURL: partial,
             handle: handle,
             expected: start.totalBytes,
-            received: 0
+            received: 0,
+            lastProgressToastAt: .distantPast
         )
+        let totalStr = Self.formatByteCount(start.totalBytes)
+        ClientLogger.shared.info("FilePull start id=\(start.transferId) name=\"\(dest.lastPathComponent)\" bytes=\(start.totalBytes)")
+        let msg = "⬇ 正在从 Windows 取回「\(dest.lastPathComponent)」(0% · 0 B / \(totalStr))…"
+        setBanner(msg, isError: false)
+        showTransferToast(msg, style: .progress, autoHideSeconds: nil)
+        onStateChanged?()
     }
 
     private func appendIncomingChunk(_ chunk: FileTransferChunk) {
@@ -956,6 +1040,14 @@ final class AppState {
             }
             pull.received = nextTotal
         }
+        let now = Date()
+        if chunk.isLast || now.timeIntervalSince(pull.lastProgressToastAt) >= 0.15 {
+            pull.lastProgressToastAt = now
+            let pct = pull.expected == 0 ? 100 : min(100, Int((Double(pull.received) * 100.0) / Double(pull.expected)))
+            let msg = "⬇ 正在取回「\(pull.finalURL.lastPathComponent)」· \(pct)% (\(Self.formatByteCount(pull.received)) / \(Self.formatByteCount(pull.expected)))"
+            setBanner(msg, isError: false)
+            showTransferToast(msg, style: .progress, autoHideSeconds: nil)
+        }
         incomingPulls[chunk.transferId] = pull
     }
 
@@ -970,15 +1062,24 @@ final class AppState {
                     try FileManager.default.removeItem(at: pull.finalURL)
                 }
                 try FileManager.default.moveItem(at: pull.partialURL, to: pull.finalURL)
-                setBanner("文件「\(name)」已取回到 Mac：\(pull.finalURL.path)", isError: false)
+                let msg = "✓ 文件「\(name)」已取回到 Mac：\(pull.finalURL.path)"
+                ClientLogger.shared.info("FilePull done id=\(id) path=\"\(pull.finalURL.path)\" bytes=\(pull.received)")
+                setBanner(msg, isError: false)
+                showTransferToast(msg, style: .success, autoHideSeconds: 5.0)
             } catch {
                 try? FileManager.default.removeItem(at: pull.partialURL)
-                setBanner("保存「\(name)」失败：\(error.localizedDescription)", isError: true)
+                let msg = "保存「\(name)」失败：\(error.localizedDescription)"
+                ClientLogger.shared.error("FilePull save failed id=\(id): \(error.localizedDescription)")
+                setBanner(msg, isError: true)
+                showTransferToast("✕ \(msg)", style: .error, autoHideSeconds: 5.5)
             }
         } else {
             try? FileManager.default.removeItem(at: pull.partialURL)
             let why = message.isEmpty ? "传输不完整" : message
-            setBanner("取回「\(name)」失败：\(why)", isError: true)
+            let msg = "取回「\(name)」失败：\(why)"
+            ClientLogger.shared.error("FilePull failed id=\(id) name=\"\(name)\": \(why)")
+            setBanner(msg, isError: true)
+            showTransferToast("✕ \(msg)", style: .error, autoHideSeconds: 5.5)
         }
         onStateChanged?()
     }
@@ -1046,15 +1147,26 @@ final class AppState {
                 finishIncoming(res.transferId, success: res.success, message: res.message)
                 break
             }
+            let targetWin = activeTransferTargetWindow.removeValue(forKey: res.transferId)
             if let name = activeTransferNames.removeValue(forKey: res.transferId) {
                 if res.success {
-                    setBanner("文件「\(name)」已保存到 Windows：\(res.savedPath)", isError: false)
+                    let bannerMsg = "✓ 文件「\(name)」已保存到 Windows：\(res.savedPath)（已写入 Windows 剪贴板，按 ⌘V 可直接粘贴）"
+                    let toastMsg = "✓ 已发送到 Windows：\(res.savedPath)\n已自动复制到 Windows 剪贴板，按 ⌘V 可直接粘贴"
+                    ClientLogger.shared.info("FileTransfer done id=\(res.transferId) saved=\"\(res.savedPath)\"")
+                    setBanner(bannerMsg, isError: false)
+                    showTransferToast(toastMsg, style: .success, windowId: targetWin, autoHideSeconds: 5.5)
                 } else {
-                    setBanner("文件「\(name)」传输失败：\(res.message)", isError: true)
+                    let msg = "文件「\(name)」传输失败：\(res.message)"
+                    ClientLogger.shared.error("FileTransfer failed id=\(res.transferId) name=\"\(name)\": \(res.message)")
+                    setBanner(msg, isError: true)
+                    showTransferToast("✕ \(msg)", style: .error, windowId: targetWin, autoHideSeconds: 5.5)
                 }
                 onStateChanged?()
             } else if !res.success {
-                setBanner("文件传输失败：\(res.message)", isError: true)
+                let msg = "文件传输失败：\(res.message)"
+                ClientLogger.shared.error("FileTransfer error id=\(res.transferId): \(res.message)")
+                setBanner(msg, isError: true)
+                showTransferToast("✕ \(msg)", style: .error, windowId: targetWin, autoHideSeconds: 5.5)
                 onStateChanged?()
             }
 

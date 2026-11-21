@@ -382,6 +382,14 @@ final class WinBridgeConnection {
         control.sendFireAndForget(framed)
     }
 
+    func sendAsync(_ payload: ControlMessage.Payload) async throws {
+        guard let control = controlStream else {
+            throw ConnectionError.connectionClosed
+        }
+        let framed = makeControlFrame(payload: payload)
+        try await control.send(framed)
+    }
+
     func disconnect(error: Error? = nil) {
         seqLock.lock()
         if isDisconnected {
