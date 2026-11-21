@@ -71,6 +71,7 @@ struct Session {
     files: FileReceiver,
     cursor: Option<CursorShape>,
     audio: Option<AudioWorker>,
+    mic: Option<crate::audio::mic::MicSink>,
     auto_uac_desktop: bool,
     last_desktop_state: win32::desktop::DesktopState,
 }
@@ -366,6 +367,45 @@ impl Session {
                 }
                 return Ok(());
             }
+            Payload::MicChunk(chunk) => {
+                if !chunk.enabled {
+                    self.mic = None;
+                    return Ok(());
+                }
+                if chunk.sample_rate != 0 && chunk.sample_rate != 48_000 {
+                    return self.error(0, 0, "麦克风上行只接受 48000 Hz s16le");
+                }
+                if self.mic.is_none() {
+                    match crate::audio::mic::MicSink::open(&self.config.mic_device) {
+                        Ok(sink) => {
+                            let name = sink.endpoint.clone();
+                            self.mic = Some(sink);
+                            let _ = self.error(
+                                0,
+                                0,
+                                format!("已将 Mac 麦克风送到「{name}」。其他程序要录到这段声音，需要把录音设备选成对应的线缆。"),
+                            );
+                        }
+                        Err(e) => {
+                            return self.error(
+                                0,
+                                0,
+                                format!(
+                                    "找不到虚拟麦克风，已拒绝上行，没有把声音送到扬声器。请安装 VB-Audio 等虚拟声卡（播放设备名含 CABLE Input、VB-Audio 或 WinBridge Mic），或启动时加 --mic-device。{e:#}"
+                                ),
+                            );
+                        }
+                    }
+                }
+                let pcm = crate::audio::mic::to_stereo_s16(chunk.channels, &chunk.pcm_s16le);
+                if let Some(mic) = &self.mic {
+                    if let Err(e) = mic.push(&pcm) {
+                        self.mic = None;
+                        return self.error(0, 0, format!("虚拟麦克风写入失败：{e:#}"));
+                    }
+                }
+                return Ok(());
+            }
             Payload::GamepadState(state) => {
                 if let Err(e) = self.gamepad.apply(&state) {
                     let _ = self.error(0, 0, format!("手柄透传提示: {e:#}"));
@@ -511,6 +551,7 @@ pub async fn run(
         files: FileReceiver::default(),
         cursor: None,
         audio: None,
+        mic: None,
         auto_uac_desktop: false,
         last_desktop_state: win32::desktop::DesktopState::Default,
     };
