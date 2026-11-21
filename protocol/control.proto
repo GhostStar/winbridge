@@ -468,10 +468,20 @@ message ClipboardSync {
   }
 }
 
+enum AudioCodec {
+  AUDIO_CODEC_UNSPECIFIED = 0; // Defaults to PCM_S16LE for backwards compatibility
+  AUDIO_CODEC_PCM_S16LE = 10;  // Stereo 16-bit LE PCM (Media header codec = 10)
+  AUDIO_CODEC_OPUS = 11;       // 48kHz stereo 20ms RFC 6716 Opus frames (Media header codec = 11)
+}
+
 message SetAudioConfig {
-  // Enable or disable Windows system audio loopback streaming (48/44.1kHz stereo S16LE PCM
-  // delivered on the Media TCP channel with window_id = 0, codec = 10).
+  // Enable or disable Windows system audio loopback streaming delivered on the Media channel
+  // with window_id = 0, codec = 10 (PCM) or 11 (Opus).
   bool enabled = 1;
+  // Desired audio codec (0 or 10 = PCM_S16LE, 11 = Opus).
+  AudioCodec codec = 2;
+  // Target bitrate in kbps for compressed audio (0 = host default 128 kbps).
+  uint32 bitrate_kbps = 3;
 }
 
 message HostError {

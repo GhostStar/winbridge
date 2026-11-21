@@ -30,7 +30,7 @@ final class AppState {
                     wc.updateHudVisibility()
                 }
             }
-            if oldValue.audioEnabled != settings.audioEnabled {
+            if oldValue.audioEnabled != settings.audioEnabled || oldValue.audioQuality != settings.audioQuality {
                 applyAudioSetting()
             }
             if !settings.autoReconnect && oldValue.autoReconnect {
@@ -183,7 +183,11 @@ final class AppState {
             return
         }
         audioPlayer.setEnabled(settings.audioEnabled)
-        sendControl(.setAudioConfig(SetAudioConfig(enabled: settings.audioEnabled)))
+        sendControl(.setAudioConfig(SetAudioConfig(
+            enabled: settings.audioEnabled,
+            codec: settings.audioQuality.audioCodec,
+            bitrateKbps: settings.audioQuality.bitrateKbps
+        )))
     }
 
     // MARK: - Connection Lifecycle & Auto-Reconnect
@@ -222,7 +226,7 @@ final class AppState {
         }
         let player = self.audioPlayer
         conn.onMediaFrame = { [weak self] frame in
-            if frame.header.codec == .audioPcmS16Le {
+            if frame.header.codec == .audioPcmS16Le || frame.header.codec == .audioOpus {
                 player.enqueue(frame: frame)
                 return
             }

@@ -4,6 +4,7 @@ use std::{net::IpAddr, path::PathBuf};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Codec {
     Auto,
+    Hevc,
     H264,
     Jpeg,
     Raw,

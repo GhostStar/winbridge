@@ -145,8 +145,13 @@ fn main() -> Result<()> {
         config.codec,
         win_host::config::Codec::Auto | win_host::config::Codec::H264
     ) && capture::supports_h264();
+    let hevc = matches!(
+        config.codec,
+        win_host::config::Codec::Auto | win_host::config::Codec::Hevc
+    ) && capture::supports_hevc();
+    let caps = win_host::net::VideoCaps { h264, hevc };
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(win_host::net::serve(config, h264, tls_material))
+        .block_on(win_host::net::serve(config, caps, tls_material))
 }

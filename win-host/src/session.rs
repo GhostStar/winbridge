@@ -9,7 +9,7 @@ use std::{
 };
 mod tracking;
 use crate::{
-    audio::AudioWorker,
+    audio::{AudioMode, AudioWorker},
     capture,
     config::Config,
     input::{GamepadManager, Injector},
@@ -337,8 +337,24 @@ impl Session {
             Payload::LaunchApp(req) => return self.launch(req).await,
             Payload::SetAudioConfig(cfg) => {
                 if cfg.enabled {
-                    if self.audio.is_none() {
-                        match AudioWorker::start(self.mux.clone()) {
+                    let desired = if cfg.codec == 11 {
+                        AudioMode::Opus {
+                            bitrate_kbps: if cfg.bitrate_kbps == 0 {
+                                128
+                            } else {
+                                cfg.bitrate_kbps
+                            },
+                        }
+                    } else {
+                        AudioMode::PcmS16Le
+                    };
+                    let needs_restart = self
+                        .audio
+                        .as_ref()
+                        .is_none_or(|worker| worker.mode() != desired);
+                    if needs_restart {
+                        self.audio = None;
+                        match AudioWorker::start(self.mux.clone(), desired) {
                             Ok(worker) => self.audio = Some(worker),
                             Err(e) => {
                                 return self.error(0, 0, format!("audio start failed: {e:#}"))

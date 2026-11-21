@@ -15,6 +15,7 @@ use super::micros;
 
 pub const MAX_MEDIA: usize = 64 << 20;
 pub const AUDIO_PCM_S16LE: u8 = 10;
+pub const AUDIO_OPUS: u8 = 11;
 const MAX_AUDIO_QUEUE: usize = 12;
 const KEY: u8 = 1;
 const EOS: u8 = 4;
@@ -155,7 +156,7 @@ impl Mux {
         }
     }
 
-    pub fn push_audio(&self, sample_rate: u16, channels: u16, bytes: Vec<u8>) {
+    pub fn push_audio(&self, codec: u8, sample_rate: u16, channels: u16, bytes: Vec<u8>) {
         if bytes.is_empty() || bytes.len() > MAX_MEDIA {
             return;
         }
@@ -170,7 +171,7 @@ impl Mux {
             time: micros(),
             width: sample_rate,
             height: channels,
-            codec: AUDIO_PCM_S16LE,
+            codec,
             flags: KEY,
             seq,
             bytes,

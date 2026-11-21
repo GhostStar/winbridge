@@ -16,6 +16,7 @@ enum VideoCodec: Int32, CaseIterable, Sendable {
     case jpeg = 3
     case rawBgra = 4
     case audioPcmS16Le = 10
+    case audioOpus = 11
 
     var displayName: String {
         switch self {
@@ -25,8 +26,15 @@ enum VideoCodec: Int32, CaseIterable, Sendable {
         case .jpeg: return "JPEG"
         case .rawBgra: return "RAW BGRA"
         case .audioPcmS16Le: return "PCM Audio"
+        case .audioOpus: return "Opus Audio"
         }
     }
+}
+
+enum AudioCodec: Int32, CaseIterable, Sendable {
+    case unspecified = 0
+    case pcmS16Le = 10
+    case opus = 11
 }
 
 enum CaptureMode: Int32, CaseIterable, Sendable {
@@ -1069,10 +1077,14 @@ struct ClipboardSync: Equatable, Sendable {
 
 struct SetAudioConfig: Equatable, Sendable {
     var enabled: Bool = false
+    var codec: AudioCodec = .unspecified
+    var bitrateKbps: UInt32 = 0
 
     func encode() -> Data {
         var w = ProtoWriter()
         w.writeBool(field: 1, enabled)
+        w.writeInt32(field: 2, codec.rawValue)
+        w.writeUInt32(field: 3, bitrateKbps)
         return w.data
     }
 
@@ -1081,7 +1093,12 @@ struct SetAudioConfig: Equatable, Sendable {
         var m = SetAudioConfig()
         while !r.isAtEnd {
             let (field, wire) = try r.readTag()
-            if field == 1 { m.enabled = try r.readBool() } else { try r.skip(wireType: wire) }
+            switch field {
+            case 1: m.enabled = try r.readBool()
+            case 2: m.codec = AudioCodec(rawValue: try r.readInt32()) ?? .unspecified
+            case 3: m.bitrateKbps = try r.readUInt32()
+            default: try r.skip(wireType: wire)
+            }
         }
         return m
     }

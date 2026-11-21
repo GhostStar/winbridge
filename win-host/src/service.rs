@@ -68,6 +68,7 @@ fn quote_arg(s: &str) -> String {
 fn codec_arg(c: Codec) -> &'static str {
     match c {
         Codec::Auto => "auto",
+        Codec::Hevc => "hevc",
         Codec::H264 => "h264",
         Codec::Jpeg => "jpeg",
         Codec::Raw => "raw",

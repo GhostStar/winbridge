@@ -23,6 +23,7 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
     private let desktopButton = NSButton(title: "查看完整桌面", target: nil, action: nil)
 
     private let audioCheck = NSButton(checkboxWithTitle: "开启音频", target: nil, action: nil)
+    private let audioQualityPopup = NSPopUpButton()
     private let volumeSlider = NSSlider(value: 0.85, minValue: 0.0, maxValue: 1.0, target: nil, action: nil)
     private let volumeLabel = NSTextField(labelWithString: "85%")
     private let sensSlider = NSSlider(value: 1.0, minValue: 0.2, maxValue: 3.0, target: nil, action: nil)
@@ -170,6 +171,15 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         audioCheck.action = #selector(settingsChanged)
         audioCheck.toolTip = "开启后实时转发 Windows 系统音频到 Mac，可随时动态开关"
 
+        for q in AudioQualityPreference.allCases {
+            audioQualityPopup.addItem(withTitle: q.title)
+        }
+        audioQualityPopup.controlSize = .small
+        audioQualityPopup.widthAnchor.constraint(equalToConstant: 96).isActive = true
+        audioQualityPopup.target = self
+        audioQualityPopup.action = #selector(settingsChanged)
+        audioQualityPopup.toolTip = "Opus 128k 可将音频带宽降至 1/12（适合 Wi-Fi/远程），PCM 无损延迟最低（适合千兆有线）"
+
         volumeSlider.isContinuous = true
         volumeSlider.controlSize = .small
         volumeSlider.widthAnchor.constraint(equalToConstant: 92).isActive = true
@@ -200,6 +210,7 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
 
         let audioStatusRow = NSStackView(views: [
             audioCheck,
+            audioQualityPopup,
             NSTextField(labelWithString: "音量:"),
             volumeSlider,
             volumeLabel,
@@ -380,6 +391,10 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         hudCheck.state = state.settings.showPerformanceHud ? .on : .off
         suppressHoverCheck.state = state.settings.suppressInactiveHover ? .on : .off
         audioCheck.state = state.settings.audioEnabled ? .on : .off
+        if let qIdx = AudioQualityPreference.allCases.firstIndex(of: state.settings.audioQuality) {
+            audioQualityPopup.selectItem(at: qIdx)
+        }
+        audioQualityPopup.isEnabled = state.settings.audioEnabled
         volumeSlider.floatValue = state.settings.audioVolume
         volumeSlider.isEnabled = state.settings.audioEnabled
         volumeLabel.stringValue = "\(Int(round(state.settings.audioVolume * 100)))%"
@@ -407,11 +422,16 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         s.showPerformanceHud = (hudCheck.state == .on)
         s.suppressInactiveHover = (suppressHoverCheck.state == .on)
         s.audioEnabled = (audioCheck.state == .on)
+        let qIdx = audioQualityPopup.indexOfSelectedItem
+        if qIdx >= 0 && qIdx < AudioQualityPreference.allCases.count {
+            s.audioQuality = AudioQualityPreference.allCases[qIdx]
+        }
         s.audioVolume = volumeSlider.floatValue
         s.mouseSensitivity = sensSlider.floatValue
         if let proc = state.activeRemoteProcessName()?.lowercased() {
             s.processMouseSensitivity[proc] = s.mouseSensitivity
         }
+        audioQualityPopup.isEnabled = s.audioEnabled
         volumeSlider.isEnabled = s.audioEnabled
         volumeLabel.stringValue = "\(Int(round(s.audioVolume * 100)))%"
         sensLabel.stringValue = String(format: "%.1fx", s.mouseSensitivity)
@@ -511,6 +531,10 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         suppressHoverCheck.state = state.settings.suppressInactiveHover ? .on : .off
         tlsCheck.state = state.settings.useTls ? .on : .off
         audioCheck.state = state.settings.audioEnabled ? .on : .off
+        if let qIdx = AudioQualityPreference.allCases.firstIndex(of: state.settings.audioQuality) {
+            audioQualityPopup.selectItem(at: qIdx)
+        }
+        audioQualityPopup.isEnabled = state.settings.audioEnabled
         volumeSlider.floatValue = state.settings.audioVolume
         volumeSlider.isEnabled = state.settings.audioEnabled
         volumeLabel.stringValue = "\(Int(round(state.settings.audioVolume * 100)))%"

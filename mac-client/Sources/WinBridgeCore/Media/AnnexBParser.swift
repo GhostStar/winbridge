@@ -11,6 +11,14 @@ enum AnnexBParser {
         var isIDR: Bool
     }
 
+    struct HEVCAccessUnit {
+        var vps: Data?
+        var sps: Data?
+        var pps: Data?
+        var hvccPayload: Data
+        var isIRAP: Bool
+    }
+
     /// Splits an Annex-B stream into raw NAL units (excluding start codes).
     static func splitNALUnits(_ data: Data) -> [Data] {
         return data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> [Data] in
@@ -74,11 +82,41 @@ enum AnnexBParser {
                 isIDR = true
                 appendLengthPrefixed(&avcc, nal: nal)
             default:
-                // Slice (1), SEI (6), etc.
                 appendLengthPrefixed(&avcc, nal: nal)
             }
         }
         return H264AccessUnit(sps: sps, pps: pps, avccPayload: avcc, isIDR: isIDR)
+    }
+
+    static func parseHEVC(_ annexB: Data) -> HEVCAccessUnit {
+        let nals = splitNALUnits(annexB)
+        var vps: Data?
+        var sps: Data?
+        var pps: Data?
+        var isIRAP = false
+        var hvcc = Data(capacity: annexB.count + 16)
+
+        for nal in nals where nal.count >= 2 {
+            let nalType = (nal[0] >> 1) & 0x3F
+            switch nalType {
+            case 32:
+                vps = nal
+            case 33:
+                sps = nal
+            case 34:
+                pps = nal
+            case 35:
+                // Access Unit Delimiter — not needed by VideoToolbox.
+                continue
+            case 19, 20, 21:
+                // IDR_W_RADL (19), IDR_N_LP (20), CRA_NUT (21)
+                isIRAP = true
+                appendLengthPrefixed(&hvcc, nal: nal)
+            default:
+                appendLengthPrefixed(&hvcc, nal: nal)
+            }
+        }
+        return HEVCAccessUnit(vps: vps, sps: sps, pps: pps, hvccPayload: hvcc, isIRAP: isIRAP)
     }
 
     private static func appendLengthPrefixed(_ out: inout Data, nal: Data) {

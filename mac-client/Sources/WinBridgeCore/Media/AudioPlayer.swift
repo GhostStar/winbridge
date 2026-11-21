@@ -78,7 +78,33 @@ final class StereoAudioRingBuffer {
             }
         }
 
-        // Prevent latency drift if a burst of packets arrives after jitter.
+        trimDriftLocked()
+    }
+
+    /// Appends non-interleaved stereo Float32 samples (e.g. from native Opus `AVAudioConverter`).
+    func pushFloat32(left srcL: UnsafePointer<Float>, right srcR: UnsafePointer<Float>?, frameCount: Int) {
+        guard frameCount > 0 else { return }
+        lock.lock()
+        defer { lock.unlock() }
+
+        for i in 0..<frameCount {
+            let l = srcL[i]
+            let r = srcR?[i] ?? l
+            left[writeIndex] = l
+            right[writeIndex] = r
+            writeIndex += 1
+            if writeIndex == capacity { writeIndex = 0 }
+            if count < capacity {
+                count += 1
+            } else {
+                readIndex += 1
+                if readIndex == capacity { readIndex = 0 }
+            }
+        }
+        trimDriftLocked()
+    }
+
+    private func trimDriftLocked() {
         if count > highWaterFrames {
             let drop = count - trimTargetFrames
             readIndex = (readIndex + drop) % capacity
@@ -108,13 +134,95 @@ final class StereoAudioRingBuffer {
     }
 }
 
+/// Decodes raw RFC 6716 Opus 20ms packets (48 kHz stereo) into Float32 stereo PCM using
+/// macOS native `AVAudioConverter` (`kAudioFormatOpus`) with zero third-party dependencies.
+final class OpusPacketDecoder {
+    let sampleRate: Int
+    let channels: Int
+    private let inputFormat: AVAudioFormat
+    private let outputFormat: AVAudioFormat
+    private let converter: AVAudioConverter
+    private let pcmBuffer: AVAudioPCMBuffer
+
+    init?(sampleRate: Int = 48_000, channels: Int = 2) {
+        self.sampleRate = sampleRate
+        self.channels = max(1, min(2, channels))
+        var asbd = AudioStreamBasicDescription(
+            mSampleRate: Double(sampleRate),
+            mFormatID: kAudioFormatOpus,
+            mFormatFlags: 0,
+            mBytesPerPacket: 0,
+            mFramesPerPacket: UInt32(sampleRate / 50), // 960 frames = 20ms @ 48kHz
+            mBytesPerFrame: 0,
+            mChannelsPerFrame: UInt32(self.channels),
+            mBitsPerChannel: 0,
+            mReserved: 0
+        )
+        guard let inFmt = AVAudioFormat(streamDescription: &asbd),
+              let outFmt = AVAudioFormat(
+                commonFormat: .pcmFormatFloat32,
+                sampleRate: Double(sampleRate),
+                channels: AVAudioChannelCount(self.channels),
+                interleaved: false
+              ),
+              let conv = AVAudioConverter(from: inFmt, to: outFmt),
+              let buf = AVAudioPCMBuffer(pcmFormat: outFmt, frameCapacity: AVAudioFrameCount(sampleRate / 25))
+        else {
+            return nil
+        }
+        self.inputFormat = inFmt
+        self.outputFormat = outFmt
+        self.converter = conv
+        self.pcmBuffer = buf
+    }
+
+    func decode(_ packet: Data) -> AVAudioPCMBuffer? {
+        guard !packet.isEmpty else { return nil }
+        let compressed = AVAudioCompressedBuffer(
+            format: inputFormat,
+            packetCapacity: 1,
+            maximumPacketSize: max(packet.count, 512)
+        )
+        compressed.packetCount = 1
+        compressed.byteLength = UInt32(packet.count)
+        if let descs = compressed.packetDescriptions {
+            descs[0].mStartOffset = 0
+            descs[0].mVariableFramesInPacket = 0
+            descs[0].mDataByteSize = UInt32(packet.count)
+        }
+        packet.withUnsafeBytes { raw in
+            if let base = raw.baseAddress {
+                memcpy(compressed.data, base, packet.count)
+            }
+        }
+
+        pcmBuffer.frameLength = 0
+        var fed = false
+        var err: NSError?
+        let status = converter.convert(to: pcmBuffer, error: &err) { _, outStatus in
+            if fed {
+                outStatus.pointee = .noDataNow
+                return nil
+            }
+            fed = true
+            outStatus.pointee = .haveData
+            return compressed
+        }
+        guard status != .error, err == nil, pcmBuffer.frameLength > 0 else {
+            return nil
+        }
+        return pcmBuffer
+    }
+}
+
 /// Real-time low-latency macOS audio player backed by `AVAudioEngine` + `AVAudioSourceNode`.
-/// Safe to call `enqueue(...)` directly from the Media TCP thread without main-thread hops.
+/// Supports both uncompressed PCM S16LE (`codec = 10`) and low-bandwidth Opus (`codec = 11`).
 final class AudioPlayer {
     private let stateLock = NSLock()
     private var engine: AVAudioEngine?
     private var sourceNode: AVAudioSourceNode?
     private var ringBuffer = StereoAudioRingBuffer(sampleRate: 48_000)
+    private var opusDecoder: OpusPacketDecoder?
     private var currentSampleRate: Int = 48_000
     private var enabled: Bool = false
     private var volumeValue: Float = 0.85
@@ -162,9 +270,26 @@ final class AudioPlayer {
             startEngineLocked(sampleRate: sampleRate)
         }
         let buf = ringBuffer
+        let codec = frame.header.codec
+        var decoder: OpusPacketDecoder?
+        if codec == .audioOpus {
+            if opusDecoder == nil || opusDecoder?.sampleRate != sampleRate || opusDecoder?.channels != min(2, channels) {
+                opusDecoder = OpusPacketDecoder(sampleRate: sampleRate, channels: channels)
+            }
+            decoder = opusDecoder
+        }
         stateLock.unlock()
 
-        buf.pushPcmS16Le(frame.payload, channels: channels)
+        if codec == .audioOpus {
+            if let decoded = decoder?.decode(frame.payload),
+               let chData = decoded.floatChannelData {
+                let frames = Int(decoded.frameLength)
+                let right = decoded.format.channelCount >= 2 ? chData[1] : nil
+                buf.pushFloat32(left: chData[0], right: right, frameCount: frames)
+            }
+        } else {
+            buf.pushPcmS16Le(frame.payload, channels: channels)
+        }
     }
 
     private func startEngineLocked(sampleRate: Int) {
@@ -207,6 +332,7 @@ final class AudioPlayer {
 
     private func stopEngineLocked() {
         ringBuffer.clear()
+        opusDecoder = nil
         if let engine {
             engine.stop()
             if let sourceNode {

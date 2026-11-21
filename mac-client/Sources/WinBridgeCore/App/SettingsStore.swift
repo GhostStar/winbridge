@@ -2,14 +2,16 @@ import Foundation
 
 enum CodecPreference: String, CaseIterable {
     case auto = "auto"
+    case hevc = "hevc"
     case h264 = "h264"
     case jpeg = "jpeg"
     case raw  = "raw"
 
     var title: String {
         switch self {
-        case .auto: return "Auto (H.264 → JPEG)"
-        case .h264: return "H.264 Hardware"
+        case .auto: return "Auto (HEVC → H.264)"
+        case .hevc: return "HEVC (H.265) 硬件"
+        case .h264: return "H.264 硬件"
         case .jpeg: return "JPEG"
         case .raw:  return "RAW BGRA"
         }
@@ -17,10 +19,40 @@ enum CodecPreference: String, CaseIterable {
 
     var offeredCodecs: [VideoCodec] {
         switch self {
-        case .auto: return [.h264AnnexB, .jpeg, .rawBgra]
+        case .auto: return [.hevcAnnexB, .h264AnnexB, .jpeg, .rawBgra]
+        case .hevc: return [.hevcAnnexB]
         case .h264: return [.h264AnnexB]
         case .jpeg: return [.jpeg]
         case .raw:  return [.rawBgra]
+        }
+    }
+}
+
+enum AudioQualityPreference: String, CaseIterable {
+    case opus128 = "opus128"
+    case opus64  = "opus64"
+    case pcm     = "pcm"
+
+    var title: String {
+        switch self {
+        case .opus128: return "Opus 128k"
+        case .opus64:  return "Opus 64k"
+        case .pcm:     return "PCM 无损"
+        }
+    }
+
+    var audioCodec: AudioCodec {
+        switch self {
+        case .opus128, .opus64: return .opus
+        case .pcm: return .pcmS16Le
+        }
+    }
+
+    var bitrateKbps: UInt32 {
+        switch self {
+        case .opus128: return 128
+        case .opus64:  return 64
+        case .pcm:     return 0
         }
     }
 }
@@ -40,6 +72,7 @@ struct ClientSettings {
     var followPopups: Bool
     var syncWindowResize: Bool
     var audioEnabled: Bool
+    var audioQuality: AudioQualityPreference
     var audioVolume: Float
     var mouseSensitivity: Float
     var targetFps: UInt32
@@ -90,6 +123,8 @@ enum SettingsStore {
         let popups = defaults.object(forKey: "winbridge.followPopups") as? Bool ?? true
         let syncResize = defaults.object(forKey: "winbridge.syncWindowResize") as? Bool ?? false
         let audioEnabled = defaults.object(forKey: "winbridge.audioEnabled") as? Bool ?? false
+        let audioQualityRaw = defaults.string(forKey: "winbridge.audioQuality") ?? AudioQualityPreference.opus128.rawValue
+        let audioQuality = AudioQualityPreference(rawValue: audioQualityRaw) ?? .opus128
         let audioVolume = defaults.object(forKey: "winbridge.audioVolume") as? Float ?? 0.85
         let mouseSensitivity = defaults.object(forKey: "winbridge.mouseSensitivity") as? Float ?? 1.0
         let fpsInt = defaults.integer(forKey: "winbridge.fps")
@@ -131,6 +166,7 @@ enum SettingsStore {
             followPopups: popups,
             syncWindowResize: syncResize,
             audioEnabled: audioEnabled,
+            audioQuality: audioQuality,
             audioVolume: max(0, min(1, audioVolume)),
             mouseSensitivity: max(0.1, min(4.0, mouseSensitivity)),
             targetFps: fps,
@@ -162,6 +198,7 @@ enum SettingsStore {
         defaults.set(s.followPopups, forKey: "winbridge.followPopups")
         defaults.set(s.syncWindowResize, forKey: "winbridge.syncWindowResize")
         defaults.set(s.audioEnabled, forKey: "winbridge.audioEnabled")
+        defaults.set(s.audioQuality.rawValue, forKey: "winbridge.audioQuality")
         defaults.set(s.audioVolume, forKey: "winbridge.audioVolume")
         defaults.set(s.mouseSensitivity, forKey: "winbridge.mouseSensitivity")
         defaults.set(Int(s.targetFps), forKey: "winbridge.fps")

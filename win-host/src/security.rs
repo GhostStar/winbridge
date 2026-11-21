@@ -152,6 +152,7 @@ pub fn write_protected_file(path: &Path, content: &[u8], sddl: &str) -> Result<(
 pub fn serialize_service_config(config: &Config) -> String {
     let codec = match config.codec {
         Codec::Auto => "auto",
+        Codec::Hevc => "hevc",
         Codec::H264 => "h264",
         Codec::Jpeg => "jpeg",
         Codec::Raw => "raw",
@@ -214,6 +215,7 @@ pub fn apply_service_config_text(config: &mut Config, text: &str) -> Result<()> 
             "codec" => {
                 config.codec = match val {
                     "auto" => Codec::Auto,
+                    "hevc" => Codec::Hevc,
                     "h264" => Codec::H264,
                     "jpeg" => Codec::Jpeg,
                     "raw" => Codec::Raw,

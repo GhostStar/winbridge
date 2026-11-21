@@ -27,12 +27,14 @@ enum DecodedImage {
 }
 
 /// Per-window decoder running on its own serial queue.
-/// Supports H.264 Annex-B (VideoToolbox hardware), JPEG, and RAW_BGRA.
+/// Supports HEVC (H.265) & H.264 Annex-B (VideoToolbox hardware), JPEG, and RAW_BGRA.
 final class WindowVideoDecoder {
     let windowId: UInt64
     private let queue: DispatchQueue
     private var formatDesc: CMVideoFormatDescription?
     private var session: VTDecompressionSession?
+    private var activeCodec: VideoCodec?
+    private var currentVPS: Data?
     private var currentSPS: Data?
     private var currentPPS: Data?
     private var waitingForKeyframe = true
@@ -72,6 +74,8 @@ final class WindowVideoDecoder {
             self.session = nil
         }
         formatDesc = nil
+        activeCodec = nil
+        currentVPS = nil
         currentSPS = nil
         currentPPS = nil
         waitingForKeyframe = true
@@ -83,6 +87,8 @@ final class WindowVideoDecoder {
         switch frame.header.codec {
         case .h264AnnexB:
             decodeH264(frame.payload, width: w, height: h, flags: frame.header.flags)
+        case .hevcAnnexB:
+            decodeHEVC(frame.payload, width: w, height: h, flags: frame.header.flags)
         case .jpeg:
             if let img = decodeJPEG(frame.payload) {
                 onDecodedFrame?(.cgImage(img), w, h)
@@ -96,13 +102,13 @@ final class WindowVideoDecoder {
         }
     }
 
-    // MARK: - H.264 VideoToolbox
+    // MARK: - H.264 & HEVC VideoToolbox
 
     private func decodeH264(_ payload: Data, width: UInt16, height: UInt16, flags: MediaFrameFlags) {
         let au = AnnexBParser.parseH264(payload)
 
         if let sps = au.sps, let pps = au.pps {
-            if sps != currentSPS || pps != currentPPS || session == nil {
+            if activeCodec != .h264AnnexB || sps != currentSPS || pps != currentPPS || session == nil {
                 if !configureH264Session(sps: sps, pps: pps) {
                     waitingForKeyframe = true
                     onRequestKeyframe?()
@@ -118,12 +124,39 @@ final class WindowVideoDecoder {
             waitingForKeyframe = false
         }
 
-        guard let session, let formatDesc, !au.avccPayload.isEmpty else {
+        submitToVideoToolbox(lengthPrefixedPayload: au.avccPayload, width: width, height: height)
+    }
+
+    private func decodeHEVC(_ payload: Data, width: UInt16, height: UInt16, flags: MediaFrameFlags) {
+        let au = AnnexBParser.parseHEVC(payload)
+
+        if let vps = au.vps, let sps = au.sps, let pps = au.pps {
+            if activeCodec != .hevcAnnexB || vps != currentVPS || sps != currentSPS || pps != currentPPS || session == nil {
+                if !configureHEVCSession(vps: vps, sps: sps, pps: pps) {
+                    waitingForKeyframe = true
+                    onRequestKeyframe?()
+                    return
+                }
+            }
+        }
+
+        if waitingForKeyframe {
+            guard au.isIRAP || flags.contains(.keyframe), session != nil else {
+                return
+            }
+            waitingForKeyframe = false
+        }
+
+        submitToVideoToolbox(lengthPrefixedPayload: au.hvccPayload, width: width, height: height)
+    }
+
+    private func submitToVideoToolbox(lengthPrefixedPayload payload: Data, width: UInt16, height: UInt16) {
+        guard let session, let formatDesc, !payload.isEmpty else {
             return
         }
 
         var blockBuffer: CMBlockBuffer?
-        let len = au.avccPayload.count
+        let len = payload.count
         let statusAlloc = CMBlockBufferCreateWithMemoryBlock(
             allocator: kCFAllocatorDefault,
             memoryBlock: nil,
@@ -139,7 +172,7 @@ final class WindowVideoDecoder {
             return
         }
 
-        let statusReplace = au.avccPayload.withUnsafeBytes { raw -> OSStatus in
+        let statusReplace = payload.withUnsafeBytes { raw -> OSStatus in
             guard let base = raw.baseAddress else { return -1 }
             return CMBlockBufferReplaceDataBytes(
                 with: base,
@@ -174,7 +207,7 @@ final class WindowVideoDecoder {
             )
         }
 
-        // Baseline / 0 B-frames: synchronous decode finishes immediately with zero reordering delay.
+        // Zero B-frames: synchronous decode finishes immediately with zero reordering delay.
         var decodeFailed = false
         let decodeStatus = VTDecompressionSessionDecodeFrame(
             session,
@@ -196,6 +229,29 @@ final class WindowVideoDecoder {
             waitingForKeyframe = true
             onRequestKeyframe?()
         }
+    }
+
+    private func createDecompressionSession(for formatDesc: CMVideoFormatDescription) -> VTDecompressionSession? {
+        let decoderSpec: [CFString: Any] = [
+            kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder: true,
+        ]
+        let imageAttrs: [CFString: Any] = [
+            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferIOSurfacePropertiesKey: [:] as [CFString: Any],
+            kCVPixelBufferMetalCompatibilityKey: true,
+        ]
+        var newSession: VTDecompressionSession?
+        let status = VTDecompressionSessionCreate(
+            allocator: kCFAllocatorDefault,
+            formatDescription: formatDesc,
+            decoderSpecification: decoderSpec as CFDictionary,
+            imageBufferAttributes: imageAttrs as CFDictionary,
+            outputCallback: nil,
+            decompressionSessionOut: &newSession
+        )
+        guard status == noErr, let newSession else { return nil }
+        VTSessionSetProperty(newSession, key: kVTDecompressionPropertyKey_RealTime, value: kCFBooleanTrue)
+        return newSession
     }
 
     private func configureH264Session(sps: Data, pps: Data) -> Bool {
@@ -224,35 +280,59 @@ final class WindowVideoDecoder {
                 )
             }
         }
-        guard statusDesc == noErr, let newFormatDesc else {
+        guard statusDesc == noErr, let newFormatDesc,
+              let newSession = createDecompressionSession(for: newFormatDesc) else {
             return false
         }
 
-        let decoderSpec: [CFString: Any] = [
-            kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder: true,
-        ]
-        let imageAttrs: [CFString: Any] = [
-            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
-            kCVPixelBufferIOSurfacePropertiesKey: [:] as [CFString: Any],
-            kCVPixelBufferMetalCompatibilityKey: true,
-        ]
-
-        var newSession: VTDecompressionSession?
-        let statusSession = VTDecompressionSessionCreate(
-            allocator: kCFAllocatorDefault,
-            formatDescription: newFormatDesc,
-            decoderSpecification: decoderSpec as CFDictionary,
-            imageBufferAttributes: imageAttrs as CFDictionary,
-            outputCallback: nil,
-            decompressionSessionOut: &newSession
-        )
-        guard statusSession == noErr, let newSession else {
-            return false
-        }
-
-        VTSessionSetProperty(newSession, key: kVTDecompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         self.formatDesc = newFormatDesc
         self.session = newSession
+        self.activeCodec = .h264AnnexB
+        self.currentVPS = nil
+        self.currentSPS = sps
+        self.currentPPS = pps
+        return true
+    }
+
+    private func configureHEVCSession(vps: Data, sps: Data, pps: Data) -> Bool {
+        if let old = session {
+            VTDecompressionSessionInvalidate(old)
+            session = nil
+        }
+        formatDesc = nil
+
+        var newFormatDesc: CMVideoFormatDescription?
+        let statusDesc: OSStatus = vps.withUnsafeBytes { vpsRaw in
+            sps.withUnsafeBytes { spsRaw in
+                pps.withUnsafeBytes { ppsRaw in
+                    guard let vpsPtr = vpsRaw.bindMemory(to: UInt8.self).baseAddress,
+                          let spsPtr = spsRaw.bindMemory(to: UInt8.self).baseAddress,
+                          let ppsPtr = ppsRaw.bindMemory(to: UInt8.self).baseAddress else {
+                        return -1
+                    }
+                    let pointers: [UnsafePointer<UInt8>] = [vpsPtr, spsPtr, ppsPtr]
+                    let sizes: [Int] = [vps.count, sps.count, pps.count]
+                    return CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+                        allocator: kCFAllocatorDefault,
+                        parameterSetCount: 3,
+                        parameterSetPointers: pointers,
+                        parameterSetSizes: sizes,
+                        nalUnitHeaderLength: 4,
+                        extensions: nil,
+                        formatDescriptionOut: &newFormatDesc
+                    )
+                }
+            }
+        }
+        guard statusDesc == noErr, let newFormatDesc,
+              let newSession = createDecompressionSession(for: newFormatDesc) else {
+            return false
+        }
+
+        self.formatDesc = newFormatDesc
+        self.session = newSession
+        self.activeCodec = .hevcAnnexB
+        self.currentVPS = vps
         self.currentSPS = sps
         self.currentPPS = pps
         return true

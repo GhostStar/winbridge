@@ -1,4 +1,7 @@
-use super::{annexb::ParameterSets, video_processor::VideoProcessor};
+use super::{
+    annexb::{BitstreamCodec, ParameterSets},
+    video_processor::VideoProcessor,
+};
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use std::{
     mem::ManuallyDrop,
@@ -33,14 +36,28 @@ impl Runtime {
     }
 }
 
-fn candidates(hardware: bool) -> Result<Vec<IMFActivate>> {
+fn output_subtype(codec: BitstreamCodec) -> GUID {
+    match codec {
+        BitstreamCodec::H264 => MFVideoFormat_H264,
+        BitstreamCodec::Hevc => MFVideoFormat_HEVC,
+    }
+}
+
+fn codec_label(codec: BitstreamCodec) -> &'static str {
+    match codec {
+        BitstreamCodec::H264 => "H.264",
+        BitstreamCodec::Hevc => "HEVC",
+    }
+}
+
+fn candidates(codec: BitstreamCodec, hardware: bool) -> Result<Vec<IMFActivate>> {
     let input = MFT_REGISTER_TYPE_INFO {
         guidMajorType: MFMediaType_Video,
         guidSubtype: MFVideoFormat_NV12,
     };
     let output = MFT_REGISTER_TYPE_INFO {
         guidMajorType: MFMediaType_Video,
-        guidSubtype: MFVideoFormat_H264,
+        guidSubtype: output_subtype(codec),
     };
     let flags = if hardware {
         MFT_ENUM_FLAG_HARDWARE
@@ -111,6 +128,7 @@ impl Drop for Transform {
 impl Transform {
     unsafe fn open(
         activation: &IMFActivate,
+        bitstream_codec: BitstreamCodec,
         hardware: bool,
         device: &ID3D11Device,
         w: u16,
@@ -154,12 +172,23 @@ impl Transform {
         }
         let (input, output) = (input_ids[0], output_ids[0]);
         let codec: ICodecAPI = mft.cast()?;
-        codec.SetValue(&CODECAPI_AVLowLatencyMode, &VARIANT::from(true))?;
-        // Baseline also disallows B slices by definition on drivers lacking this control.
+        let _ = codec.SetValue(&CODECAPI_AVLowLatencyMode, &VARIANT::from(true));
+        // Disallow B-frames for zero picture-reordering latency.
         let _ = codec.SetValue(&CODECAPI_AVEncMPVDefaultBPictureCount, &VARIANT::from(0u32));
         let _ = codec.SetValue(&CODECAPI_AVEncCommonMeanBitRate, &VARIANT::from(bitrate));
-        let mt = video_type(&MFVideoFormat_H264, w, h, fps)?;
-        mt.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base.0 as u32)?;
+        let subtype = output_subtype(bitstream_codec);
+        let mt = video_type(&subtype, w, h, fps)?;
+        match bitstream_codec {
+            BitstreamCodec::H264 => {
+                mt.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base.0 as u32)?;
+            }
+            BitstreamCodec::Hevc => {
+                let _ = mt.SetUINT32(
+                    &MF_MT_MPEG2_PROFILE,
+                    eAVEncH265VProfile_Main_420_8.0 as u32,
+                );
+            }
+        }
         mt.SetUINT32(&MF_MT_AVG_BITRATE, bitrate)?;
         mft.SetOutputType(output, &mt, 0)?;
         let nv12 = video_type(&MFVideoFormat_NV12, w, h, fps)?;
@@ -180,7 +209,8 @@ impl Transform {
     }
 }
 
-pub(crate) struct H264 {
+pub(crate) struct VideoEncoder {
+    codec: BitstreamCodec,
     transform: Transform,
     converter: VideoProcessor,
     sets: ParameterSets,
@@ -190,8 +220,9 @@ pub(crate) struct H264 {
     _runtime: Runtime,
 }
 
-impl H264 {
+impl VideoEncoder {
     pub fn new(
+        codec: BitstreamCodec,
         device: &ID3D11Device,
         context: &ID3D11DeviceContext,
         w: u16,
@@ -199,10 +230,16 @@ impl H264 {
         fps: u32,
         bitrate_kbps: u32,
     ) -> Result<Self> {
-        Self::with_backends(device, context, w, h, fps, bitrate_kbps, &[true, false])
+        let backends: &[bool] = match codec {
+            BitstreamCodec::H264 => &[true, false],
+            // Real-time 60fps HEVC requires a hardware MFT (NVENC/QSV/AMF); fall back to H.264 otherwise.
+            BitstreamCodec::Hevc => &[true],
+        };
+        Self::with_backends(codec, device, context, w, h, fps, bitrate_kbps, backends)
     }
 
     fn with_backends(
+        codec: BitstreamCodec,
         device: &ID3D11Device,
         context: &ID3D11DeviceContext,
         w: u16,
@@ -211,13 +248,14 @@ impl H264 {
         bitrate_kbps: u32,
         hardware_preferences: &[bool],
     ) -> Result<Self> {
+        let label = codec_label(codec);
         ensure!(
             fps > 0 && w >= 2 && h >= 2 && w.is_multiple_of(2) && h.is_multiple_of(2),
-            "H.264 requires positive even dimensions and frame rate"
+            "{label} requires positive even dimensions and frame rate"
         );
         let bitrate = bitrate_kbps
             .checked_mul(1000)
-            .context("invalid H.264 bitrate")?;
+            .with_context(|| format!("invalid {label} bitrate"))?;
         let bytes = (u64::from(w) * u64::from(h) * 3 / 2)
             .try_into()
             .context("NV12 frame too large")?;
@@ -225,7 +263,7 @@ impl H264 {
         let converter = VideoProcessor::new(device, context, w, h, fps)?;
         let mut last = None;
         for &hw in hardware_preferences {
-            let list = match candidates(hw) {
+            let list = match candidates(codec, hw) {
                 Ok(list) => list,
                 Err(e) => {
                     last = Some(e);
@@ -233,18 +271,20 @@ impl H264 {
                 }
             };
             for activation in list {
-                match unsafe { Transform::open(&activation, hw, device, w, h, fps, bitrate) } {
+                match unsafe { Transform::open(&activation, codec, hw, device, w, h, fps, bitrate) } {
                     Ok(transform) => {
                         tracing::info!(
+                            codec = label,
                             hardware = hw,
                             width = w,
                             height = h,
-                            "H.264 encoder initialized"
+                            "video encoder initialized"
                         );
                         let mut encoder = Self {
+                            codec,
                             transform,
                             converter,
-                            sets: ParameterSets::default(),
+                            sets: ParameterSets::new(codec),
                             duration: 10_000_000 / i64::from(fps),
                             time: 0,
                             bytes,
@@ -257,14 +297,14 @@ impl H264 {
                         unsafe {
                             let _ = activation.ShutdownObject();
                         }
-                        tracing::debug!(hardware=hw,error=%e,"H.264 encoder unavailable");
+                        tracing::debug!(codec = label, hardware = hw, error = %e, "video encoder unavailable");
                         last = Some(e);
                     }
                 }
             }
         }
-        Err(last.unwrap_or_else(|| anyhow!("no H.264 encoder installed")))
-            .context("cannot initialize H.264 MFT")
+        Err(last.unwrap_or_else(|| anyhow!("no {label} encoder installed")))
+            .with_context(|| format!("cannot initialize {label} MFT"))
     }
 
     fn refresh_config(&mut self) -> Result<()> {
@@ -316,7 +356,7 @@ impl H264 {
                     Err(e) if e.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
                         let format = t.mft.GetOutputAvailableType(t.output, 0)?;
                         ensure!(
-                            format.GetGUID(&MF_MT_SUBTYPE)? == MFVideoFormat_H264,
+                            format.GetGUID(&MF_MT_SUBTYPE)? == output_subtype(self.codec),
                             "unexpected encoder subtype"
                         );
                         t.mft.SetOutputType(t.output, &format, 0)?;
@@ -508,7 +548,8 @@ mod tests {
             device.CreateTexture2D(&desc, Some(&init), Some(&mut texture))?;
         }
         let texture = texture.unwrap();
-        let mut encoder = H264::with_backends(
+        let mut encoder = VideoEncoder::with_backends(
+            BitstreamCodec::H264,
             &device,
             &context,
             size as u16,

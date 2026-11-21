@@ -1,7 +1,7 @@
 mod d3d11;
 mod wgc;
 
-use crate::encode::mf_h264::H264;
+use crate::encode::{annexb::BitstreamCodec, mf_h264::VideoEncoder};
 use anyhow::{ensure, Context, Result};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
@@ -158,14 +158,19 @@ pub fn stream(
 ) -> Result<()> {
     let _apt = wgc::Apartment::new()?;
     ensure!(
-        matches!(codec, 1 | 3 | 4),
+        matches!(codec, 1 | 2 | 3 | 4),
         "encoder: unsupported codec {codec}"
     );
+    let mf_codec = match codec {
+        1 => Some(BitstreamCodec::H264),
+        2 => Some(BitstreamCodec::Hevc),
+        _ => None,
+    };
     let is_desktop = id == crate::win32::DESKTOP_WINDOW_ID;
     let mut reader: Option<Reader> = None;
     let mut gdi_capturer: Option<crate::win32::desktop::SecureGdiCapturer> = None;
     let mut gdi_gpu: Option<(u16, u16, d3d11::Graphics, ID3D11Texture2D)> = None;
-    let mut h264: Option<((u16, u16), H264)> = None;
+    let mut video_enc: Option<((u16, u16), VideoEncoder)> = None;
     let mut dirty = false;
     let mut paused = false;
     let interval = Duration::from_nanos(1_000_000_000 / u64::from(fps.max(1)));
@@ -199,7 +204,7 @@ pub fn stream(
         if is_desktop && crate::win32::desktop::is_secure_desktop() {
             if gdi_capturer.is_none() {
                 reader = None;
-                h264 = None;
+                video_enc = None;
                 pending_capture.clear();
                 gdi_gpu = None;
                 dirty = false;
@@ -210,8 +215,8 @@ pub fn stream(
                 .and_then(|cap| cap.recv_timeout(Duration::from_millis(60)))
             {
                 let frame_start = Instant::now();
-                let w = if codec == 1 { raw_w & !1 } else { raw_w };
-                let h = if codec == 1 { raw_h & !1 } else { raw_h };
+                let w = if mf_codec.is_some() { raw_w & !1 } else { raw_w };
+                let h = if mf_codec.is_some() { raw_h & !1 } else { raw_h };
                 if w >= 2 && h >= 2 {
                     let pixels = if w == raw_w && h == raw_h {
                         raw_pixels
@@ -226,12 +231,12 @@ pub fn stream(
                         cropped
                     };
                     let force = keyframe.swap(false, Ordering::AcqRel);
-                    if codec == 1 {
+                    if let Some(bs_codec) = mf_codec {
                         let need_gpu = gdi_gpu
                             .as_ref()
                             .is_none_or(|(gw, gh, _, _)| *gw != w || *gh != h);
                         if need_gpu {
-                            h264 = None;
+                            video_enc = None;
                             pending_capture.clear();
                             let gpu = d3d11::Graphics::new()?;
                             let tex = gpu.texture(w, h, false)?;
@@ -248,13 +253,14 @@ pub fn stream(
                                 0,
                             );
                         }
-                        let resized = h264
+                        let resized = video_enc
                             .as_ref()
                             .is_none_or(|(dims, _)| *dims != (w, h));
                         if resized {
-                            drop(h264.take());
+                            drop(video_enc.take());
                             pending_capture.clear();
-                            let enc = H264::new(
+                            let enc = VideoEncoder::new(
+                                bs_codec,
                                 &gpu.device,
                                 &gpu.ctx,
                                 w,
@@ -262,18 +268,18 @@ pub fn stream(
                                 fps.min(30),
                                 bitrate_kbps,
                             )
-                            .context("encoder: cannot initialize H.264 for secure desktop")?;
-                            h264 = Some(((w, h), enc));
+                            .context("encoder: cannot initialize video encoder for secure desktop")?;
+                            video_enc = Some(((w, h), enc));
                         }
-                        let (_, enc) = h264.as_mut().unwrap();
+                        let (_, enc) = video_enc.as_mut().unwrap();
                         ensure!(
                             pending_capture.len() < 64,
-                            "encoder: H.264 MFT has stopped returning frames"
+                            "encoder: video MFT has stopped returning frames"
                         );
                         pending_capture.push_back(frame_start);
                         for (key, data) in enc
                             .encode(tex, force || resized)
-                            .context("encoder: H.264 secure desktop encode failed")?
+                            .context("encoder: secure desktop encode failed")?
                         {
                             let captured = pending_capture
                                 .pop_front()
@@ -297,7 +303,7 @@ pub fn stream(
             continue;
         } else if gdi_capturer.is_some() {
             gdi_capturer = None;
-            h264 = None;
+            video_enc = None;
             pending_capture.clear();
             gdi_gpu = None;
             dirty = false;
@@ -310,7 +316,7 @@ pub fn stream(
                     3,
                     "CAPTURE_PAUSED_MINIMIZED: restore the window to resume capture".into(),
                 );
-                h264 = None;
+                video_enc = None;
                 pending_capture.clear();
                 reader = None;
                 dirty = false;
@@ -321,13 +327,13 @@ pub fn stream(
         }
         paused = false;
         if reader.as_ref().is_some_and(|r| r.capture.monitor_changed()) {
-            h264 = None;
+            video_enc = None;
             pending_capture.clear();
             reader = None;
             dirty = false;
         }
         if reader.is_none() {
-            reader = Some(Reader::open(id, cursor, codec != 1, monitor_crop)?);
+            reader = Some(Reader::open(id, cursor, mf_codec.is_none(), monitor_crop)?);
             keyframe.store(true, Ordering::Release);
         }
         let src = reader.as_mut().unwrap();
@@ -335,14 +341,14 @@ pub fn stream(
         dirty |= fresh;
         let now = Instant::now();
         if !fresh {
-            if let Some(((w, h), encoder)) = h264.as_mut() {
+            if let Some(((w, h), encoder)) = video_enc.as_mut() {
                 for (key, data) in encoder
                     .drain_ready()
-                    .context("encoder: draining asynchronous H.264 output")?
+                    .context("encoder: draining asynchronous video output")?
                 {
                     let captured = pending_capture
                         .pop_front()
-                        .context("unexpected H.264 output")?;
+                        .context("unexpected video encoder output")?;
                     deliver(*w, *h, key, data, captured);
                 }
             }
@@ -360,31 +366,31 @@ pub fn stream(
             codec != 4 || u64::from(w) * u64::from(h) * 4 <= 64 * 1024 * 1024,
             "encoder: RAW_BGRA frame exceeds 64 MiB"
         );
-        if codec == 1 {
-            let resized = h264
+        if let Some(bs_codec) = mf_codec {
+            let resized = video_enc
                 .as_ref()
                 .is_none_or(|(dimensions, _)| *dimensions != (w, h));
             if resized {
-                drop(h264.take());
+                drop(video_enc.take());
                 pending_capture.clear();
                 let gpu = &src.capture.gpu;
-                let encoder = H264::new(&gpu.device, &gpu.ctx, w, h, fps, bitrate_kbps)
-                    .context("encoder: cannot initialize H.264")?;
-                h264 = Some(((w, h), encoder));
+                let encoder = VideoEncoder::new(bs_codec, &gpu.device, &gpu.ctx, w, h, fps, bitrate_kbps)
+                    .context("encoder: cannot initialize video encoder")?;
+                video_enc = Some(((w, h), encoder));
             }
-            let (_, encoder) = h264.as_mut().unwrap();
+            let (_, encoder) = video_enc.as_mut().unwrap();
             ensure!(
                 pending_capture.len() < 64,
-                "encoder: H.264 MFT has stopped returning frames"
+                "encoder: video MFT has stopped returning frames"
             );
             pending_capture.push_back(start);
             let packets = encoder
                 .encode(src.texture.as_ref().unwrap(), force || resized)
-                .context("encoder: H.264 encoding failed")?;
+                .context("encoder: video encoding failed")?;
             for (key, data) in packets {
                 let captured = pending_capture
                     .pop_front()
-                    .context("unexpected H.264 output")?;
+                    .context("unexpected video encoder output")?;
                 deliver(w, h, key, data, captured);
             }
         } else {
@@ -415,11 +421,25 @@ pub fn supports_h264() -> bool {
     let probe = || -> Result<()> {
         let _apt = wgc::Apartment::new()?;
         let gpu = d3d11::Graphics::new()?;
-        let _encoder = H264::new(&gpu.device, &gpu.ctx, 640, 480, 30, 4000)?;
+        let _encoder = VideoEncoder::new(BitstreamCodec::H264, &gpu.device, &gpu.ctx, 640, 480, 30, 4000)?;
         Ok(())
     };
     if let Err(error) = probe() {
         tracing::warn!(reason=%format!("{error:#}"), "H.264 initialization probe failed");
+        return false;
+    }
+    true
+}
+
+pub fn supports_hevc() -> bool {
+    let probe = || -> Result<()> {
+        let _apt = wgc::Apartment::new()?;
+        let gpu = d3d11::Graphics::new()?;
+        let _encoder = VideoEncoder::new(BitstreamCodec::Hevc, &gpu.device, &gpu.ctx, 640, 480, 30, 4000)?;
+        Ok(())
+    };
+    if let Err(error) = probe() {
+        tracing::info!(reason=%format!("{error:#}"), "HEVC hardware encoder probe unavailable");
         return false;
     }
     true

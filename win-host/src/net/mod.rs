@@ -9,7 +9,7 @@ use crate::{
     session,
 };
 use anyhow::{bail, ensure, Context, Result};
-pub(crate) use media::Mux;
+pub(crate) use media::{Mux, AUDIO_OPUS, AUDIO_PCM_S16LE};
 use prost::Message;
 use std::{
     io,
@@ -78,26 +78,34 @@ struct Active {
     mux: Arc<Mux>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct VideoCaps {
+    pub h264: bool,
+    pub hevc: bool,
+}
+
 struct Server {
     config: Arc<Config>,
     active: Mutex<Option<Arc<Active>>>,
-    h264: bool,
+    caps: VideoCaps,
     auth_limiter: AuthLimiter,
     allowlist: IpAllowlist,
     tls: Option<TlsAcceptor>,
 }
 
-fn negotiate(pref: Codec, offered: &[i32], h264: bool) -> Option<i32> {
+fn negotiate(pref: Codec, offered: &[i32], caps: VideoCaps) -> Option<i32> {
     let supported: &[i32] = match pref {
-        Codec::Auto => &[1, 3, 4],
+        Codec::Auto => &[2, 1, 3, 4],
+        Codec::Hevc => &[2],
         Codec::H264 => &[1],
         Codec::Jpeg => &[3],
         Codec::Raw => &[4],
     };
-    offered
-        .iter()
-        .copied()
-        .find(|c| supported.contains(c) && (*c != 1 || h264))
+    offered.iter().copied().find(|c| {
+        supported.contains(c)
+            && (*c != 1 || caps.h264)
+            && (*c != 2 || caps.hevc)
+    })
 }
 
 struct Lease<'a>(&'a Server, Arc<Active>);
@@ -120,7 +128,7 @@ async fn control<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     let Payload::Hello(hello) = timeout(IDLE, read_message(&mut socket)).await?? else {
         bail!("expected Hello")
     };
-    let codec = negotiate(server.config.codec, &hello.supported_codecs, server.h264);
+    let codec = negotiate(server.config.codec, &hello.supported_codecs, server.caps);
     let mut ack = HelloAck {
         host_name: std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Windows".into()),
         default_fps: server.config.fps,
@@ -257,7 +265,11 @@ async fn handle_stream<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     }
 }
 
-pub async fn serve(config: Config, h264: bool, tls_material: Option<tls::TlsMaterial>) -> Result<()> {
+pub async fn serve(
+    config: Config,
+    caps: VideoCaps,
+    tls_material: Option<tls::TlsMaterial>,
+) -> Result<()> {
     security::validate_auth_policy(&config)?;
     let allowlist = IpAllowlist::parse(&config.allow_cidr)?;
     let tls_acceptor = match &tls_material {
@@ -299,7 +311,7 @@ pub async fn serve(config: Config, h264: bool, tls_material: Option<tls::TlsMate
     let state = Arc::new(Server {
         config: Arc::new(config),
         active: Mutex::new(None),
-        h264,
+        caps,
         auth_limiter: AuthLimiter::default(),
         allowlist,
         tls: tls_acceptor,
