@@ -33,6 +33,8 @@ const KSDATAFORMAT_SUBTYPE_IEEE_FLOAT: GUID =
 const BUFFER_FLAG_SILENT: u32 = 0x0000_0002;
 const AUDCLNT_DEVICE_INVALIDATED: u32 = 0x8889_0004;
 
+pub(crate) mod mic;
+
 const OPUS_SAMPLE_RATE: u32 = 48_000;
 const OPUS_FRAME_SAMPLES_PER_CH: usize = 960; // 20ms at 48kHz
 const OPUS_FRAME_INTERLEAVED_I16: usize = OPUS_FRAME_SAMPLES_PER_CH * 2;
@@ -51,9 +53,9 @@ enum SampleFormat {
     Int32,
 }
 
-struct ComGuard(bool);
+pub(crate) struct ComGuard(bool);
 impl ComGuard {
-    fn init() -> Self {
+    pub(crate) fn init() -> Self {
         let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
         Self(hr.is_ok())
     }
