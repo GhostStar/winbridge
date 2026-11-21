@@ -58,6 +58,7 @@ flowchart LR
   - 支持按进程记住灵敏度倍率与自动开启游戏锁定；可选「背景禁悬停」避免多窗误触。
 - **可切换性能 HUD（`⇧⌘H`）**：远端窗口右上角半透明浮层实时展示编码格式、FPS、实时码率（Mbps）、RTT 与分辨率（完全鼠标穿透）。
 - **跨设备拖放传文件（Mac → Windows）**：直接将 Mac 文件拖入任意远端窗口，分块安全传输至 Windows `Downloads\WinBridge\`（自动防路径穿越与重名去重，单文件上限 512 MiB）。
+- **多显示器 / 已安装的虚拟屏**：菜单可列出 Windows 显示器并单独投射。`win-host.exe --virtual-display 2560x1440` 或 Mac 菜单「启用虚拟显示器 2560×1440」只会改已经装好的虚拟适配器（名称含 Virtual / Indirect / Idd / usbmmid / Parsec）的分辨率，**不附带、不安装内核驱动**。没有这类适配器时会明确报错。物理 KVM 切走主屏时，可以改看虚拟屏那一路。
 - **手柄透传（可选）**：macOS 原生 `GameController.framework`（Xbox / DualSense / Switch Pro）转发至 Windows；若本机已安装 [ViGEmBus](https://github.com/nefarius/ViGEmBus) 并将 `ViGEmClient.dll` 置于同目录，自动虚拟 Xbox 360 手柄。
 - **固定本地代码签名脚本**：提供 `./scripts/setup_codesign.sh`，重新打包 `WinBridge.app` 后保持签名身份不变，彻底避免 macOS 15/26 反复重置「本地网络」与钥匙串权限。
 
@@ -115,6 +116,7 @@ $env:WINBRIDGE_TOKEN = "your-LAN-secret"
 - `--no-discovery`：禁用局域网 mDNS 广播。
 - `--codec <auto|hevc|h264|jpeg|raw>`：编码器策略（默认 `auto`，优先硬件 HEVC → H.264 → JPEG）。
 - `--capture-mode <window|monitor-crop>` / `--fps <FPS>` / `--bitrate <KBPS>`：默认采集模式、帧率上限（默认 `60`）与视频码率（默认 `15000` kbps）。
+- `--virtual-display 2560x1440`：启动时把已安装的虚拟显示器切到该模式（没有虚拟适配器则只打日志，不退出）。
 
 ### 2. macOS 主控端（`mac-client`）
 

@@ -104,6 +104,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         state.toggleDesktopView()
     }
 
+    @objc private func enableVirtualDisplayAction() {
+        state.enableVirtualDisplay()
+    }
+
+    @objc private func subscribeMonitorAction(_ sender: NSMenuItem) {
+        let id = UInt64(bitPattern: Int64(sender.tag))
+        guard let monitor = state.availableMonitors.first(where: { $0.monitorId == id }) else { return }
+        state.subscribeMonitor(monitor)
+    }
+
     @objc private func launchPinnedAppAction(_ sender: NSMenuItem) {
         guard let appId = sender.representedObject as? String,
               let app = state.availableApps.first(where: { $0.appId == appId }) else { return }
@@ -139,6 +149,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let winItem = NSMenuItem()
         let winMenu = NSMenu(title: "窗口")
         winMenu.addItem(withTitle: "刷新 Windows 窗口列表", action: #selector(refreshWindowsAction), keyEquivalent: "")
+        winMenu.addItem(withTitle: "启用虚拟显示器 2560×1440", action: #selector(enableVirtualDisplayAction), keyEquivalent: "")
         let lockItem = NSMenuItem(
             title: "锁定 / 解锁游戏鼠标 (3D 相对视角)",
             action: #selector(togglePointerLockAction),
@@ -195,6 +206,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             )
             desktopItem.image = NSImage(systemSymbolName: "desktopcomputer", accessibilityDescription: nil)
             menu.addItem(desktopItem)
+            if !state.availableMonitors.isEmpty {
+                for monitor in state.availableMonitors {
+                    let mark = monitor.virtualAdapter ? "虚拟 · " : (monitor.primary ? "主屏 · " : "")
+                    let title = "投射\(mark)\(monitor.friendlyName) \(monitor.width)×\(monitor.height)"
+                    let item = NSMenuItem(title: title, action: #selector(subscribeMonitorAction(_:)), keyEquivalent: "")
+                    item.tag = Int(truncatingIfNeeded: monitor.monitorId)
+                    menu.addItem(item)
+                }
+            }
+            menu.addItem(withTitle: "启用虚拟显示器 2560×1440", action: #selector(enableVirtualDisplayAction), keyEquivalent: "")
 
             let audioItem = NSMenuItem(title: "开启 Windows 音频", action: #selector(toggleAudioAction), keyEquivalent: "")
             audioItem.state = state.settings.audioEnabled ? .on : .off
