@@ -17,20 +17,25 @@ pub struct Host {
 }
 impl Host {
     pub fn start(codec: &str) -> Self {
+        Self::start_with_args(codec, &["--no-tls"])
+    }
+    pub fn start_with_args(codec: &str, extra: &[&str]) -> Self {
         let socket = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = socket.local_addr().unwrap();
         drop(socket);
-        let child = Command::new(env!("CARGO_BIN_EXE_win-host"))
-            .args([
-                "--bind",
-                "127.0.0.1",
-                "--port",
-                &addr.port().to_string(),
-                "--token",
-                TOKEN,
-                "--codec",
-                codec,
-            ])
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_win-host"));
+        cmd.args([
+            "--bind",
+            "127.0.0.1",
+            "--port",
+            &addr.port().to_string(),
+            "--token",
+            TOKEN,
+            "--codec",
+            codec,
+        ])
+        .args(extra);
+        let child = cmd
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .spawn()

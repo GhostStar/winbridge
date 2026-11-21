@@ -122,11 +122,14 @@ final class AppState {
             }
         }
 
+        let hostKey = CertificateFingerprint.hostKey(host: host, port: settings.port)
         let displayScale = Float(NSScreen.main?.backingScaleFactor ?? 2.0)
         let config = ConnectionConfig(
             host: host,
             port: settings.port,
             authToken: settings.authToken.trimmingCharacters(in: .whitespacesAndNewlines),
+            useTls: settings.useTls,
+            expectedFingerprint: settings.trustedFingerprints[hostKey],
             clientName: Host.current().localizedName ?? "macOS",
             displayScale: displayScale,
             supportedCodecs: settings.codecPreference.offeredCodecs
@@ -134,11 +137,24 @@ final class AppState {
 
         Task {
             do {
-                let ack = try await conn.connect(config: config)
+                let outcome = try await conn.connect(config: config)
+                let ack = outcome.ack
+                if let fp = outcome.tlsFingerprint {
+                    var s = self.settings
+                    s.trustedFingerprints[hostKey] = fp
+                    self.settings = s
+                }
                 self.connectionState = .connected(hostName: ack.hostName, codec: ack.selectedCodec)
                 self.rttMs = nil
-                ClientLogger.shared.info("Connected to \(ack.hostName) codec=\(ack.selectedCodec.displayName)")
-                self.setBanner("已连接到 \(ack.hostName)（\(ack.selectedCodec.displayName)）", isError: false)
+                let tlsNote: String
+                if let fp = outcome.tlsFingerprint {
+                    let shortFp = CertificateFingerprint.shortDisplay(fp)
+                    tlsNote = outcome.isFirstTrust ? " · TLS 首次信任 \(shortFp)" : " · TLS 已验证"
+                } else {
+                    tlsNote = " · 明文"
+                }
+                ClientLogger.shared.info("Connected to \(ack.hostName) codec=\(ack.selectedCodec.displayName)\(tlsNote)")
+                self.setBanner("已连接到 \(ack.hostName)（\(ack.selectedCodec.displayName)\(tlsNote)）", isError: false)
                 self.clipboardMonitor.start()
                 if self.settings.audioEnabled {
                     self.applyAudioSetting()
@@ -155,7 +171,50 @@ final class AppState {
                 ClientLogger.shared.error("Connect failed: \(error.localizedDescription)")
                 self.setBanner("连接失败：\(error.localizedDescription)", isError: true)
                 self.onStateChanged?()
+                if case ConnectionError.certificateMismatch(let mismatchKey, let expected, let actual) = error {
+                    self.promptCertificateMismatch(hostKey: mismatchKey, expected: expected, actual: actual)
+                }
             }
+        }
+    }
+
+    func resetTrustedFingerprintForCurrentHost() {
+        let host = settings.host.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !host.isEmpty else { return }
+        let key = CertificateFingerprint.hostKey(host: host, port: settings.port)
+        var s = settings
+        if s.trustedFingerprints.removeValue(forKey: key) != nil {
+            settings = s
+            setBanner("已清除 \(key) 的已信任 TLS 指纹，下次连接将重新校验并记住", isError: false)
+        } else {
+            setBanner("\(key) 尚未保存过 TLS 证书指纹", isError: false)
+        }
+        onStateChanged?()
+    }
+
+    private func promptCertificateMismatch(hostKey: String, expected: String, actual: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = "Windows 主机 TLS 证书指纹发生变化"
+        alert.informativeText = """
+        目标主机：\(hostKey)
+
+        上次信任指纹：
+        \(expected)
+
+        当前收到指纹：
+        \(actual)
+
+        如果您刚在 Windows 端重装了系统或重新生成了证书，可点击「信任新证书并重连」；否则请取消连接以防中间人攻击。
+        """
+        alert.addButton(withTitle: "取消")
+        alert.addButton(withTitle: "信任新证书并重连")
+        let response = alert.runModal()
+        if response == .alertSecondButtonReturn {
+            var s = settings
+            s.trustedFingerprints[hostKey] = actual
+            settings = s
+            connect()
         }
     }
 

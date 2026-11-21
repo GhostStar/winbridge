@@ -29,6 +29,8 @@ struct ClientSettings {
     var host: String
     var port: UInt16
     var authToken: String
+    var useTls: Bool
+    var trustedFingerprints: [String: String]
     var codecPreference: CodecPreference
     var cmdMapsToCtrl: Bool
     var syncClipboard: Bool
@@ -45,12 +47,34 @@ struct ClientSettings {
 
 enum SettingsStore {
     private static let defaults = UserDefaults(suiteName: "com.winbridge.client") ?? UserDefaults.standard
+    private static let legacyTokenKey = "winbridge.token"
 
     static func load() -> ClientSettings {
         let host = defaults.string(forKey: "winbridge.host") ?? "192.168.1.100"
         let portInt = defaults.integer(forKey: "winbridge.port")
         let port = (portInt > 0 && portInt <= 65535) ? UInt16(portInt) : 9876
-        let token = defaults.string(forKey: "winbridge.token") ?? ""
+
+        // Prefer macOS Keychain for auth token; automatically migrate legacy plaintext UserDefaults token once.
+        let token: String
+        if let keychainToken = KeychainStore.loadToken() {
+            token = keychainToken
+            if defaults.object(forKey: legacyTokenKey) != nil {
+                defaults.removeObject(forKey: legacyTokenKey)
+            }
+        } else if let legacy = defaults.string(forKey: legacyTokenKey),
+                  !legacy.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let trimmed = legacy.trimmingCharacters(in: .whitespacesAndNewlines)
+            token = trimmed
+            if KeychainStore.saveToken(trimmed) {
+                defaults.removeObject(forKey: legacyTokenKey)
+            }
+        } else {
+            token = ""
+        }
+
+        let useTls = defaults.object(forKey: "winbridge.useTls") as? Bool ?? true
+        let trustedFingerprints = defaults.dictionary(forKey: "winbridge.trustedFingerprints") as? [String: String] ?? [:]
+
         let codecRaw = defaults.string(forKey: "winbridge.codec") ?? CodecPreference.auto.rawValue
         let codec = CodecPreference(rawValue: codecRaw) ?? .auto
         let cmdToCtrl = defaults.object(forKey: "winbridge.cmdToCtrl") as? Bool ?? true
@@ -82,6 +106,8 @@ enum SettingsStore {
             host: host,
             port: port,
             authToken: token,
+            useTls: useTls,
+            trustedFingerprints: trustedFingerprints,
             codecPreference: codec,
             cmdMapsToCtrl: cmdToCtrl,
             syncClipboard: clipboard,
@@ -100,7 +126,14 @@ enum SettingsStore {
     static func save(_ s: ClientSettings) {
         defaults.set(s.host, forKey: "winbridge.host")
         defaults.set(Int(s.port), forKey: "winbridge.port")
-        defaults.set(s.authToken, forKey: "winbridge.token")
+        if KeychainStore.saveToken(s.authToken) {
+            defaults.removeObject(forKey: legacyTokenKey)
+        } else {
+            // Fallback only if Keychain is unavailable (e.g. restricted headless test runner).
+            defaults.set(s.authToken, forKey: legacyTokenKey)
+        }
+        defaults.set(s.useTls, forKey: "winbridge.useTls")
+        defaults.set(s.trustedFingerprints, forKey: "winbridge.trustedFingerprints")
         defaults.set(s.codecPreference.rawValue, forKey: "winbridge.codec")
         defaults.set(s.cmdMapsToCtrl, forKey: "winbridge.cmdToCtrl")
         defaults.set(s.syncClipboard, forKey: "winbridge.syncClipboard")

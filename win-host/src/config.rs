@@ -46,8 +46,24 @@ pub struct Config {
     pub bind: IpAddr,
     #[arg(long, default_value_t = 9876)]
     pub port: u16,
+    /// Pre-shared authentication token (can also be supplied via WINBRIDGE_TOKEN or --token-file).
     #[arg(long, default_value = "")]
     pub token: String,
+    /// Read authentication token from a UTF-8 text file instead of CLI arguments.
+    #[arg(long)]
+    pub token_file: Option<PathBuf>,
+    /// Explicitly allow empty token when binding a non-loopback address (insecure; trusted LAN only).
+    #[arg(long)]
+    pub allow_insecure_no_auth: bool,
+    /// Disable TLS 1.3 transport encryption (not recommended; for local debugging/tests only).
+    #[arg(long)]
+    pub no_tls: bool,
+    /// Directory storing persistent TLS cert.pem / key.pem (defaults to ProgramData or LOCALAPPDATA).
+    #[arg(long)]
+    pub tls_dir: Option<PathBuf>,
+    /// Optional client IP/CIDR allowlist (repeatable, e.g. --allow-cidr 192.168.1.0/24).
+    #[arg(long)]
+    pub allow_cidr: Vec<String>,
     #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u32).range(1..=240))]
     pub fps: u32,
     #[arg(long, default_value_t = 15000, value_parser = clap::value_parser!(u32).range(1..=4294967))]
@@ -84,13 +100,19 @@ pub struct Config {
     /// Internal: run as interactive session worker spawned by the WinBridge service.
     #[arg(long, hide = true)]
     pub session_worker: bool,
+    /// Internal: read auth token & TLS material from inherited stdin pipe instead of CLI args.
+    #[arg(long, hide = true)]
+    pub secrets_from_stdin: bool,
     /// Internal: run as LocalSystem + UIAccess secure-desktop helper spawned by the service.
     #[arg(long, hide = true)]
     pub secure_helper: bool,
-    /// Internal: loopback TCP port for session-worker <-> secure-helper IPC.
+    /// Internal: Windows Named Pipe path for session-worker <-> secure-helper IPC.
     #[arg(long, hide = true)]
-    pub helper_port: Option<u16>,
-    /// Internal: per-launch authentication token for session-worker <-> secure-helper IPC.
-    #[arg(long, hide = true, default_value = "")]
-    pub helper_token: String,
+    pub helper_pipe: Option<String>,
+    /// Internal: exact process ID of the authorized --session-worker allowed to connect to --secure-helper.
+    #[arg(long, hide = true)]
+    pub allowed_worker_pid: Option<u32>,
+    /// Internal: optional Windows user SID granted Named Pipe DACL access alongside SYSTEM/Administrators.
+    #[arg(long, hide = true)]
+    pub allowed_user_sid: Option<String>,
 }

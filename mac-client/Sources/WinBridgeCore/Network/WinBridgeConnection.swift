@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import Security
 
 enum ConnectionError: Error, LocalizedError {
     case invalidEndpoint(String, UInt16)
@@ -10,17 +11,26 @@ enum ConnectionError: Error, LocalizedError {
     case controlFrameTooLarge(Int)
     case unexpectedControlMessage(String)
     case connectTimeout
+    case localNetworkProhibited
+    case certificateMissing
+    case certificateMismatch(hostKey: String, expected: String, actual: String)
 
     var errorDescription: String? {
         switch self {
-        case .invalidEndpoint(let h, let p): return "Invalid endpoint \(h):\(p)"
-        case .connectionClosed: return "Connection closed by remote host"
-        case .handshakeRejected(let r): return "Host rejected connection: \(r)"
-        case .invalidSessionId: return "Host returned an invalid session_id"
-        case .mediaBindRejected(let code): return "Media channel bind rejected (status \(code))"
-        case .controlFrameTooLarge(let n): return "Control frame exceeds 16 MiB (\(n) bytes)"
-        case .unexpectedControlMessage(let m): return "Unexpected control message: \(m)"
-        case .connectTimeout: return "Timed out connecting to Windows host"
+        case .invalidEndpoint(let h, let p): return "无效地址 \(h):\(p)"
+        case .connectionClosed: return "远端主机已关闭连接"
+        case .handshakeRejected(let r): return "主机拒绝连接：\(r)"
+        case .invalidSessionId: return "主机返回了无效的 session_id"
+        case .mediaBindRejected(let code): return "媒体通道绑定被拒绝（状态码 \(code)）"
+        case .controlFrameTooLarge(let n): return "控制帧超过 16 MiB（\(n) 字节）"
+        case .unexpectedControlMessage(let m): return "收到异常控制消息：\(m)"
+        case .connectTimeout: return "连接 Windows 主机超时"
+        case .localNetworkProhibited:
+            return "macOS 拦截了本地网络访问权限：请在「系统设置 → 隐私与安全性 → 本地网络」中允许 WinBridge（重新打包建议使用固定自签证书）"
+        case .certificateMissing:
+            return "TLS 握手失败：Windows 主机未提供有效证书"
+        case .certificateMismatch(let hostKey, _, let actual):
+            return "主机 \(hostKey) 的 TLS 证书指纹已变化（新指纹 \(CertificateFingerprint.shortDisplay(actual))），连接已被拦截以防中间人攻击"
         }
     }
 }
@@ -57,12 +67,28 @@ struct ByteStreamBuffer {
     }
 }
 
+private final class TLSVerifyState: @unchecked Sendable {
+    var verifiedFingerprint: String?
+    var isFirstTrust: Bool = false
+    var verificationError: Error?
+}
+
 private final class BufferedTCPStream {
     let connection: NWConnection
     private let queue: DispatchQueue
     private var buffer = ByteStreamBuffer()
+    private let tlsState = TLSVerifyState()
 
-    init(host: String, port: UInt16, label: String) throws {
+    var verifiedFingerprint: String? { tlsState.verifiedFingerprint }
+    var isFirstTrust: Bool { tlsState.isFirstTrust }
+
+    init(
+        host: String,
+        port: UInt16,
+        label: String,
+        useTls: Bool,
+        expectedFingerprint: String?
+    ) throws {
         guard let nwPort = NWEndpoint.Port(rawValue: port) else {
             throw ConnectionError.invalidEndpoint(host, port)
         }
@@ -70,8 +96,53 @@ private final class BufferedTCPStream {
         tcpOptions.noDelay = true
         tcpOptions.enableKeepalive = true
         tcpOptions.keepaliveIdle = 10
-        let params = NWParameters(tls: nil, tcp: tcpOptions)
-        self.queue = DispatchQueue(label: "winbridge.tcp.\(label)")
+        let queue = DispatchQueue(label: "winbridge.tcp.\(label)")
+        self.queue = queue
+
+        let params: NWParameters
+        if useTls {
+            let tlsOptions = NWProtocolTLS.Options()
+            sec_protocol_options_set_min_tls_protocol_version(
+                tlsOptions.securityProtocolOptions,
+                .TLSv12
+            )
+            let hostKey = CertificateFingerprint.hostKey(host: host, port: port)
+            let verifyState = self.tlsState
+            sec_protocol_options_set_verify_block(
+                tlsOptions.securityProtocolOptions,
+                { _, secTrust, complete in
+                    let trust = sec_trust_copy_ref(secTrust).takeRetainedValue()
+                    guard let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate],
+                          let leaf = chain.first else {
+                        verifyState.verificationError = ConnectionError.certificateMissing
+                        complete(false)
+                        return
+                    }
+                    let der = SecCertificateCopyData(leaf) as Data
+                    switch TOFUTrustEvaluator.evaluate(actualDER: der, pinnedFingerprint: expectedFingerprint) {
+                    case .trustFirstUse(let fp):
+                        verifyState.verifiedFingerprint = fp
+                        verifyState.isFirstTrust = true
+                        complete(true)
+                    case .trustedMatch(let fp):
+                        verifyState.verifiedFingerprint = fp
+                        verifyState.isFirstTrust = false
+                        complete(true)
+                    case .mismatch(let expected, let actual):
+                        verifyState.verificationError = ConnectionError.certificateMismatch(
+                            hostKey: hostKey,
+                            expected: expected,
+                            actual: actual
+                        )
+                        complete(false)
+                    }
+                },
+                queue
+            )
+            params = NWParameters(tls: tlsOptions, tcp: tcpOptions)
+        } else {
+            params = NWParameters(tls: nil, tcp: tcpOptions)
+        }
         self.connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: params)
     }
 
@@ -94,21 +165,43 @@ private final class BufferedTCPStream {
             timer.schedule(deadline: .now() + timeoutSeconds)
             timer.setEventHandler {
                 timer.cancel()
-                finish(.failure(ConnectionError.connectTimeout))
+                if let tlsErr = self.tlsState.verificationError {
+                    finish(.failure(tlsErr))
+                } else {
+                    finish(.failure(ConnectionError.connectTimeout))
+                }
             }
             timer.resume()
 
-            connection.stateUpdateHandler = { state in
+            connection.stateUpdateHandler = { [weak self] state in
+                guard let self else { return }
                 switch state {
                 case .ready:
                     timer.cancel()
                     finish(.success(()))
+                case .waiting(let error):
+                    if self.connection.currentPath?.unsatisfiedReason == .localNetworkDenied
+                        || error.localizedDescription.localizedCaseInsensitiveContains("local network") {
+                        timer.cancel()
+                        finish(.failure(ConnectionError.localNetworkProhibited))
+                    } else if let tlsErr = self.tlsState.verificationError {
+                        timer.cancel()
+                        finish(.failure(tlsErr))
+                    }
                 case .failed(let error):
                     timer.cancel()
-                    finish(.failure(error))
+                    if let tlsErr = self.tlsState.verificationError {
+                        finish(.failure(tlsErr))
+                    } else {
+                        finish(.failure(error))
+                    }
                 case .cancelled:
                     timer.cancel()
-                    finish(.failure(ConnectionError.connectionClosed))
+                    if let tlsErr = self.tlsState.verificationError {
+                        finish(.failure(tlsErr))
+                    } else {
+                        finish(.failure(ConnectionError.connectionClosed))
+                    }
                 default:
                     break
                 }
@@ -170,9 +263,17 @@ struct ConnectionConfig: Sendable {
     var host: String
     var port: UInt16
     var authToken: String
+    var useTls: Bool = true
+    var expectedFingerprint: String? = nil
     var clientName: String
     var displayScale: Float
     var supportedCodecs: [VideoCodec]
+}
+
+struct ConnectOutcome: Sendable {
+    let ack: HelloAck
+    let tlsFingerprint: String?
+    let isFirstTrust: Bool
 }
 
 final class WinBridgeConnection {
@@ -200,8 +301,14 @@ final class WinBridgeConnection {
         (DispatchTime.now().uptimeNanoseconds &- startTime) / 1_000
     }
 
-    func connect(config: ConnectionConfig) async throws -> HelloAck {
-        let control = try BufferedTCPStream(host: config.host, port: config.port, label: "control")
+    func connect(config: ConnectionConfig) async throws -> ConnectOutcome {
+        let control = try BufferedTCPStream(
+            host: config.host,
+            port: config.port,
+            label: "control",
+            useTls: config.useTls,
+            expectedFingerprint: config.expectedFingerprint
+        )
         try await control.connect()
         self.controlStream = control
 
@@ -231,8 +338,14 @@ final class WinBridgeConnection {
             throw ConnectionError.invalidSessionId
         }
 
-        // 3. Connect Media TCP + bind session_id
-        let media = try BufferedTCPStream(host: config.host, port: config.port, label: "media")
+        // 3. Connect Media TCP + bind session_id (strictly pinned to the Control cert fingerprint)
+        let media = try BufferedTCPStream(
+            host: config.host,
+            port: config.port,
+            label: "media",
+            useTls: config.useTls,
+            expectedFingerprint: control.verifiedFingerprint ?? config.expectedFingerprint
+        )
         do {
             try await media.connect()
             var bindPacket = Data(capacity: 24)
@@ -256,7 +369,11 @@ final class WinBridgeConnection {
         self.defaultFps = ack.defaultFps > 0 ? ack.defaultFps : 60
 
         startLoops(control: control, media: media)
-        return ack
+        return ConnectOutcome(
+            ack: ack,
+            tlsFingerprint: control.verifiedFingerprint,
+            isFirstTrust: control.isFirstTrust
+        )
     }
 
     func send(_ payload: ControlMessage.Payload) {
@@ -292,7 +409,6 @@ final class WinBridgeConnection {
     }
 
     private func startLoops(control: BufferedTCPStream, media: BufferedTCPStream) {
-        // Control read loop
         controlTask = Task { [weak self] in
             guard let self else { return }
             do {
@@ -318,7 +434,6 @@ final class WinBridgeConnection {
             }
         }
 
-        // Media read loop
         mediaTask = Task { [weak self] in
             guard let self else { return }
             do {
@@ -335,7 +450,6 @@ final class WinBridgeConnection {
             }
         }
 
-        // Keepalive Ping every 5s (win-host idle timeout is 15s)
         pingTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 5_000_000_000)

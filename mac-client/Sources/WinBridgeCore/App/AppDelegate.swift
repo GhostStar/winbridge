@@ -82,6 +82,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         state.disconnect()
     }
 
+    @objc private func resetTrustAction() {
+        state.resetTrustedFingerprintForCurrentHost()
+    }
+
     @objc private func toggleAudioAction() {
         state.toggleAudioEnabled()
     }
@@ -135,6 +139,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         winMenu.addItem(withTitle: "刷新当前窗口关键帧 (IDR)", action: #selector(requestKeyframeAction), keyEquivalent: "")
         winMenu.addItem(withTitle: "脱离当前远端窗口", action: #selector(detachActiveWindowAction), keyEquivalent: "")
         winMenu.addItem(.separator())
+        winMenu.addItem(withTitle: "重置当前主机 TLS 证书信任", action: #selector(resetTrustAction), keyEquivalent: "")
         winMenu.addItem(withTitle: "断开连接", action: #selector(disconnectAction), keyEquivalent: "")
         winItem.submenu = winMenu
         mainMenu.addItem(winItem)

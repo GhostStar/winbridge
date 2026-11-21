@@ -6,7 +6,10 @@ use std::{
         Arc, Mutex,
     },
 };
-use tokio::{io::AsyncWriteExt, net::TcpStream, sync::Notify};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    sync::Notify,
+};
 
 use super::micros;
 
@@ -221,21 +224,24 @@ impl Mux {
         frame
     }
 
-    pub async fn send(&self, socket: &mut TcpStream) -> Result<()> {
+    pub async fn send<S: AsyncRead + AsyncWrite + Unpin>(&self, socket: S) -> Result<()> {
+        let (mut rx, mut tx) = tokio::io::split(socket);
+        let mut probe = [0u8; 1];
         loop {
+            let mut wrote = false;
             while let Some(frame) = self.pop() {
-                socket.write_all(&frame.header()).await?;
-                socket.write_all(&frame.bytes).await?;
+                tx.write_all(&frame.header()).await?;
+                tx.write_all(&frame.bytes).await?;
+                wrote = true;
+            }
+            if wrote {
+                tx.flush().await?;
             }
             tokio::select! {
                 _ = self.wake.notified() => {},
-                res = socket.readable() => {
-                    res?;
-                    let mut byte = [0];
-                    match socket.try_read(&mut byte) {
-                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {},
-                        other => { ensure!(other? == 0, "unexpected client media payload"); return Ok(()); }
-                    }
+                res = rx.read(&mut probe) => {
+                    ensure!(res? == 0, "unexpected client media payload");
+                    return Ok(());
                 }
             }
         }

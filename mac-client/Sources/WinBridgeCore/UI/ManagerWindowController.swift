@@ -15,6 +15,7 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
     private let clipboardCheck = NSButton(checkboxWithTitle: "剪贴板同步", target: nil, action: nil)
     private let popupsCheck = NSButton(checkboxWithTitle: "追踪弹窗", target: nil, action: nil)
     private let syncResizeCheck = NSButton(checkboxWithTitle: "同步缩放 Windows", target: nil, action: nil)
+    private let tlsCheck = NSButton(checkboxWithTitle: "TLS 加密", target: nil, action: nil)
     private let desktopButton = NSButton(title: "查看完整桌面", target: nil, action: nil)
 
     private let audioCheck = NSButton(checkboxWithTitle: "开启音频", target: nil, action: nil)
@@ -112,6 +113,9 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         syncResizeCheck.target = self
         syncResizeCheck.action = #selector(settingsChanged)
         syncResizeCheck.toolTip = "关闭时仅在 Mac 本地等比缩放画面，不改变 Windows 原窗口大小"
+        tlsCheck.target = self
+        tlsCheck.action = #selector(settingsChanged)
+        tlsCheck.toolTip = "使用 TLS 1.3 + TOFU 证书指纹锁定加密控制与媒体通道（需 Windows 端未开启 --no-tls）"
 
         desktopButton.bezelStyle = .rounded
         desktopButton.image = NSImage(systemSymbolName: "desktopcomputer", accessibilityDescription: nil)
@@ -123,7 +127,7 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         let optionsSpacer = NSView()
         optionsSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
-        let optionsRow = NSStackView(views: [cmdCtrlCheck, clipboardCheck, popupsCheck, syncResizeCheck, optionsSpacer, desktopButton])
+        let optionsRow = NSStackView(views: [cmdCtrlCheck, clipboardCheck, popupsCheck, syncResizeCheck, tlsCheck, optionsSpacer, desktopButton])
         optionsRow.orientation = .horizontal
         optionsRow.alignment = .centerY
         optionsRow.spacing = 10
@@ -338,6 +342,7 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         clipboardCheck.state = state.settings.syncClipboard ? .on : .off
         popupsCheck.state = state.settings.followPopups ? .on : .off
         syncResizeCheck.state = state.settings.syncWindowResize ? .on : .off
+        tlsCheck.state = state.settings.useTls ? .on : .off
         audioCheck.state = state.settings.audioEnabled ? .on : .off
         volumeSlider.floatValue = state.settings.audioVolume
         volumeSlider.isEnabled = state.settings.audioEnabled
@@ -361,6 +366,7 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         s.syncClipboard = (clipboardCheck.state == .on)
         s.followPopups = (popupsCheck.state == .on)
         s.syncWindowResize = (syncResizeCheck.state == .on)
+        s.useTls = (tlsCheck.state == .on)
         s.audioEnabled = (audioCheck.state == .on)
         s.audioVolume = volumeSlider.floatValue
         s.mouseSensitivity = sensSlider.floatValue
@@ -395,6 +401,7 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
             portField.isEnabled = true
             tokenField.isEnabled = true
             codecPopup.isEnabled = true
+            tlsCheck.isEnabled = true
             refreshButton.isEnabled = false
             desktopButton.isEnabled = false
             desktopButton.title = "查看完整桌面"
@@ -409,6 +416,7 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
             portField.isEnabled = false
             tokenField.isEnabled = false
             codecPopup.isEnabled = false
+            tlsCheck.isEnabled = false
             refreshButton.isEnabled = false
             desktopButton.isEnabled = false
             statusLabel.stringValue = "● 正在连接…"
@@ -422,6 +430,7 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
             portField.isEnabled = false
             tokenField.isEnabled = false
             codecPopup.isEnabled = false
+            tlsCheck.isEnabled = false
             refreshButton.isEnabled = true
             desktopButton.isEnabled = true
             desktopButton.title = state.isDesktopOpen ? "关闭桌面窗口" : "查看完整桌面"

@@ -22,6 +22,7 @@ let package = Package(
                 .linkedFramework("IOSurface"),
                 .linkedFramework("Network"),
                 .linkedFramework("QuartzCore"),
+                .linkedFramework("Security"),
                 .linkedFramework("VideoToolbox"),
                 .linkedFramework("ImageIO"),
                 .linkedFramework("Carbon"),

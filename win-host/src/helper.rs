@@ -6,10 +6,29 @@ use crate::{
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use prost::Message;
 use std::{
-    io::{Read, Write},
-    net::{SocketAddr, TcpListener, TcpStream},
+    fs::{File, OpenOptions},
+    io::{self, Read, Write},
+    mem,
+    os::windows::io::{FromRawHandle, RawHandle},
+    ptr,
     sync::{Mutex, OnceLock},
-    time::Duration,
+    time::{Duration, Instant},
+};
+use windows_sys::Win32::{
+    Foundation::{
+        CloseHandle, GetLastError, LocalFree, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, HANDLE,
+        INVALID_HANDLE_VALUE,
+    },
+    Security::{
+        Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW, PSECURITY_DESCRIPTOR,
+        SECURITY_ATTRIBUTES,
+    },
+    Storage::FileSystem::PIPE_ACCESS_DUPLEX,
+    System::Pipes::{
+        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
+        WaitNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
+        PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+    },
 };
 
 const OP_PROBE: u8 = 1;
@@ -19,57 +38,62 @@ const OP_INPUT: u8 = 3;
 const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 const MAX_MSG_BYTES: usize = 4 * 1024 * 1024;
 
-#[derive(Clone)]
-struct ClientConfig {
-    addr: SocketAddr,
-    token: Vec<u8>,
-}
+static HELPER_PIPE_NAME: OnceLock<String> = OnceLock::new();
+static PROBE_CONN: OnceLock<Mutex<Option<File>>> = OnceLock::new();
+static CAPTURE_CONN: OnceLock<Mutex<Option<File>>> = OnceLock::new();
+static INPUT_CONN: OnceLock<Mutex<Option<File>>> = OnceLock::new();
 
-static CLIENT_CONFIG: OnceLock<ClientConfig> = OnceLock::new();
-static PROBE_CONN: OnceLock<Mutex<Option<TcpStream>>> = OnceLock::new();
-static CAPTURE_CONN: OnceLock<Mutex<Option<TcpStream>>> = OnceLock::new();
-static INPUT_CONN: OnceLock<Mutex<Option<TcpStream>>> = OnceLock::new();
-
-pub fn configure_client(port: u16, token: String) {
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let _ = CLIENT_CONFIG.set(ClientConfig {
-        addr,
-        token: token.into_bytes(),
-    });
+pub fn configure_client(pipe_name: String) {
+    let _ = HELPER_PIPE_NAME.set(pipe_name);
 }
 
 pub fn is_configured() -> bool {
-    CLIENT_CONFIG.get().is_some()
+    HELPER_PIPE_NAME.get().is_some()
 }
 
-fn connect(cfg: &ClientConfig, timeout: Duration) -> Result<TcpStream> {
-    let mut stream = TcpStream::connect_timeout(&cfg.addr, timeout)
-        .with_context(|| format!("connect secure-helper on {}", cfg.addr))?;
-    let _ = stream.set_nodelay(true);
-    let _ = stream.set_read_timeout(Some(timeout));
-    let _ = stream.set_write_timeout(Some(timeout));
-    let len = u16::try_from(cfg.token.len()).context("helper token too long")?;
-    stream.write_all(&len.to_be_bytes())?;
-    stream.write_all(&cfg.token)?;
-    let mut ack = [0u8; 1];
-    stream.read_exact(&mut ack)?;
-    ensure!(ack[0] == 1, "secure-helper rejected authentication token");
-    Ok(stream)
+fn to_wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(Some(0)).collect()
+}
+
+fn connect_pipe(pipe_name: &str, timeout: Duration) -> Result<File> {
+    let deadline = Instant::now() + timeout;
+    let wide_name = to_wide(pipe_name);
+    loop {
+        match OpenOptions::new().read(true).write(true).open(pipe_name) {
+            Ok(file) => return Ok(file),
+            Err(err) => {
+                let code = err.raw_os_error().unwrap_or(0) as u32;
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(err)
+                        .with_context(|| format!("connect secure-helper named pipe {pipe_name}"));
+                }
+                if code == ERROR_PIPE_BUSY {
+                    let wait_ms = remaining.as_millis().clamp(50, 1500) as u32;
+                    unsafe {
+                        WaitNamedPipeW(wide_name.as_ptr(), wait_ms);
+                    }
+                } else {
+                    std::thread::sleep(remaining.min(Duration::from_millis(40)));
+                }
+            }
+        }
+    }
 }
 
 fn with_conn<T>(
-    slot: &OnceLock<Mutex<Option<TcpStream>>>,
+    slot: &OnceLock<Mutex<Option<File>>>,
     timeout: Duration,
-    mut f: impl FnMut(&mut TcpStream) -> Result<T>,
+    mut f: impl FnMut(&mut File) -> Result<T>,
 ) -> Result<T> {
-    let cfg = CLIENT_CONFIG
+    let pipe_name = HELPER_PIPE_NAME
         .get()
         .ok_or_else(|| anyhow!("secure-helper not configured"))?;
     let mutex = slot.get_or_init(|| Mutex::new(None));
     let mut guard = mutex.lock().unwrap_or_else(|e| e.into_inner());
     for attempt in 0..2 {
         if guard.is_none() {
-            *guard = Some(connect(cfg, timeout)?);
+            *guard = Some(connect_pipe(pipe_name, timeout)?);
         }
         let stream = guard.as_mut().unwrap();
         match f(stream) {
@@ -167,7 +191,7 @@ pub fn forward_input(target_window_id: u64, payload: &Payload) -> Result<Option<
     })
 }
 
-fn read_error(s: &mut TcpStream) -> Result<String> {
+fn read_error(s: &mut impl Read) -> Result<String> {
     let mut len_buf = [0u8; 4];
     s.read_exact(&mut len_buf)?;
     let len = u32::from_be_bytes(len_buf) as usize;
@@ -177,7 +201,7 @@ fn read_error(s: &mut TcpStream) -> Result<String> {
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
-fn write_error(s: &mut TcpStream, msg: &str) -> Result<()> {
+fn write_error(s: &mut impl Write, msg: &str) -> Result<()> {
     let bytes = msg.as_bytes();
     let len = (bytes.len().min(MAX_MSG_BYTES)) as u32;
     s.write_all(&[0])?;
@@ -186,60 +210,127 @@ fn write_error(s: &mut TcpStream, msg: &str) -> Result<()> {
     Ok(())
 }
 
-/// Runs the LocalSystem + UIAccess loopback IPC server (`--secure-helper`) inside the
-/// active interactive session to handle Winlogon (UAC / Lock Screen) capture & input,
-/// as well as UIPI-exempt input into elevated Administrator windows on the Default desktop.
-pub fn run_server(port: u16, token: String) -> Result<()> {
-    ensure!(!token.is_empty(), "--helper-token must not be empty");
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let listener = TcpListener::bind(addr)
-        .with_context(|| format!("bind secure-helper loopback listener on {addr}"))?;
+fn build_pipe_sddl(allowed_user_sid: Option<&str>) -> String {
+    if let Some(sid) = allowed_user_sid {
+        // Basic SDDL safety: Windows SID strings contain only S, digits, and hyphens.
+        if sid.starts_with("S-1-") && sid.bytes().all(|b| b.is_ascii_digit() || b == b'S' || b == b'-')
+        {
+            return format!("D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;{sid})");
+        }
+    }
+    "D:P(A;;GA;;;SY)(A;;GA;;;BA)".to_owned()
+}
+
+unsafe fn create_pipe_instance(pipe_name_w: &[u16], sddl_w: &[u16]) -> Result<HANDLE> {
+    let mut sd: PSECURITY_DESCRIPTOR = ptr::null_mut();
+    if ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        sddl_w.as_ptr(),
+        1, // SDDL_REVISION_1
+        &mut sd,
+        ptr::null_mut(),
+    ) == 0
+    {
+        bail!(
+            "ConvertStringSecurityDescriptorToSecurityDescriptorW failed: {}",
+            io::Error::last_os_error()
+        );
+    }
+
+    let sa = SECURITY_ATTRIBUTES {
+        nLength: mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: sd,
+        bInheritHandle: 0,
+    };
+
+    let handle = CreateNamedPipeW(
+        pipe_name_w.as_ptr(),
+        PIPE_ACCESS_DUPLEX,
+        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+        PIPE_UNLIMITED_INSTANCES,
+        65_536,
+        65_536,
+        0,
+        &sa,
+    );
+    LocalFree(sd);
+    if handle == INVALID_HANDLE_VALUE {
+        bail!("CreateNamedPipeW failed: {}", io::Error::last_os_error());
+    }
+    Ok(handle)
+}
+
+/// Runs the LocalSystem + UIAccess Named Pipe IPC server (`--secure-helper`) inside the active
+/// interactive session. Every incoming pipe client MUST pass both the kernel SDDL DACL and exact
+/// `GetNamedPipeClientProcessId == allowed_worker_pid` verification.
+pub fn run_server(
+    pipe_name: String,
+    allowed_worker_pid: u32,
+    allowed_user_sid: Option<String>,
+) -> Result<()> {
+    ensure!(
+        pipe_name.starts_with(r"\\.\pipe\"),
+        "invalid --helper-pipe name"
+    );
+    ensure!(allowed_worker_pid != 0, "--allowed-worker-pid must be nonzero");
+    let sddl = build_pipe_sddl(allowed_user_sid.as_deref());
+    let pipe_w = to_wide(&pipe_name);
+    let sddl_w = to_wide(&sddl);
     let ui_access = crate::win32::desktop::current_process_ui_access();
     tracing::info!(
         pid = std::process::id(),
-        %addr,
+        pipe = %pipe_name,
+        allowed_worker_pid,
+        sddl = %sddl,
         ui_access = ?ui_access,
-        "secure-helper listening on loopback"
+        "secure-helper listening on ACL + PID-verified Named Pipe"
     );
 
-    let expected = token.into_bytes();
-    for incoming in listener.incoming() {
-        let Ok(stream) = incoming else {
-            continue;
+    loop {
+        let handle = unsafe { create_pipe_instance(&pipe_w, &sddl_w)? };
+        let connected = unsafe {
+            ConnectNamedPipe(handle, ptr::null_mut()) != 0
+                || GetLastError() == ERROR_PIPE_CONNECTED
         };
-        let expected_clone = expected.clone();
+        if !connected {
+            let err = io::Error::last_os_error();
+            unsafe {
+                CloseHandle(handle);
+            }
+            tracing::warn!(error = %err, "ConnectNamedPipe failed");
+            std::thread::sleep(Duration::from_millis(50));
+            continue;
+        }
+
+        let mut client_pid: u32 = 0;
+        let pid_ok = unsafe { GetNamedPipeClientProcessId(handle, &mut client_pid) != 0 };
+        if !pid_ok || client_pid != allowed_worker_pid {
+            tracing::warn!(
+                client_pid,
+                expected_pid = allowed_worker_pid,
+                pid_ok,
+                "rejected unauthorized secure-helper Named Pipe client"
+            );
+            unsafe {
+                DisconnectNamedPipe(handle);
+                CloseHandle(handle);
+            }
+            continue;
+        }
+
+        let raw_handle = handle as usize;
         let _ = std::thread::Builder::new()
-            .name("secure-helper-conn".into())
+            .name("secure-helper-pipe".into())
             .spawn(move || {
-                if let Err(e) = handle_connection(stream, &expected_clone) {
-                    tracing::debug!(error = %e, "secure-helper client disconnected");
+                let handle = raw_handle as HANDLE;
+                let file = unsafe { File::from_raw_handle(handle as RawHandle) };
+                if let Err(e) = handle_connection(file) {
+                    tracing::debug!(error = %e, "secure-helper pipe client disconnected");
                 }
             });
     }
-    Ok(())
 }
 
-fn handle_connection(mut stream: TcpStream, expected_token: &[u8]) -> Result<()> {
-    let _ = stream.set_nodelay(true);
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
-
-    let mut len_buf = [0u8; 2];
-    stream.read_exact(&mut len_buf)?;
-    let tok_len = u16::from_be_bytes(len_buf) as usize;
-    if tok_len != expected_token.len() || tok_len > 256 {
-        let _ = stream.write_all(&[0]);
-        bail!("invalid helper token length");
-    }
-    let mut got = vec![0u8; tok_len];
-    stream.read_exact(&mut got)?;
-    if got != expected_token {
-        let _ = stream.write_all(&[0]);
-        bail!("helper token mismatch");
-    }
-    stream.write_all(&[1])?;
-    let _ = stream.set_read_timeout(None);
-
+fn handle_connection(mut stream: File) -> Result<()> {
     let _desk_guard = crate::win32::desktop::ThreadDesktopResetGuard::new();
     let mut executor = DirectExecutor::default();
 
@@ -309,5 +400,24 @@ fn handle_connection(mut stream: TcpStream, expected_token: &[u8]) -> Result<()>
                 bail!("unknown helper opcode {other}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_pipe_sddl;
+
+    #[test]
+    fn builds_strict_pipe_sddl_with_valid_sid_only() {
+        assert_eq!(
+            build_pipe_sddl(Some("S-1-5-21-12345-67890-1001")),
+            "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;S-1-5-21-12345-67890-1001)"
+        );
+        // Reject malformed SID injection attempts
+        assert_eq!(
+            build_pipe_sddl(Some("S-1-5-21-1)(A;;GA;;;WD")),
+            "D:P(A;;GA;;;SY)(A;;GA;;;BA)"
+        );
+        assert_eq!(build_pipe_sddl(None), "D:P(A;;GA;;;SY)(A;;GA;;;BA)");
     }
 }
