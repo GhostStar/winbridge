@@ -47,7 +47,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
+    func applicationWillResignActive(_ notification: Notification) {
+        state.unlockAllPointers()
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
+        state.unlockAllPointers()
         state.disconnect()
     }
 
@@ -67,6 +72,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func detachActiveWindowAction() {
         state.detachActiveWindow()
+    }
+
+    @objc private func togglePointerLockAction() {
+        state.togglePointerLockForActiveWindow()
     }
 
     @objc private func disconnectAction() {
@@ -116,6 +125,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let winItem = NSMenuItem()
         let winMenu = NSMenu(title: "窗口")
         winMenu.addItem(withTitle: "刷新 Windows 窗口列表", action: #selector(refreshWindowsAction), keyEquivalent: "")
+        let lockItem = NSMenuItem(
+            title: "锁定 / 解锁游戏鼠标 (3D 相对视角)",
+            action: #selector(togglePointerLockAction),
+            keyEquivalent: "L"
+        )
+        lockItem.keyEquivalentModifierMask = [.command, .shift]
+        winMenu.addItem(lockItem)
         winMenu.addItem(withTitle: "刷新当前窗口关键帧 (IDR)", action: #selector(requestKeyframeAction), keyEquivalent: "")
         winMenu.addItem(withTitle: "脱离当前远端窗口", action: #selector(detachActiveWindowAction), keyEquivalent: "")
         winMenu.addItem(.separator())

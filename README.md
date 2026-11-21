@@ -16,6 +16,7 @@
 - **本地等比缩放（不打乱 Windows 布局）**：默认仅在 Mac 本地等比缩放画面，不改动 Windows 原窗口尺寸；也支持一键开启「同步缩放 Windows」。
 - **原生级输入体验**：
   - 鼠标归一化坐标（规避 Win10/11 7px 隐形边框与 DPI 偏移）与触控板平滑滚动。
+  - **3D 游戏相对鼠标锁定（`⇧⌘L` 开关 / `Ctrl+Option` 随时释放）**：隐藏并锁定 Mac 光标在窗口中心、直接传输相对位移 `dx/dy` 注入 Windows，支持无限 360° 转视角并内置实时灵敏度滑块。
   - USB HID 物理键码映射 + 可选 **`Cmd → Ctrl`** 快捷映射（支持 `Cmd+C/V/X/Z/A/W`、点击、缩放）。
   - **macOS 原生中文输入法**：通过 `NSTextInputClient` 在 Mac 完成选词，经 `KEYEVENTF_UNICODE` 直接注入 Windows。
   - 系统光标与自定义 RGBA 光标同步、文本/PNG 剪贴板双向同步。

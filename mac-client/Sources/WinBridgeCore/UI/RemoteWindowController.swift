@@ -20,7 +20,9 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
     var onOpenManager: (() -> Void)?
     var cmdMapsToCtrl: () -> Bool = { true }
     var syncWindowResize: () -> Bool = { false }
+    var mouseSensitivity: () -> Float = { 1.0 }
 
+    private var baseTitle: String = ""
     private var isApplyingRemoteGeometry = false
     private var isLiveResizing = false
     private var localResizeSeq: UInt32 = 0
@@ -85,13 +87,16 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
         window.acceptsMouseMovedEvents = true
         window.minSize = NSSize(width: 160, height: 100)
 
+        self.baseTitle = info.title.isEmpty ? info.processName : info.title
         super.init(window: window)
         window.delegate = self
 
         remoteView.cmdMapsToCtrl = { [weak self] in self?.cmdMapsToCtrl() ?? true }
+        remoteView.mouseSensitivity = { [weak self] in self?.mouseSensitivity() ?? 1.0 }
         remoteView.onSendControl = { [weak self] payload in self?.onSendControl?(payload) }
         remoteView.onRequestQuit = { [weak self] in self?.onRequestQuit?() }
         remoteView.onOpenManager = { [weak self] in self?.onOpenManager?() }
+        remoteView.onPointerLockChanged = { [weak self] _ in self?.updateWindowTitle() }
 
         updateResizeBehavior()
 
@@ -203,8 +208,9 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
         guard let window else { return }
         if newInfo.kind != .popup {
             let newTitle = newInfo.title.isEmpty ? newInfo.processName : newInfo.title
-            if window.title != newTitle {
-                window.title = newTitle
+            if baseTitle != newTitle {
+                baseTitle = newTitle
+                updateWindowTitle()
             }
         }
 
@@ -296,9 +302,30 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
         remoteView.applyCursor(CursorMapper.cursor(from: shape))
     }
 
+    func togglePointerLock() {
+        guard info.kind != .popup else { return }
+        remoteView.setPointerLocked(!remoteView.isPointerLocked)
+    }
+
+    func unlockPointerIfNeeded() {
+        if remoteView.isPointerLocked {
+            remoteView.setPointerLocked(false)
+        }
+    }
+
+    private func updateWindowTitle() {
+        guard info.kind != .popup, let window else { return }
+        if remoteView.isPointerLocked {
+            window.title = "\(baseTitle) [鼠标已锁定 · Ctrl+Option 或 ⇧⌘L 释放]"
+        } else {
+            window.title = baseTitle
+        }
+    }
+
     func forceCloseLocally() {
         resizeDebounceTimer?.invalidate()
         resizeDebounceTimer = nil
+        unlockPointerIfNeeded()
         remoteView.releaseAllHeldKeys()
         decoder.invalidate()
         allowImmediateClose = true
@@ -317,10 +344,15 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func windowDidResignKey(_ notification: Notification) {
+        unlockPointerIfNeeded()
         remoteView.releaseAllHeldKeys()
         if info.kind != .popup {
             onSendControl?(.focusWindow(FocusWindow(windowId: windowId, focused: false)))
         }
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        unlockPointerIfNeeded()
     }
 
     func windowWillStartLiveResize(_ notification: Notification) {

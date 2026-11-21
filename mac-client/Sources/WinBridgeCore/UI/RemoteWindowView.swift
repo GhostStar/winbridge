@@ -1,5 +1,6 @@
 import AppKit
 import Carbon.HIToolbox
+import CoreGraphics
 import CoreVideo
 import Foundation
 import QuartzCore
@@ -10,9 +11,15 @@ import QuartzCore
 final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
     let windowId: UInt64
     var cmdMapsToCtrl: () -> Bool = { true }
+    var mouseSensitivity: () -> Float = { 1.0 }
     var onSendControl: ((ControlMessage.Payload) -> Void)?
     var onRequestQuit: (() -> Void)?
     var onOpenManager: (() -> Void)?
+    var onPointerLockChanged: ((Bool) -> Void)?
+
+    private(set) var isPointerLocked = false
+    private var isCursorHidden = false
+    private var pointerLockedAt: Date?
 
     private let videoLayer = CALayer()
     private var retainedFrame: DecodedImage?
@@ -127,18 +134,69 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
 
     func applyCursor(_ cursor: NSCursor) {
         activeCursor = cursor
-        if mouseInside {
+        if mouseInside && !isPointerLocked {
             cursor.set()
         }
         window?.invalidateCursorRects(for: self)
     }
 
     override func cursorUpdate(with event: NSEvent) {
-        activeCursor.set()
+        if !isPointerLocked {
+            activeCursor.set()
+        }
     }
 
     override func resetCursorRects() {
         addCursorRect(bounds, cursor: activeCursor)
+    }
+
+    // MARK: - 3D Game Relative Mouse Lock
+
+    func setPointerLocked(_ locked: Bool) {
+        guard locked != isPointerLocked else { return }
+        if locked {
+            guard let window else { return }
+            window.makeKeyAndOrderFront(nil)
+            window.makeFirstResponder(self)
+
+            // Center Windows cursor inside the target window first, then pin macOS cursor to
+            // the window's center and disassociate hardware motion so it can never leave bounds.
+            onSendControl?(.focusWindow(FocusWindow(windowId: windowId, focused: true)))
+            onSendControl?(.mouseEvent(MouseEvent(
+                windowId: windowId,
+                kind: .move,
+                normX: 0.5,
+                normY: 0.5
+            )))
+
+            let rect = currentVideoRect
+            let centerInWin = convert(NSPoint(x: rect.midX, y: rect.midY), to: nil)
+            let centerOnScreen = window.convertPoint(toScreen: centerInWin)
+            let primaryHeight = NSScreen.screens.first?.frame.height
+                ?? CGDisplayBounds(CGMainDisplayID()).height
+            let cgCenter = CGPoint(x: centerOnScreen.x, y: primaryHeight - centerOnScreen.y)
+
+            CGWarpMouseCursorPosition(cgCenter)
+            CGAssociateMouseAndMouseCursorPosition(0)
+            if !isCursorHidden {
+                NSCursor.hide()
+                isCursorHidden = true
+            }
+            isPointerLocked = true
+            pointerLockedAt = Date()
+            ClientLogger.shared.info("Pointer lock ENABLED for window 0x\(String(windowId, radix: 16))")
+            onPointerLockChanged?(true)
+        } else {
+            isPointerLocked = false
+            pointerLockedAt = nil
+            CGAssociateMouseAndMouseCursorPosition(1)
+            if isCursorHidden {
+                NSCursor.unhide()
+                isCursorHidden = false
+            }
+            ClientLogger.shared.info("Pointer lock DISABLED for window 0x\(String(windowId, radix: 16))")
+            onPointerLockChanged?(false)
+        }
     }
 
     // MARK: - Focus & Stuck-Key Safety
@@ -159,28 +217,48 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
 
     override func mouseEntered(with event: NSEvent) {
         mouseInside = true
-        activeCursor.set()
+        if !isPointerLocked {
+            activeCursor.set()
+        }
     }
 
     override func mouseExited(with event: NSEvent) {
         mouseInside = false
-        NSCursor.arrow.set()
+        if !isPointerLocked {
+            NSCursor.arrow.set()
+        }
     }
 
     override func mouseMoved(with event: NSEvent) {
-        sendMouse(event: event, kind: .move, button: .unspecified)
+        if isPointerLocked {
+            sendRelativeMove(event: event)
+        } else {
+            sendMouse(event: event, kind: .move, button: .unspecified)
+        }
     }
 
     override func mouseDragged(with event: NSEvent) {
-        sendMouse(event: event, kind: .move, button: .left)
+        if isPointerLocked {
+            sendRelativeMove(event: event)
+        } else {
+            sendMouse(event: event, kind: .move, button: .left)
+        }
     }
 
     override func rightMouseDragged(with event: NSEvent) {
-        sendMouse(event: event, kind: .move, button: .right)
+        if isPointerLocked {
+            sendRelativeMove(event: event)
+        } else {
+            sendMouse(event: event, kind: .move, button: .right)
+        }
     }
 
     override func otherMouseDragged(with event: NSEvent) {
-        sendMouse(event: event, kind: .move, button: mapOtherButton(event.buttonNumber))
+        if isPointerLocked {
+            sendRelativeMove(event: event)
+        } else {
+            sendMouse(event: event, kind: .move, button: mapOtherButton(event.buttonNumber))
+        }
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -235,7 +313,8 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
             button: .unspecified,
             wheelDeltaX: wheelX,
             wheelDeltaY: wheelY,
-            modifiers: mods
+            modifiers: mods,
+            isRelative: isPointerLocked
         )))
     }
 
@@ -257,9 +336,38 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
         return (Float((local.x - rect.minX) / w), Float((local.y - rect.minY) / h))
     }
 
-    private func sendMouse(event: NSEvent, kind: MouseEventKind, button: MouseButton) {
-        let (nx, ny) = normalizedPoint(from: event)
+    private func sendRelativeMove(event: NSEvent) {
+        if let lockedAt = pointerLockedAt, Date().timeIntervalSince(lockedAt) < 0.035 {
+            return
+        }
+        let sens = max(0.1, min(4.0, mouseSensitivity()))
+        let dx = Float(event.deltaX) * sens
+        let dy = Float(event.deltaY) * sens
+        guard dx != 0 || dy != 0 else { return }
         let mods = MacKeyToHID.modifierMask(from: event.modifierFlags, cmdMapsToCtrl: cmdMapsToCtrl())
+        onSendControl?(.mouseEvent(MouseEvent(
+            windowId: windowId,
+            kind: .relativeMove,
+            modifiers: mods,
+            deltaX: dx,
+            deltaY: dy,
+            isRelative: true
+        )))
+    }
+
+    private func sendMouse(event: NSEvent, kind: MouseEventKind, button: MouseButton) {
+        let mods = MacKeyToHID.modifierMask(from: event.modifierFlags, cmdMapsToCtrl: cmdMapsToCtrl())
+        if isPointerLocked {
+            onSendControl?(.mouseEvent(MouseEvent(
+                windowId: windowId,
+                kind: kind,
+                button: button,
+                modifiers: mods,
+                isRelative: true
+            )))
+            return
+        }
+        let (nx, ny) = normalizedPoint(from: event)
         onSendControl?(.mouseEvent(MouseEvent(
             windowId: windowId,
             kind: kind,
@@ -283,14 +391,22 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
             return super.performKeyEquivalent(with: event)
         }
 
+        // Cmd+Shift+L toggles 3D game Mouse Lock locally on the focused remote window.
+        if flags == [.command, .shift], event.keyCode == UInt16(kVK_ANSI_L) {
+            setPointerLocked(!isPointerLocked)
+            return true
+        }
+
         // Keep Cmd+Q (quit WinBridge) and Cmd+, (bring Manager to front) native on macOS.
         if flags == .command {
             if event.keyCode == UInt16(kVK_ANSI_Q) {
+                setPointerLocked(false)
                 releaseAllHeldKeys()
                 onRequestQuit?()
                 return true
             }
             if event.keyCode == UInt16(kVK_ANSI_Comma) {
+                setPointerLocked(false)
                 releaseAllHeldKeys()
                 onOpenManager?()
                 return true
@@ -302,6 +418,11 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
     }
 
     override func flagsChanged(with event: NSEvent) {
+        if isPointerLocked && event.modifierFlags.contains([.control, .option]) {
+            setPointerLocked(false)
+            releaseAllHeldKeys()
+            return
+        }
         syncModifiers(from: event.modifierFlags)
     }
 

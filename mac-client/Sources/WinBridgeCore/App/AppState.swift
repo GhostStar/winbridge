@@ -335,6 +335,18 @@ final class AppState {
         unsubscribeWindow(wc.windowId)
     }
 
+    func togglePointerLockForActiveWindow() {
+        guard let keyWindow = NSApp.keyWindow,
+              let wc = keyWindow.windowController as? RemoteWindowController else { return }
+        wc.togglePointerLock()
+    }
+
+    func unlockAllPointers() {
+        for (_, wc) in controllers {
+            wc.unlockPointerIfNeeded()
+        }
+    }
+
     func sendControl(_ payload: ControlMessage.Payload) {
         connection?.send(payload)
     }
@@ -403,6 +415,7 @@ final class AppState {
             syncWindowResize: { [weak self] in self?.settings.syncWindowResize ?? false }
         )
         wc.cmdMapsToCtrl = { [weak self] in self?.settings.cmdMapsToCtrl ?? true }
+        wc.mouseSensitivity = { [weak self] in self?.settings.mouseSensitivity ?? 1.0 }
         wc.onSendControl = { [weak self] payload in self?.sendControl(payload) }
         wc.onDetachRequested = { [weak self] id in self?.unsubscribeWindow(id) }
         wc.onOwnerMovedOrResized = { [weak self] ownerId in self?.repositionOwnedPopups(for: ownerId) }

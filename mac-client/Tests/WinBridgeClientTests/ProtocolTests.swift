@@ -82,6 +82,14 @@ import Testing
             wheelDeltaY: 120.0,
             modifiers: KeyModifierMask([.lCtrl, .lShift]).rawValue
         )),
+        .mouseEvent(MouseEvent(
+            windowId: 100,
+            kind: .relativeMove,
+            modifiers: 0,
+            deltaX: -12.5,
+            deltaY: 7.25,
+            isRelative: true
+        )),
         .keyEvent(KeyEvent(windowId: 100, isDown: true, isRepeat: false, hidUsage: 0x04, modifiers: 4)),
         .textInput(TextInput(windowId: 100, text: "你好 WinBridge 🚀")),
         .resizeWindow(ResizeWindow(windowId: 100, width: 1280, height: 720, resizeSeq: 3)),

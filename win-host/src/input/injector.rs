@@ -119,6 +119,7 @@ struct State {
     keys: BTreeSet<u32>,
     buttons: BTreeSet<i32>,
     wheel: [f64; 2],
+    rel_mouse: [f64; 2],
 }
 impl Drop for State {
     fn drop(&mut self) {
@@ -239,6 +240,66 @@ impl DirectExecutor {
 impl State {
     fn mouse(&mut self, target: &WindowInfo, ev: MouseEvent, split_click: bool) -> Result<()> {
         unsafe {
+            // Pure relative pointer movement (3D game Mouse Lock mode): inject raw relative
+            // MOUSEEVENTF_MOVE (without ABSOLUTE/VIRTUALDESK) with sub-pixel accumulation.
+            if ev.kind == 5 {
+                ensure!(
+                    ev.delta_x.is_finite() && ev.delta_y.is_finite(),
+                    "non-finite relative mouse delta"
+                );
+                let sum_x = self.rel_mouse[0] + f64::from(ev.delta_x);
+                let sum_y = self.rel_mouse[1] + f64::from(ev.delta_y);
+                let dx = sum_x.round().clamp(i32::MIN as f64, i32::MAX as f64) as i32;
+                let dy = sum_y.round().clamp(i32::MIN as f64, i32::MAX as f64) as i32;
+                self.rel_mouse[0] = sum_x - sum_x.round();
+                self.rel_mouse[1] = sum_y - sum_y.round();
+                if dx != 0 || dy != 0 {
+                    send(&[mouse(MOUSEEVENTF_MOVE, 0, dx, dy)])?;
+                }
+                return Ok(());
+            }
+
+            // In-place button / wheel injection while Mouse Lock is active (never warp cursor).
+            if ev.is_relative {
+                let mut events = Vec::new();
+                match ev.kind {
+                    1 => {}
+                    2 | 3 => events.push(button(ev.button, ev.kind == 2)?),
+                    4 => {
+                        for (i, (delta, flag)) in [
+                            (ev.wheel_delta_x, MOUSEEVENTF_HWHEEL),
+                            (ev.wheel_delta_y, MOUSEEVENTF_WHEEL),
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        {
+                            ensure!(delta.is_finite(), "non-finite wheel delta");
+                            let sum = self.wheel[i] + f64::from(delta);
+                            let amount =
+                                sum.round().clamp(i32::MIN as f64, i32::MAX as f64) as i32;
+                            self.wheel[i] = sum - sum.round();
+                            if amount != 0 {
+                                events.push(mouse(flag, amount as u32, 0, 0));
+                            }
+                        }
+                    }
+                    _ => bail!("unsupported relative mouse event"),
+                }
+                if !events.is_empty() {
+                    send(&events)?;
+                }
+                match ev.kind {
+                    2 => {
+                        self.buttons.insert(ev.button);
+                    }
+                    3 => {
+                        self.buttons.remove(&ev.button);
+                    }
+                    _ => {}
+                }
+                return Ok(());
+            }
+
             let dx = virtual_axis(
                 target.x,
                 target.width,

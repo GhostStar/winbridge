@@ -107,6 +107,8 @@ enum MouseEventKind {
   MOUSE_EVENT_KIND_BUTTON_DOWN = 2;
   MOUSE_EVENT_KIND_BUTTON_UP = 3;
   MOUSE_EVENT_KIND_WHEEL = 4;
+  // Relative pointer motion for 3D game Mouse Lock mode (uses delta_x / delta_y).
+  MOUSE_EVENT_KIND_RELATIVE_MOVE = 5;
 }
 
 enum MouseButton {
@@ -385,6 +387,13 @@ message MouseEvent {
 
   // Bitmask of KeyModifierBit.
   uint32 modifiers = 8;
+
+  // Relative motion delta in pixels (positive right / down) when kind == RELATIVE_MOVE.
+  float delta_x = 9;
+  float delta_y = 10;
+  // When true on BUTTON_DOWN / BUTTON_UP / WHEEL, inject in-place at the current Windows
+  // cursor position instead of warping to (norm_x, norm_y).
+  bool is_relative = 11;
 }
 
 message KeyEvent {

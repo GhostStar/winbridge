@@ -20,6 +20,8 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
     private let audioCheck = NSButton(checkboxWithTitle: "开启音频", target: nil, action: nil)
     private let volumeSlider = NSSlider(value: 0.85, minValue: 0.0, maxValue: 1.0, target: nil, action: nil)
     private let volumeLabel = NSTextField(labelWithString: "85%")
+    private let sensSlider = NSSlider(value: 1.0, minValue: 0.2, maxValue: 3.0, target: nil, action: nil)
+    private let sensLabel = NSTextField(labelWithString: "1.0x")
 
     private let statusLabel = NSTextField(labelWithString: "未连接")
     private let rttLabel = NSTextField(labelWithString: "")
@@ -133,13 +135,24 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
 
         volumeSlider.isContinuous = true
         volumeSlider.controlSize = .small
-        volumeSlider.widthAnchor.constraint(equalToConstant: 115).isActive = true
+        volumeSlider.widthAnchor.constraint(equalToConstant: 92).isActive = true
         volumeSlider.target = self
         volumeSlider.action = #selector(volumeChanged)
 
         volumeLabel.font = .monospacedDigitSystemFont(ofSize: 11.5, weight: .regular)
         volumeLabel.textColor = .secondaryLabelColor
         volumeLabel.widthAnchor.constraint(equalToConstant: 36).isActive = true
+
+        sensSlider.isContinuous = true
+        sensSlider.controlSize = .small
+        sensSlider.widthAnchor.constraint(equalToConstant: 92).isActive = true
+        sensSlider.target = self
+        sensSlider.action = #selector(volumeChanged)
+        sensSlider.toolTip = "3D 游戏鼠标锁定模式（⇧⌘L 开启 / Ctrl+Option 释放）下的相对视角灵敏度倍率"
+
+        sensLabel.font = .monospacedDigitSystemFont(ofSize: 11.5, weight: .regular)
+        sensLabel.textColor = .secondaryLabelColor
+        sensLabel.widthAnchor.constraint(equalToConstant: 34).isActive = true
 
         let audioSpacer = NSView()
         audioSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -153,6 +166,9 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
             NSTextField(labelWithString: "音量:"),
             volumeSlider,
             volumeLabel,
+            NSTextField(labelWithString: "锁定灵敏度:"),
+            sensSlider,
+            sensLabel,
             audioSpacer,
             statusLabel,
             rttLabel,
@@ -326,6 +342,8 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         volumeSlider.floatValue = state.settings.audioVolume
         volumeSlider.isEnabled = state.settings.audioEnabled
         volumeLabel.stringValue = "\(Int(round(state.settings.audioVolume * 100)))%"
+        sensSlider.floatValue = state.settings.mouseSensitivity
+        sensLabel.stringValue = String(format: "%.1fx", state.settings.mouseSensitivity)
     }
 
     private func persistInputsToSettings() {
@@ -345,8 +363,10 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         s.syncWindowResize = (syncResizeCheck.state == .on)
         s.audioEnabled = (audioCheck.state == .on)
         s.audioVolume = volumeSlider.floatValue
+        s.mouseSensitivity = sensSlider.floatValue
         volumeSlider.isEnabled = s.audioEnabled
         volumeLabel.stringValue = "\(Int(round(s.audioVolume * 100)))%"
+        sensLabel.stringValue = String(format: "%.1fx", s.mouseSensitivity)
         state.settings = s
     }
 
@@ -418,6 +438,8 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         volumeSlider.floatValue = state.settings.audioVolume
         volumeSlider.isEnabled = state.settings.audioEnabled
         volumeLabel.stringValue = "\(Int(round(state.settings.audioVolume * 100)))%"
+        sensSlider.floatValue = state.settings.mouseSensitivity
+        sensLabel.stringValue = String(format: "%.1fx", state.settings.mouseSensitivity)
 
         tabControl.setLabel("已打开窗口 (\(state.availableWindows.count))", forSegment: 0)
         tabControl.setLabel("启动应用 (\(state.availableApps.count))", forSegment: 1)

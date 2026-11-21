@@ -55,6 +55,7 @@ enum MouseEventKind: Int32, Sendable {
     case buttonDown = 2
     case buttonUp = 3
     case wheel = 4
+    case relativeMove = 5
 }
 
 enum MouseButton: Int32, Sendable {
@@ -781,6 +782,9 @@ struct MouseEvent: Equatable, Sendable {
     var wheelDeltaX: Float = 0
     var wheelDeltaY: Float = 0
     var modifiers: UInt32 = 0
+    var deltaX: Float = 0
+    var deltaY: Float = 0
+    var isRelative: Bool = false
 
     func encode() -> Data {
         var w = ProtoWriter()
@@ -792,6 +796,9 @@ struct MouseEvent: Equatable, Sendable {
         w.writeFloat(field: 6, wheelDeltaX)
         w.writeFloat(field: 7, wheelDeltaY)
         w.writeUInt32(field: 8, modifiers)
+        w.writeFloat(field: 9, deltaX)
+        w.writeFloat(field: 10, deltaY)
+        w.writeBool(field: 11, isRelative)
         return w.data
     }
 
@@ -809,6 +816,9 @@ struct MouseEvent: Equatable, Sendable {
             case 6: m.wheelDeltaX = try r.readFloat()
             case 7: m.wheelDeltaY = try r.readFloat()
             case 8: m.modifiers = try r.readUInt32()
+            case 9: m.deltaX = try r.readFloat()
+            case 10: m.deltaY = try r.readFloat()
+            case 11: m.isRelative = try r.readBool()
             default: try r.skip(wireType: wire)
             }
         }
