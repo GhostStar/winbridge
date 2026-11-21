@@ -54,6 +54,7 @@ message ControlMessage {
     KeyEvent key_event = 51;                     // Mac -> Win
     TextInput text_input = 52;                   // Mac -> Win
     GamepadState gamepad_state = 53;             // Mac -> Win
+    MicChunk mic_chunk = 54;                     // Mac -> Win
 
     // --- Clipboard, Audio & File Transfer ---
     ClipboardSync clipboard_sync = 60;           // Bidirectional
@@ -432,6 +433,16 @@ message GamepadState {
   int32 thumb_ly = 7;
   int32 thumb_rx = 8;
   int32 thumb_ry = 9;
+}
+
+// Mac microphone uplink. Rendered only into an existing virtual playback endpoint
+// (CABLE Input / VB-Audio / WinBridge Mic, or --mic-device). Never the default speakers.
+message MicChunk {
+  uint32 sample_rate = 1;
+  uint32 channels = 2;
+  bytes pcm_s16le = 3;
+  // false stops rendering. pcm may be empty.
+  bool enabled = 4;
 }
 
 // ============================================================================
