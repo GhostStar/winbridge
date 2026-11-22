@@ -1,6 +1,13 @@
 use crate::proto::WindowInfo;
 use anyhow::{ensure, Context, Result};
-use std::{io, mem, path::Path, ptr};
+use std::{
+    collections::HashMap,
+    io, mem,
+    path::Path,
+    ptr,
+    sync::{Mutex, OnceLock},
+    time::{Duration, Instant},
+};
 use windows_sys::Win32::{
     Foundation::{CloseHandle, HWND, LPARAM, POINT, RECT},
     Graphics::{
@@ -101,8 +108,23 @@ fn class(hwnd: HWND) -> String {
     let n = unsafe { GetClassNameW(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
     String::from_utf16_lossy(&buf[..n as usize])
 }
+static PROCESS_NAME_CACHE: OnceLock<Mutex<HashMap<u32, (Instant, String)>>> = OnceLock::new();
+const PROCESS_NAME_CACHE_TTL: Duration = Duration::from_secs(60);
+
 fn process_name(pid: u32) -> String {
-    unsafe {
+    if pid == 0 {
+        return String::new();
+    }
+    let cache = PROCESS_NAME_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let now = Instant::now();
+    if let Ok(guard) = cache.lock() {
+        if let Some((ts, name)) = guard.get(&pid) {
+            if now.duration_since(*ts) < PROCESS_NAME_CACHE_TTL {
+                return name.clone();
+            }
+        }
+    }
+    let resolved = unsafe {
         let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
         if h.is_null() {
             return String::new();
@@ -120,6 +142,53 @@ fn process_name(pid: u32) -> String {
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned()
+    };
+    if !resolved.is_empty() {
+        if let Ok(mut guard) = cache.lock() {
+            if guard.len() >= 512 {
+                guard.retain(|_, (ts, _)| now.duration_since(*ts) < PROCESS_NAME_CACHE_TTL);
+            }
+            guard.insert(pid, (now, resolved.clone()));
+        }
+    }
+    resolved
+}
+
+/// Lightweight window geometry & owner/PID snapshot for high-frequency input injection.
+/// Deliberately avoids `OpenProcess`, `GetWindowTextW`, and `GetClassNameW` so moving the
+/// pointer over anti-automation sensitive apps (e.g. WeChat) never spams process handles.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FastWindowBounds {
+    pub window_id: u64,
+    pub owner_window_id: u64,
+    pub pid: u32,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+pub(crate) fn fast_bounds(id: u64) -> Result<FastWindowBounds> {
+    let hwnd = checked_hwnd(id)?;
+    unsafe {
+        ensure!(IsWindowVisible(hwnd) != 0, "window is hidden");
+        let (_, r) = rects(hwnd)?;
+        let w = r.right.saturating_sub(r.left);
+        let h = r.bottom.saturating_sub(r.top);
+        ensure!(w > 0 && h > 0, "empty window bounds");
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        ensure!(pid != 0, "window no longer exists");
+        let owner = GetWindow(hwnd, GW_OWNER);
+        Ok(FastWindowBounds {
+            window_id: id,
+            owner_window_id: owner as usize as u64,
+            pid,
+            x: r.left,
+            y: r.top,
+            width: w as u32,
+            height: h as u32,
+        })
     }
 }
 

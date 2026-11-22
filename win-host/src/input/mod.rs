@@ -7,10 +7,9 @@ pub use injector::Injector;
 
 use crate::win32;
 use anyhow::{ensure, Context, Result};
-use std::{io, mem, ptr};
+use std::{io, mem};
 use windows_sys::Win32::{
     Foundation::HWND,
-    System::Threading::{AttachThreadInput, GetCurrentThreadId},
     UI::{Input::KeyboardAndMouse::*, WindowsAndMessaging::*},
 };
 
@@ -31,74 +30,36 @@ fn is_foreground_or_same_process(hwnd: HWND) -> bool {
     }
 }
 
+/// Gently raises and focuses `hwnd` without cross-process `AttachThreadInput` or
+/// `HWND_TOPMOST` toggling (both of which can trigger anti-automation risk controls
+/// or UI message-pump glitches in apps such as WeChat).
 fn foreground(hwnd: HWND) -> Result<()> {
     unsafe {
         if is_foreground_or_same_process(hwnd) {
             return Ok(());
         }
         if IsIconic(hwnd) != 0 {
-            ShowWindow(hwnd, SW_RESTORE);
+            let _ = ShowWindowAsync(hwnd, SW_RESTORE);
         }
-        SetForegroundWindow(hwnd);
+        let _ = SetWindowPos(
+            hwnd,
+            HWND_TOP,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+        let _ = BringWindowToTop(hwnd);
+        let _ = SetForegroundWindow(hwnd);
         if is_foreground_or_same_process(hwnd) {
             return Ok(());
         }
-
-        // Temporarily attach thread input queues to bypass Windows' Foreground Lock Timeout
-        // when activating a target window from a background host process.
-        let cur_tid = GetCurrentThreadId();
-        let fg = GetForegroundWindow();
-        let fg_tid = if !fg.is_null() {
-            GetWindowThreadProcessId(fg, ptr::null_mut())
-        } else {
-            0
-        };
-        let target_tid = GetWindowThreadProcessId(hwnd, ptr::null_mut());
-
-        let attached_fg =
-            fg_tid != 0 && fg_tid != cur_tid && AttachThreadInput(cur_tid, fg_tid, 1) != 0;
-        let attached_target = target_tid != 0
-            && target_tid != cur_tid
-            && target_tid != fg_tid
-            && AttachThreadInput(cur_tid, target_tid, 1) != 0;
-
-        let was_topmost = (GetWindowLongW(hwnd, GWL_EXSTYLE) as u32) & WS_EX_TOPMOST != 0;
-        if !was_topmost {
-            let _ = SetWindowPos(
-                hwnd,
-                HWND_TOPMOST,
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-            );
-            let _ = SetWindowPos(
-                hwnd,
-                HWND_NOTOPMOST,
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-            );
-        }
-        let _ = BringWindowToTop(hwnd);
-        let _ = SetForegroundWindow(hwnd);
-
-        if attached_target {
-            let _ = AttachThreadInput(cur_tid, target_tid, 0);
-        }
-        if attached_fg {
-            let _ = AttachThreadInput(cur_tid, fg_tid, 0);
-        }
-
-        // The foreground thread processes activation asynchronously.
-        for _ in 0..10 {
+        for _ in 0..3 {
+            std::thread::sleep(std::time::Duration::from_millis(5));
             if is_foreground_or_same_process(hwnd) {
                 return Ok(());
             }
-            std::thread::sleep(std::time::Duration::from_millis(10));
         }
         ensure!(
             is_foreground_or_same_process(hwnd),
