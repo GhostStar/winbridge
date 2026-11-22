@@ -561,7 +561,7 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
                 case .otherMouseDragged: btn = mapOtherButton(event.buttonNumber)
                 default: btn = .unspecified
                 }
-                onSendControl?(.mouseEvent(MouseEvent(
+                emitControl(.mouseEvent(MouseEvent(
                     windowId: windowId,
                     kind: .move,
                     normX: nx,
@@ -575,7 +575,7 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
                 let btn: MouseButton = event.type == .leftMouseDown
                     ? .left
                     : (event.type == .rightMouseDown ? .right : mapOtherButton(event.buttonNumber))
-                onSendControl?(.mouseEvent(MouseEvent(
+                emitControl(.mouseEvent(MouseEvent(
                     windowId: windowId,
                     kind: .buttonDown,
                     normX: nx,
@@ -588,7 +588,7 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
                 let btn: MouseButton = event.type == .leftMouseUp
                     ? .left
                     : (event.type == .rightMouseUp ? .right : mapOtherButton(event.buttonNumber))
-                onSendControl?(.mouseEvent(MouseEvent(
+                emitControl(.mouseEvent(MouseEvent(
                     windowId: windowId,
                     kind: .buttonUp,
                     normX: nx,
@@ -630,8 +630,8 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
             window.makeKeyAndOrderFront(nil)
             window.makeFirstResponder(self)
             if previous == .off {
-                onSendControl?(.focusWindow(FocusWindow(windowId: windowId, focused: true)))
-                onSendControl?(.mouseEvent(MouseEvent(
+                emitControl(.focusWindow(FocusWindow(windowId: windowId, focused: true)))
+                emitControl(.mouseEvent(MouseEvent(
                     windowId: windowId,
                     kind: .move,
                     normX: 0.5,
@@ -657,7 +657,7 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
                 // Game just revealed cursor (Alt / menu open): show cursor right at window center
                 // and align Windows cursor cleanly without 250ms warp suppression.
                 warpCursorToVideoCenter(keepAssociated: true)
-                onSendControl?(.mouseEvent(MouseEvent(
+                emitControl(.mouseEvent(MouseEvent(
                     windowId: windowId,
                     kind: .move,
                     normX: 0.5,
@@ -689,9 +689,37 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
         onGameLockStateChanged?(desired)
     }
 
+    var inputEnabled = true
+    private var heldMouseButtons: [MouseButton: MouseEvent] = [:]
+
+    func emitControl(_ payload: ControlMessage.Payload) {
+        guard inputEnabled else { return }
+        if case .mouseEvent(let event) = payload {
+            if event.kind == .buttonDown { heldMouseButtons[event.button] = event }
+            if event.kind == .buttonUp { heldMouseButtons.removeValue(forKey: event.button) }
+            if event.kind == .move {
+                for button in Array(heldMouseButtons.keys) {
+                    heldMouseButtons[button]?.normX = event.normX
+                    heldMouseButtons[button]?.normY = event.normY
+                }
+            }
+        }
+        onSendControl?(payload)
+    }
+
     // MARK: - Focus & Stuck-Key Safety
 
     func releaseAllHeldKeys() {
+        // Releases must pass even when a modal update has disabled the target.
+        for var event in heldMouseButtons.values {
+            event.kind = .buttonUp
+            event.modifiers = 0
+            onSendControl?(.mouseEvent(event))
+        }
+        heldMouseButtons.removeAll()
+        let wasEnabled = inputEnabled
+        inputEnabled = true
+        defer { inputEnabled = wasEnabled }
         for (_, hid) in heldKeyCodes {
             sendKeyEvent(hid: hid, isDown: false, isRepeat: false, flags: [])
         }
@@ -802,7 +830,7 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
         }
         guard wheelX != 0 || wheelY != 0 else { return }
         let mods = MacKeyToHID.modifierMask(from: event.modifierFlags, cmdMapsToCtrl: cmdMapsToCtrl())
-        onSendControl?(.mouseEvent(MouseEvent(
+        emitControl(.mouseEvent(MouseEvent(
             windowId: windowId,
             kind: .wheel,
             normX: nx,
@@ -828,7 +856,7 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
                 pinchAccumulator -= Double(steps) * threshold
                 let (nx, ny) = normalizedPoint(from: event)
                 let wheelY = Float(steps) * 120.0
-                onSendControl?(.mouseEvent(MouseEvent(
+                emitControl(.mouseEvent(MouseEvent(
                     windowId: windowId,
                     kind: .wheel,
                     normX: nx,
@@ -879,7 +907,7 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
         let dy = Float(event.deltaY) * sens
         guard dx != 0 || dy != 0 else { return }
         let mods = MacKeyToHID.modifierMask(from: event.modifierFlags, cmdMapsToCtrl: cmdMapsToCtrl())
-        onSendControl?(.mouseEvent(MouseEvent(
+        emitControl(.mouseEvent(MouseEvent(
             windowId: windowId,
             kind: .relativeMove,
             modifiers: mods,
@@ -892,7 +920,7 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
     private func sendMouse(event: NSEvent, kind: MouseEventKind, button: MouseButton) {
         let mods = MacKeyToHID.modifierMask(from: event.modifierFlags, cmdMapsToCtrl: cmdMapsToCtrl())
         if gameLockState == .relativeLocked {
-            onSendControl?(.mouseEvent(MouseEvent(
+            emitControl(.mouseEvent(MouseEvent(
                 windowId: windowId,
                 kind: kind,
                 button: button,
@@ -902,7 +930,7 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
             return
         }
         let (nx, ny) = normalizedPoint(from: event)
-        onSendControl?(.mouseEvent(MouseEvent(
+        emitControl(.mouseEvent(MouseEvent(
             windowId: windowId,
             kind: kind,
             normX: nx,
@@ -921,6 +949,10 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
             return super.performKeyEquivalent(with: event)
         }
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if flags == .command && event.keyCode == UInt16(kVK_ANSI_W) {
+            window?.performClose(nil)
+            return true
+        }
         let sc = shortcuts()
         if sc.toggleGameLock.matches(event: event) {
             setGameLockEnabled(!gameLockEnabled)
@@ -1057,7 +1089,7 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
 
     private func sendKeyEvent(hid: UInt32, isDown: Bool, isRepeat: Bool, flags: NSEvent.ModifierFlags) {
         let mask = MacKeyToHID.modifierMask(from: flags, cmdMapsToCtrl: cmdMapsToCtrl())
-        onSendControl?(.keyEvent(KeyEvent(
+        emitControl(.keyEvent(KeyEvent(
             windowId: windowId,
             isDown: isDown,
             isRepeat: isRepeat,
@@ -1095,7 +1127,7 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
            MacKeyToHID.hidUsage(for: ev.keyCode) != nil {
             handlePhysicalKeyDown(ev)
         } else {
-            onSendControl?(.textInput(TextInput(windowId: windowId, text: text)))
+            emitControl(.textInput(TextInput(windowId: windowId, text: text)))
         }
     }
 

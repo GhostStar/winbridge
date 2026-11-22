@@ -111,7 +111,7 @@ final class AppState {
     }
 
     private var connection: WinBridgeConnection?
-    private var controllers: [UInt64: RemoteWindowController] = [:]
+    private(set) var controllers: [UInt64: RemoteWindowController] = [:]
     private let clipboardMonitor = ClipboardMonitor()
     private let audioPlayer = AudioPlayer()
     private let hostDiscovery = HostDiscovery()
@@ -599,7 +599,7 @@ final class AppState {
             return
         }
         if windowId != 0, let existing = controllers[windowId] {
-            existing.present(owner: nil)
+            restoreViewer(existing.windowId)
             sendControl(.windowAction(WindowAction(windowId: windowId, action: .bringToFront)))
             return
         }
@@ -1297,13 +1297,13 @@ final class AppState {
 
     func focusDesktopIfOpen() {
         if let existing = controllers[SyntheticWindow.primaryDesktop] {
-            existing.present(owner: nil)
+            restoreViewer(existing.windowId)
         }
     }
 
     func focusOrSubscribe(_ info: WindowInfo) {
         if let existing = controllers[info.windowId] {
-            existing.present(owner: nil)
+            restoreViewer(existing.windowId)
         } else {
             subscribeWindow(info)
         }
@@ -1400,7 +1400,7 @@ final class AppState {
             if entry.isDesktop {
                 if let existing = controllers[SyntheticWindow.primaryDesktop] {
                     existing.applySavedLayout(entry.layout)
-                    existing.present(owner: nil)
+                    restoreViewer(existing.windowId)
                     if syncMuteState(windowId: SyntheticWindow.primaryDesktop, muted: entry.layout.isAudioMuted) {
                         audioMuteChanged = true
                     }
@@ -1429,7 +1429,7 @@ final class AppState {
             restoredCount += 1
             if let existing = controllers[target.windowId] {
                 existing.applySavedLayout(entry.layout)
-                existing.present(owner: nil)
+                restoreViewer(existing.windowId)
                 if syncMuteState(windowId: target.windowId, muted: entry.layout.isAudioMuted) {
                     audioMuteChanged = true
                 }
@@ -2110,12 +2110,13 @@ final class AppState {
         }
     }
 
-    private func handleWindowUpdated(_ update: WindowUpdated) {
+    func handleWindowUpdated(_ update: WindowUpdated) {
         guard let info = update.window else { return }
         let ownerController = info.ownerWindowId != 0 ? controllers[info.ownerWindowId] : nil
 
         if let existing = controllers[info.windowId] {
             existing.applyUpdate(update, owner: ownerController)
+            reconcileHiddenViewers()
             return
         }
 
@@ -2132,7 +2133,7 @@ final class AppState {
         wc.showPerformanceHud = { [weak self] in self?.settings.showPerformanceHud ?? false }
         wc.currentRttMs = { [weak self] in self?.rttMs }
         wc.onSendControl = { [weak self] payload in self?.sendControl(payload) }
-        wc.onDetachRequested = { [weak self] id in self?.unsubscribeWindow(id) }
+        wc.onDetachRequested = { [weak self] id in self?.hideViewer(id) }
         wc.onOwnerMovedOrResized = { [weak self] ownerId in self?.repositionOwnedPopups(for: ownerId) }
         wc.onRequestQuit = { NSApp.terminate(nil) }
         wc.onOpenManager = { [weak self] in self?.onOpenManager?() }
@@ -2152,6 +2153,7 @@ final class AppState {
                 pushVideoConfig(windowId: info.windowId)
             }
         }
+        reconcileHiddenViewers()
         wc.present(owner: ownerController)
         if let layoutKey = Self.layoutKey(for: info),
            let savedLayout = pendingPresetLayouts.removeValue(forKey: layoutKey) ?? settings.savedWindowLayouts[layoutKey] {
@@ -2172,19 +2174,51 @@ final class AppState {
 
     private func repositionOwnedPopups(for ownerId: UInt64) {
         guard let owner = controllers[ownerId] else { return }
-        for (_, child) in controllers where child.info.ownerWindowId == ownerId && child.info.kind == .popup {
+        for (_, child) in controllers where child.info.ownerWindowId == ownerId && (child.info.kind == .popup || child.info.kind == .dialog) && !child.isLocallyHidden {
             child.repositionRelative(to: owner)
         }
     }
 
-    private func closeWindowLocally(_ windowId: UInt64) {
-        let ownedIds = controllers.values
-            .filter { $0.info.ownerWindowId == windowId && $0.info.kind == .popup }
-            .map(\.windowId)
-        for childId in ownedIds {
-            controllers.removeValue(forKey: childId)?.forceCloseLocally()
+    func isViewerHidden(_ windowId: UInt64) -> Bool { controllers[windowId]?.isLocallyHidden == true }
+
+    func hideViewer(_ windowId: UInt64) {
+        let ids = ViewerVisibility.subtree(windowId, in: controllers.values.map(\.info))
+        for id in ids { controllers[id]?.hideLocally() }
+        onStateChanged?()
+    }
+
+    private func reconcileHiddenViewers() {
+        let windows = controllers.values.map(\.info)
+        var hidden = Set(controllers.values.filter(\.isLocallyHidden).map(\.windowId))
+        for id in hidden { hidden.formUnion(ViewerVisibility.subtree(id, in: windows)) }
+        for id in hidden { controllers[id]?.hideLocally() }
+    }
+
+    func restoreViewer(_ windowId: UInt64) {
+        let windows = controllers.values.map(\.info)
+        var ids = ViewerVisibility.ancestors(windowId, in: windows)
+        for id in Array(ids) { ids.formUnion(ViewerVisibility.subtree(id, in: windows)) }
+        // Owners first, then panels; cycles cannot cause unbounded traversal.
+        for id in ids.sorted(by: {
+            ViewerVisibility.ancestors($0, in: windows).count < ViewerVisibility.ancestors($1, in: windows).count
+        }) {
+            guard let wc = controllers[id] else { continue }
+            wc.restoreLocally(owner: controllers[wc.info.ownerWindowId])
         }
-        controllers.removeValue(forKey: windowId)?.forceCloseLocally()
+        onStateChanged?()
+    }
+
+    func restoreHiddenViewers() {
+        for id in controllers.values.filter(\.isLocallyHidden).map(\.windowId) { restoreViewer(id) }
+    }
+
+    private func closeWindowLocally(_ windowId: UInt64) {
+        let ids = ViewerVisibility.subtree(windowId, in: controllers.values.map(\.info))
+        for id in ids {
+            controllers.removeValue(forKey: id)?.forceCloseLocally()
+            subscribedRootIds.remove(id)
+            mutedWindowIds.remove(id)
+        }
     }
 
     private func handleHostError(_ err: HostError) {

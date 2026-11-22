@@ -351,6 +351,27 @@ impl Session {
         Ok(())
     }
     fn remove(&mut self, id: u64, closed: bool) -> Result<()> {
+        if closed {
+            let successor = self
+                .windows
+                .iter()
+                .filter(|(key, sub)| **key != id && sub.root == id && sub.info.kind == 1)
+                .map(|(key, _)| *key)
+                .min();
+            if let Some(next) = successor {
+                let baseline = self
+                    .windows
+                    .get(&id)
+                    .map(|s| s.initial_windows.clone())
+                    .unwrap_or_default();
+                for sub in self.windows.values_mut().filter(|s| s.root == id) {
+                    sub.root = next;
+                }
+                if let Some(sub) = self.windows.get_mut(&next) {
+                    sub.initial_windows = baseline;
+                }
+            }
+        }
         let ids: Vec<_> = self
             .windows
             .iter()

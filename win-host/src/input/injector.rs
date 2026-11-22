@@ -579,6 +579,14 @@ impl State {
         payload: Payload,
         focus: impl Fn() -> Result<()>,
     ) -> Result<Option<WindowUpdated>> {
+        let releasing = matches!(&payload,
+            Payload::KeyEvent(e) if !e.is_down)
+            || matches!(&payload, Payload::MouseEvent(e) if e.kind == 3)
+            || matches!(&payload, Payload::FocusWindow(e) if !e.focused);
+        ensure!(
+            releasing || unsafe { IsWindowEnabled(hwnd) } != 0,
+            "target window is disabled by a modal dialog"
+        );
         let focus_best_effort = || {
             if let Err(err) = focus() {
                 // If an elevated window currently holds foreground, ask LocalSystem helper to switch focus.

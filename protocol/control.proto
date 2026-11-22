@@ -265,6 +265,9 @@ message WindowInfo {
   // Optional PNG-encoded app icon (typically populated in ListWindowsResponse
   // or first WindowUpdated; empty when unchanged).
   bytes icon_png = 19;
+  // Backward-compatible state: absent means enabled/non-modal.
+  bool is_disabled = 20;
+  bool is_modal = 21;
 }
 
 message ListWindowsRequest {

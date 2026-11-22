@@ -124,7 +124,7 @@ After the `WBRGMED\x01` + 16-byte `session_id` handshake returns `0x00`, Windows
 
 1. **Popup / Menu Tracking (`follow_popups = true`)**
    - Windows Host installs `SetWinEventHook` (`EVENT_OBJECT_CREATE`, `SHOW`, `HIDE`, `DESTROY`, `LOCATIONCHANGE`, `NAMECHANGE`).
-   - When a tracked process spawns an owned dialog (`WINDOW_KIND_DIALOG`) or transient popup (`WINDOW_KIND_POPUP`: e.g. `WS_POPUP`, `WS_EX_TOOLWINDOW`, menu class `#32768`, dropdowns, tooltips), the host:
+   - When a tracked process spawns an owned dialog (`WINDOW_KIND_DIALOG`) or transient popup (`WINDOW_KIND_POPUP`: e.g. menu class `#32768`, dropdowns, tooltips), the host:
      1. Sends `WindowUpdated` with `owner_window_id`, `offset_x`, and `offset_y`.
      2. Immediately starts streaming frames for that popup's `window_id` on the Media channel.
    - macOS renders `WINDOW_KIND_POPUP` as a borderless, non-activating child window positioned at `(owner_mac_origin + scaled_offset)` above the parent window.
@@ -143,7 +143,7 @@ After the `WBRGMED\x01` + 16-byte `session_id` handshake returns `0x00`, Windows
 1. **Keyboard (`KeyEvent`)**
    - macOS translates `NSEvent.keyCode` → **USB HID Usage Page `0x07`** code.
    - Windows translates USB HID Usage → PS/2 Set-1 ScanCode (with `KEYEVENTF_EXTENDEDKEY` where needed) and injects via `SendInput(KEYEVENTF_SCANCODE)`.
-   - Optional macOS-side convenience mapping (configurable in UI): `Cmd + C/V/X/Z/A/F/S/W` → `Ctrl + C/V/X/Z/A/F/S` / `Alt + F4`.
+   - Optional macOS-side convenience mapping (configurable in UI): `Cmd + C/V/X/Z/A/F/S` → `Ctrl + C/V/X/Z/A/F/S`; Cmd+W closes the local viewer.
 2. **Chinese / CJK IME (`TextInput`)**
    - Do **not** rely on switching Windows IME remotely.
    - The macOS window implements `NSTextInputClient`; when the user commits composed text (e.g. Chinese characters), macOS sends `TextInput { window_id, text }`.
@@ -173,9 +173,11 @@ intermediate owners. It also follows a newly visible foreground normal window in
 subscribed application when there is exactly one eligible root. Windows visible when
 the root was subscribed are excluded. Helper processes require a live, creation-time
 validated parent chain in the same installation directory; names alone never match.
-Automatically followed normal windows are sent as `DIALOG`, with the subscribed owner
-and relative offsets, so the Mac creates a focusable native window rather than a menu
-panel. Real transient menus remain `POPUP`. Disabling tracking, ambiguous roots, and
+Automatically followed independent windows remain `NORMAL`; capture-group membership
+must not make them owned panels. A nonzero association ID on a NORMAL window is not
+presentation ownership. Owned/tool windows are `DIALOG` focusable panels; known
+menus/tooltips and no-activate windows remain `POPUP`. `WS_EX_APPWINDOW` keeps an
+ordinary owned window independent unless its owner is disabled (modal). Disabling tracking, ambiguous roots, and
 unrelated applications never opt into this new association path.
 
 `Hello.capabilities` and `HelloAck.capabilities` bit 8 advertise `ALPHA_PNG`. Only a
@@ -207,3 +209,24 @@ a zero-copy alpha pipeline or a guaranteed high-FPS result.
 透明度通过能力位 8 协商，以媒体标志 `0x08` 将颜色码流与灰度 PNG 遮罩封装在同一帧，
 丢帧不会使遮罩错配；不带标志的帧清除旧遮罩。保留黑色内容和半透明边缘，不使用黑色抠图。
 透明窗口当前增加 GPU 回读和 Mac CPU 合成成本；普通不透明主窗口维持原路径。
+
+### Local viewer lifecycle / 本地查看窗口生命周期
+
+WindowInfo fields 20 `is_disabled` and 21 `is_modal` default to false for old peers.
+The host obtains enabled state from Windows and rechecks it before input/window
+actions, permitting key/button releases. A locally hidden modal still blocks its
+Windows owner. It never implies a host CloseWindow or an UnsubscribeWindow.
+
+Mac close hides the selected viewer and the transitive DIALOG/POPUP ownership subtree.
+NORMAL windows are independent even within one capture group. Hidden ancestors also
+suppress subsequently discovered owned windows. Updates and late video do not reopen
+hidden viewers. Restoring a child first restores its ownership ancestors; manager
+and menu actions restore visibility and request fresh keyframes. Actual host removal
+cleans the local subtree, while loss of a capture root promotes a surviving independent
+member. Explicit unsubscribe still ends the capture group. Disconnect clears local
+visibility preferences; hidden streams are still decoded in this implementation.
+
+Mac 关闭只隐藏本地窗口及所属子树，独立成员保留。迟到视频和目录更新不会重新弹出；
+隐藏拥有者的新浮窗也保持隐藏。恢复子窗会先恢复拥有者。关闭本地模态对话框不解除
+Windows 的父窗口阻断；输入和主机尺寸操作由服务端复查，按键／鼠标释放仍允许。
+标题栏最小化、最大化保持本地操作，开启同步缩放后也只有手动拖动边框才请求主机尺寸。

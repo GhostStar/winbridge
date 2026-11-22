@@ -114,6 +114,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         filePullController?.show()
     }
 
+    @objc private func restoreHiddenViewersAction() { state.restoreHiddenViewers() }
+
     @objc private func detachActiveWindowAction() {
         state.detachActiveWindow()
     }
@@ -370,7 +372,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         transportItem.submenu = transportMenu
         winMenu.addItem(transportItem)
         winMenu.addItem(.separator())
-        winMenu.addItem(withTitle: "脱离当前远端窗口", action: #selector(detachActiveWindowAction), keyEquivalent: "")
+        winMenu.addItem(withTitle: "重新显示本地已关闭窗口", action: #selector(restoreHiddenViewersAction), keyEquivalent: "")
+        winMenu.addItem(withTitle: "结束投射当前窗口", action: #selector(detachActiveWindowAction), keyEquivalent: "")
         winMenu.addItem(.separator())
         winMenu.addItem(withTitle: "重置当前主机 TLS 证书信任", action: #selector(resetTrustAction), keyEquivalent: "")
         winMenu.addItem(withTitle: "断开连接", action: #selector(disconnectAction), keyEquivalent: "")

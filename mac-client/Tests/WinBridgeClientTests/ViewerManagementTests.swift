@@ -1,0 +1,112 @@
+import AppKit
+import Testing
+@testable import WinBridgeCore
+
+@Test func localCloseOwnershipExcludesIndependentApplicationMembers() {
+    let root = WindowInfo(windowId: 1, kind: .normal)
+    let panel = WindowInfo(windowId: 2, ownerWindowId: 1, kind: .dialog)
+    let menu = WindowInfo(windowId: 3, ownerWindowId: 2, kind: .popup)
+    let image = WindowInfo(windowId: 4, ownerWindowId: 1, kind: .normal)
+    let nested = WindowInfo(windowId: 5, ownerWindowId: 4, kind: .dialog)
+    let windows = [nested, menu, image, panel, root]
+    #expect(ViewerVisibility.subtree(1, in: windows) == [1, 2, 3])
+    #expect(ViewerVisibility.subtree(4, in: windows) == [4, 5])
+    #expect(ViewerVisibility.ancestors(3, in: windows) == [1, 2, 3])
+    #expect(ViewerVisibility.ancestors(5, in: windows) == [4, 5])
+    let cycle = [WindowInfo(windowId: 7, ownerWindowId: 8, kind: .dialog),
+                 WindowInfo(windowId: 8, ownerWindowId: 7, kind: .dialog)]
+    #expect(ViewerVisibility.ancestors(7, in: cycle) == [7, 8])
+    #expect(ViewerVisibility.subtree(7, in: cycle) == [7, 8])
+}
+
+@Test func disabledModalMetadataRemainsBackwardCompatible() throws {
+    let state = WindowInfo(windowId: 1, kind: .dialog, isDisabled: true, isModal: true)
+    #expect(try WindowInfo.decode(from: state.encode()) == state)
+    let old = try WindowInfo.decode(from: WindowInfo(windowId: 2).encode())
+    #expect(!old.isDisabled && !old.isModal)
+}
+
+@MainActor @Test func titlebarCloseOnlyHidesLocallyAndReleasesInput() async throws {
+    _ = NSApplication.shared
+    let wc = RemoteWindowController(info: WindowInfo(windowId: 1, kind: .normal,
+        width: 640, height: 480, isResizable: true), owner: nil, syncWindowResize: { true })
+    defer { wc.forceCloseLocally() }
+    var messages: [ControlMessage.Payload] = []
+    wc.onSendControl = { messages.append($0) }
+    wc.onDetachRequested = { _ in wc.hideLocally() }
+    wc.remoteView.emitControl(.mouseEvent(MouseEvent(windowId: 1, kind: .buttonDown,
+        normX: 0.2, normY: 0.3, button: .left)))
+    wc.window?.performClose(nil)
+    #expect(wc.isLocallyHidden)
+    #expect(wc.window?.isVisible == false)
+    #expect(!wc.remoteView.inputEnabled)
+    #expect(messages.contains { if case .mouseEvent(let e) = $0 { return e.kind == .buttonUp }; return false })
+    #expect(!messages.contains { if case .closeWindow = $0 { return true }; return false })
+    #expect(!messages.contains { if case .unsubscribeWindow = $0 { return true }; return false })
+    wc.applyUpdate(WindowUpdated(window: wc.info), owner: nil)
+    wc.present(owner: nil)
+    #expect(wc.window?.isVisible == false) // snapshots cannot resurrect a hidden viewer
+    let render = wc.decoder.onDecodedFrame
+    await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+        wc.decoder.onDecodedFrame = { image, width, height in
+            render?(image, width, height)
+            DispatchQueue.main.async { done.resume() }
+        }
+        let pixels = Data(repeating: 255, count: 16)
+        wc.handleMediaFrame(MediaFrame(header: MediaFrameHeader(windowId: 1, timestampUs: 0,
+            width: 2, height: 2, codec: .rawBgra, flags: [.keyframe], frameSeq: 1, payloadLen: 16), payload: pixels))
+    }
+    #expect(wc.window?.isVisible == false) // actual late decoding must not reopen it
+    wc.restoreLocally(owner: nil)
+    #expect(!wc.isLocallyHidden && wc.remoteView.inputEnabled)
+    #expect(wc.window?.isVisible == true)
+    messages.removeAll()
+    let window = try #require(wc.window)
+    let before = window.frame
+    #expect(!wc.windowShouldZoom(window, toFrame: before.insetBy(dx: -50, dy: -50)))
+    #expect(!messages.contains { if case .resizeWindow = $0 { return true }; return false })
+    #expect(!wc.windowShouldZoom(window, toFrame: before))
+    #expect(window.frame == before)
+    wc.windowWillEnterFullScreen(Notification(name: NSWindow.willEnterFullScreenNotification, object: window))
+    wc.windowWillStartLiveResize(Notification(name: NSWindow.willStartLiveResizeNotification, object: window))
+    wc.windowDidEnterFullScreen(Notification(name: NSWindow.didEnterFullScreenNotification, object: window))
+    wc.windowDidEndLiveResize(Notification(name: NSWindow.didEndLiveResizeNotification, object: window))
+    #expect(!messages.contains { if case .resizeWindow = $0 { return true }; return false })
+}
+
+@MainActor @Test func ownedPanelsStayOutOfWindowMenuAndModalParentCanCloseLocally() throws {
+    _ = NSApplication.shared
+    let root = RemoteWindowController(info: WindowInfo(windowId: 1, kind: .normal,
+        width: 640, height: 480, isDisabled: true), owner: nil, syncWindowResize: { false })
+    let panel = RemoteWindowController(info: WindowInfo(windowId: 2, ownerWindowId: 1,
+        kind: .dialog, width: 320, height: 200, isModal: true), owner: root, syncWindowResize: { false })
+    let image = RemoteWindowController(info: WindowInfo(windowId: 3, ownerWindowId: 1,
+        kind: .normal, width: 320, height: 200), owner: root, syncWindowResize: { false })
+    defer { panel.forceCloseLocally(); image.forceCloseLocally(); root.forceCloseLocally() }
+    root.present(owner: nil)
+    panel.present(owner: root)
+    image.present(owner: root)
+    #expect(panel.window is NSPanel)
+    #expect(panel.window?.parent === root.window)
+    #expect(panel.window?.canBecomeKey == true)
+    #expect(panel.window?.canBecomeMain == false)
+    #expect(panel.window?.isExcludedFromWindowsMenu == true)
+    #expect(panel.window?.styleMask.contains(.miniaturizable) == false)
+    #expect(image.window?.parent == nil)
+    #expect(image.window?.isExcludedFromWindowsMenu == false)
+    let panelWindow = try #require(panel.window)
+    panelWindow.setFrameOrigin(NSPoint(x: panelWindow.frame.minX + 17, y: panelWindow.frame.minY + 11))
+    panel.windowDidMove(Notification(name: NSWindow.didMoveNotification, object: panelWindow))
+    let movedPanelFrame = panelWindow.frame
+    #expect(!root.remoteView.inputEnabled)
+    #expect(root.window?.standardWindowButton(.closeButton)?.isEnabled == true)
+    root.onDetachRequested = { _ in root.hideLocally(); panel.hideLocally() }
+    root.window?.performClose(nil)
+    #expect(root.isLocallyHidden && panel.isLocallyHidden)
+    #expect(image.window?.isVisible == true)
+    root.restoreLocally(owner: nil)
+    panel.restoreLocally(owner: root)
+    #expect(!root.remoteView.inputEnabled) // hiding a modal did not dismiss it on Windows
+    #expect(panel.window?.parent === root.window)
+    #expect(panelWindow.frame == movedPanelFrame)
+}

@@ -19,7 +19,7 @@ become extra projected windows.
   premultiplied edges without double darkening, and clearing a previous mask.
 - Windows 11 ARM Parallels, x64 executable: Rust unit and loopback tests; actual WGC
   of an ownerless, titled layered viewer created after subscribing to a chat fixture;
-  automatic DIALOG presentation, hide/reopen, RAW BGRA and H.264 color with per-frame
+  independent NORMAL presentation, hide/reopen, RAW BGRA and H.264 color with per-frame
   alpha, and an old client without the capability receiving ordinary framing.
 - The VM used **software Media Foundation H.264**. This does not certify hardware
   HEVC/NVENC/QSV/AMF performance. The GPU capture/readback path was exercised.
@@ -50,5 +50,16 @@ check. Without this variable the fixture-dependent Swift case is skipped.
 
 Transparent capture adds staging readback and masked-frame CPU composition. Normal
 opaque roots keep the existing GPU/IOSurface path. This round does not benchmark
-large transparent videos, validate QUIC end-to-end, or change WinBridge's existing
-remote-close / local-detach behavior.
+large transparent videos, validate QUIC end-to-end, or certify every third-party window toolkit.
+
+The subsequent window-management revision follows Kokoda semantics: independent
+viewers, owned focusable panels, local-only titlebar close/zoom, subtree hide/restore,
+late-update suppression, and modal disabled-state checks. Tests cover native panel
+ownership and Window-menu exclusion, pointer release, disabled-parent local close,
+metadata round trips, cyclic ownership bounds, and independent-viewer survival after
+the capture root disappears. Explicit disconnect clears hidden state; hidden frames
+continue decoding.
+
+窗口管理回归使用合成窗口，未对真实 QQ／微信账号做操作。关闭／恢复、窗口菜单排除、
+输入释放、主机模态阻断以及根窗口消失后的独立成员保留分别验证；隐藏流量暂停及重连
+保留偏好暂未实现。

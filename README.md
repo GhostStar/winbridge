@@ -140,7 +140,7 @@ open build/WinBridge.app
 3. **快捷键一览**：
    - `⇧⌘L`：开启 / 关闭智能 3D 游戏鼠标锁定（`Ctrl+Option` 随时紧急释放）
    - `⇧⌘H`：显示 / 隐藏右上角实时性能 HUD（FPS / Mbps / RTT / 分辨率）
-   - `⌘,`：唤出 WinBridge 管理窗口；`Option + 点红叉`（或 2 秒内连点两次）：仅在 Mac 端脱离而不关闭 Windows 软件
+   - `⌘,`：唤出 WinBridge 管理窗口；`点红叉 / ⌘W`：仅关闭本地查看窗口，Windows 软件继续运行；可通过窗口菜单“重新显示本地已关闭窗口”恢复
    - 拖放 Mac 文件到任意远端窗口：自动发送至 Windows `Downloads\WinBridge\`
 
 ---
@@ -176,3 +176,27 @@ open an image. Existing or ambiguously associated windows still require manual s
 See [protocol and performance limits](protocol/SPEC.md#followed-application-windows-and-alpha-fork-extension).
 
 [Test coverage / 测试范围](docs/popup-alpha-validation.md).
+
+### Window management / 窗口管理
+
+This fork follows Kokoda's separation of application membership and window roles.
+Independent viewers remain normal Mac windows. Owned floating/modal windows are
+focusable panels excluded from the Window menu; menus/tooltips stay borderless.
+The red close button and Cmd+W hide the local viewer and its owned subtree, never
+send a remote close. Independent siblings remain visible. Restore from the Window
+menu or the manager's **重新显示** button. **结束投射** ends the subscription;
+the application's own buttons inside the streamed picture still act on Windows.
+
+本分支参考 Kokoda 的窗口角色与本地关闭语义：独立图片窗口单独管理；所属浮窗／模态
+对话框使用可聚焦原生面板，不加入窗口菜单；菜单、提示保留无边框。Mac 红色关闭按钮
+和 ⌘W 只隐藏本地窗口及所属子树，独立窗口继续显示。可从窗口菜单或管理列表恢复；
+“结束投射”才释放订阅。远端画面内应用自己的关闭按钮仍操作 Windows。
+
+Local close/minimize/zoom never change the host window. Hiding a modal viewer does
+not dismiss the Windows dialog or unblock its parent. Hidden viewers currently
+continue receiving/decoding frames, and local hiding resets on disconnect; bandwidth
+pausing and reconnect persistence are not implemented in this fork yet.
+
+本地关闭／最小化／最大化不改变主机窗口。隐藏模态查看窗口不会解除主机父窗口阻断，
+需恢复对话框继续操作。当前隐藏窗口仍接收／解码，断开连接后清除隐藏状态；暂停传输
+及重连保留隐藏状态尚未移植。

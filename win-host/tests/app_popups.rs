@@ -12,11 +12,12 @@ use win_host::proto::{control_message::Payload, *};
 use windows_sys::Win32::{
     Foundation::{HWND, POINT, SIZE},
     Graphics::Gdi::*,
-    UI::WindowsAndMessaging::*,
+    UI::{Input::KeyboardAndMouse::EnableWindow, WindowsAndMessaging::*},
 };
 struct Fixture {
     root: u64,
     viewer: u64,
+    panel: u64,
     thread: Option<thread::JoinHandle<()>>,
 }
 impl Fixture {
@@ -51,11 +52,29 @@ impl Fixture {
                 ptr::null_mut(),
                 ptr::null(),
             );
-            assert!(!root.is_null() && !viewer.is_null());
+            let panel = CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                windows_sys::w!("STATIC"),
+                windows_sys::w!("Synthetic dialog"),
+                WS_POPUP | WS_CAPTION,
+                150,
+                150,
+                200,
+                120,
+                root,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null(),
+            );
+            assert!(!root.is_null() && !viewer.is_null() && !panel.is_null());
             ShowWindow(root, SW_SHOW);
             SetForegroundWindow(root);
-            tx.send((root as usize as u64, viewer as usize as u64))
-                .unwrap();
+            tx.send((
+                root as usize as u64,
+                viewer as usize as u64,
+                panel as usize as u64,
+            ))
+            .unwrap();
             let mut msg = mem::zeroed();
             while GetMessageW(&mut msg, ptr::null_mut(), 0, 0) > 0 {
                 if msg.message == WM_APP {
@@ -66,18 +85,26 @@ impl Fixture {
                     ShowWindow(viewer, SW_HIDE);
                 } else if msg.message == WM_APP + 2 {
                     break;
+                } else if msg.message == WM_APP + 3 {
+                    ShowWindow(root, SW_HIDE);
+                } else if msg.message == WM_APP + 4 {
+                    EnableWindow(root, 0);
+                    ShowWindow(panel, SW_SHOW);
+                    SetForegroundWindow(panel);
                 } else {
                     TranslateMessage(&msg);
                     DispatchMessageW(&msg);
                 }
             }
+            DestroyWindow(panel);
             DestroyWindow(viewer);
             DestroyWindow(root);
         });
-        let (root, viewer) = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (root, viewer, panel) = rx.recv_timeout(Duration::from_secs(5)).unwrap();
         Self {
             root,
             viewer,
+            panel,
             thread: Some(thread),
         }
     }
@@ -217,7 +244,7 @@ fn exercise(codec: &str, wire_codec: i32, with_alpha: bool) {
         fixture.command(0);
         until(
             &mut ctl,
-            |p| matches!(p,Payload::WindowUpdated(u) if u.window.as_ref().is_some_and(|w|w.window_id==fixture.viewer && w.kind==2 && w.owner_window_id==fixture.root)),
+            |p| matches!(p,Payload::WindowUpdated(u) if u.window.as_ref().is_some_and(|w|w.window_id==fixture.viewer && w.kind==1 && w.owner_window_id==fixture.root)),
         );
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
@@ -272,5 +299,97 @@ fn exercise(codec: &str, wire_codec: i32, with_alpha: bool) {
             &mut ctl,
             |p| matches!(p,Payload::WindowClosed(w) if w.window_id==fixture.viewer),
         );
+        // Control and media use separate streams: retire this generation's EOS
+        // before checking that a later reopened viewer remains alive.
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            let ended = frame(&mut video);
+            if ended.id == fixture.viewer && ended.flags & 4 != 0 {
+                break;
+            }
+            assert!(Instant::now() < deadline);
+        }
     }
+    fixture.command(0);
+    until(
+        &mut ctl,
+        |p| matches!(p,Payload::WindowUpdated(u) if u.window.as_ref().is_some_and(|w|w.window_id==fixture.viewer)),
+    );
+    fixture.command(3);
+    until(
+        &mut ctl,
+        |p| matches!(p,Payload::WindowClosed(w) if w.window_id==fixture.root),
+    );
+    send(
+        &mut ctl,
+        Payload::RequestKeyFrame(RequestKeyFrame {
+            window_id: fixture.viewer,
+        }),
+    );
+    // A control barrier ensures the independent member is still subscribed.
+    send(
+        &mut ctl,
+        Payload::ListWindowsReq(ListWindowsRequest {
+            include_icons: false,
+        }),
+    );
+    until(&mut ctl, |p| matches!(p, Payload::ListWindowsRes(_)));
+    // The fixture is static: WGC need not produce more frames until requested.
+    // Request fresh frames after the control barrier instead of expecting motion.
+    for _ in 0..3 {
+        send(
+            &mut ctl,
+            Payload::RequestKeyFrame(RequestKeyFrame {
+                window_id: fixture.viewer,
+            }),
+        );
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            let next = frame(&mut video);
+            if next.id == fixture.viewer {
+                assert_eq!(
+                    next.flags & 4,
+                    0,
+                    "independent viewer ended with capture root"
+                );
+                if !next.bytes.is_empty() {
+                    break;
+                }
+            }
+            assert!(Instant::now() < deadline);
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires an isolated interactive Windows desktop"]
+async fn native_owned_modal_blocks_host_input_but_remains_visible() {
+    let fixture = Fixture::new();
+    fixture.command(4);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let panel = loop {
+        if let Ok(info) = win_host::win32::info(fixture.panel) {
+            if info.is_modal {
+                break info;
+            }
+        }
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(panel.kind, 2);
+    assert_eq!(panel.owner_window_id, fixture.root);
+    assert!(!panel.is_disabled);
+    let root = win_host::win32::info(fixture.root).unwrap();
+    assert!(root.is_disabled);
+    let injector = win_host::input::Injector::new().unwrap();
+    let result = injector
+        .execute(
+            &root,
+            Payload::CloseWindow(CloseWindow {
+                window_id: fixture.root,
+            }),
+        )
+        .await;
+    assert!(result.unwrap_err().to_string().contains("disabled"));
+    assert!(win_host::win32::info(fixture.root).is_ok());
 }

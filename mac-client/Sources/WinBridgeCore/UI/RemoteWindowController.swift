@@ -6,6 +6,11 @@ private final class PopupPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+private final class OwnedPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
+
 enum PerformanceHUDFormatter {
     static func format(
         codecName: String,
@@ -56,7 +61,12 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
     private var lastResizeSentAt: Date?
     private var resizeDebounceTimer: Timer?
     private var layoutSaveTimer: Timer?
-    private var lastCloseAttemptAt: Date?
+    private(set) var isLocallyHidden = false
+    private var localChromeResize = false
+    private var preZoomFrame: NSRect?
+    private weak var presentationOwner: RemoteWindowController?
+    private var localPanelOffset = NSPoint.zero
+    private var panelUsesLocalSize = false
     private var allowImmediateClose = false
     private var lastFrameSize: (UInt16, UInt16)?
 
@@ -96,7 +106,7 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
             window = panel
 
         case .dialog:
-            let win = NSWindow(
+            let win = OwnedPanel(
                 contentRect: contentRect,
                 styleMask: [.titled, .closable, .resizable],
                 backing: .buffered,
@@ -104,6 +114,8 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
             )
             win.title = info.title.isEmpty ? info.processName : info.title
             win.isReleasedWhenClosed = false
+            win.hidesOnDeactivate = true
+            win.collectionBehavior = [.fullScreenAuxiliary]
             window = win
 
         case .normal, .unspecified:
@@ -118,6 +130,8 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
             window = win
         }
 
+        window.isExcludedFromWindowsMenu = info.kind == .dialog || info.kind == .popup
+        remoteView.inputEnabled = !info.isDisabled
         window.contentView = remoteView
         window.acceptsMouseMovedEvents = true
         window.minSize = NSSize(width: 160, height: 100)
@@ -240,7 +254,8 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
 
     func present(owner: RemoteWindowController?) {
         guard let window else { return }
-        if info.kind == .popup {
+        guard !isLocallyHidden else { return }
+        if info.kind == .popup || info.kind == .dialog {
             if let owner, let ownerWindow = owner.window {
                 repositionRelative(to: owner)
                 if window.parent !== ownerWindow {
@@ -248,10 +263,11 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
                 }
             }
             window.orderFront(nil)
-        } else {
-            if info.kind == .dialog, let owner {
-                repositionRelative(to: owner)
+            if info.kind == .dialog {
+                window.makeKeyAndOrderFront(nil)
+                window.makeFirstResponder(remoteView)
             }
+        } else {
             showWindow(nil)
             window.makeKeyAndOrderFront(nil)
             window.makeFirstResponder(remoteView)
@@ -262,6 +278,8 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
         guard let newInfo = update.window else { return }
         let oldInfo = self.info
         self.info = newInfo
+        if newInfo.isDisabled && !oldInfo.isDisabled { remoteView.releaseAllHeldKeys() }
+        remoteView.inputEnabled = !isLocallyHidden && !newInfo.isDisabled
 
         guard let window else { return }
         if newInfo.kind != .popup {
@@ -272,14 +290,17 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
             }
         }
 
-        if newInfo.kind == .popup {
+        if isLocallyHidden { return }
+        if newInfo.kind == .popup || newInfo.kind == .dialog {
             if let owner, let ownerWindow = owner.window {
-                repositionRelative(to: owner)
+                if newInfo.kind == .popup || newInfo.offsetX != oldInfo.offsetX || newInfo.offsetY != oldInfo.offsetY {
+                    repositionRelative(to: owner)
+                }
                 if window.parent !== ownerWindow {
                     ownerWindow.addChildWindow(window, ordered: .above)
                 }
             }
-            return
+            if newInfo.kind == .popup { return }
         }
 
         let dimsChanged = newInfo.width != oldInfo.width || newInfo.height != oldInfo.height || newInfo.dpi != oldInfo.dpi
@@ -331,8 +352,8 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
         isApplyingRemoteGeometry = false
     }
 
-    func repositionRelative(to owner: RemoteWindowController) {
-        guard let window else { return }
+    private func relativeFrame(to owner: RemoteWindowController) -> NSRect {
+        guard let window else { return .zero }
         let ownerVideoScreen = owner.videoRectInScreen
         let scaleX = ownerVideoScreen.width / CGFloat(max(owner.info.width, 1))
         let scaleY = ownerVideoScreen.height / CGFloat(max(owner.info.height, 1))
@@ -345,8 +366,22 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
         let topY = ownerVideoScreen.maxY - CGFloat(info.offsetY) * scaleY
         let contentOriginY = topY - contentH
         let contentScreenRect = NSRect(x: round(leftX), y: round(contentOriginY), width: contentW, height: contentH)
-        let frameRect = window.frameRect(forContentRect: contentScreenRect)
+        var frameRect = window.frameRect(forContentRect: contentScreenRect)
+        if info.kind == .dialog && panelUsesLocalSize {
+            frameRect.origin.y += frameRect.height - window.frame.height
+            frameRect.size = window.frame.size
+        }
+        return frameRect
+    }
 
+    func repositionRelative(to owner: RemoteWindowController) {
+        guard let window else { return }
+        presentationOwner = owner
+        var frameRect = relativeFrame(to: owner)
+        if info.kind == .dialog {
+            frameRect.origin.x += localPanelOffset.x
+            frameRect.origin.y += localPanelOffset.y
+        }
         isApplyingRemoteGeometry = true
         window.setFrame(frameRect, display: true)
         isApplyingRemoteGeometry = false
@@ -511,6 +546,29 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
         }
     }
 
+    func hideLocally() {
+        guard !isLocallyHidden else { return }
+        resizeDebounceTimer?.invalidate()
+        resizeDebounceTimer = nil
+        isLiveResizing = false
+        unlockPointerIfNeeded()
+        remoteView.releaseAllHeldKeys()
+        isLocallyHidden = true
+        remoteView.inputEnabled = false
+        window?.isExcludedFromWindowsMenu = true
+        if let window, let parent = window.parent { parent.removeChildWindow(window) }
+        window?.orderOut(nil)
+    }
+
+    func restoreLocally(owner: RemoteWindowController?) {
+        isLocallyHidden = false
+        remoteView.inputEnabled = !info.isDisabled
+        window?.isExcludedFromWindowsMenu = info.kind == .dialog || info.kind == .popup
+        if window?.isMiniaturized == true { window?.deminiaturize(nil) }
+        present(owner: owner)
+        onSendControl?(.requestKeyFrame(RequestKeyFrame(windowId: windowId)))
+    }
+
     func forceCloseLocally() {
         resizeDebounceTimer?.invalidate()
         resizeDebounceTimer = nil
@@ -531,7 +589,7 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
     // MARK: - NSWindowDelegate
 
     func windowDidBecomeKey(_ notification: Notification) {
-        guard info.kind != .popup else { return }
+        guard info.kind != .popup, !info.isDisabled, !isLocallyHidden else { return }
         window?.makeFirstResponder(remoteView)
         onSendControl?(.focusWindow(FocusWindow(windowId: windowId, focused: true)))
     }
@@ -549,33 +607,44 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func windowWillStartLiveResize(_ notification: Notification) {
-        isLiveResizing = true
+        // AppKit also sends resize callbacks for native chrome animations.
+        // Only a held-pointer border gesture can resize the host.
+        isLiveResizing = !localChromeResize && NSEvent.pressedMouseButtons & 1 != 0
     }
 
     func windowDidResize(_ notification: Notification) {
         guard !isApplyingRemoteGeometry, info.kind != .popup else { return }
         onOwnerMovedOrResized?(windowId)
         scheduleLayoutSave()
-        if !isDesktop && syncWindowResize() {
+        if isLiveResizing && !localChromeResize && !isDesktop && syncWindowResize() {
             scheduleDebouncedResize()
         }
     }
 
     func windowDidMove(_ notification: Notification) {
         guard !isApplyingRemoteGeometry, info.kind != .popup else { return }
+        rememberPanelOffset()
         onOwnerMovedOrResized?(windowId)
         scheduleLayoutSave()
     }
 
     func windowDidEndLiveResize(_ notification: Notification) {
+        let wasLiveResizing = isLiveResizing
         isLiveResizing = false
+        if wasLiveResizing && info.kind == .dialog { panelUsesLocalSize = true; rememberPanelOffset() }
         guard !isApplyingRemoteGeometry, info.kind != .popup else { return }
         resizeDebounceTimer?.invalidate()
         resizeDebounceTimer = nil
         scheduleLayoutSave()
-        if !isDesktop && syncWindowResize() {
+        if wasLiveResizing && !localChromeResize && !isDesktop && syncWindowResize() {
             sendCurrentSizeToHost()
         }
+    }
+
+    private func rememberPanelOffset() {
+        guard info.kind == .dialog, let owner = presentationOwner, let window else { return }
+        let expected = relativeFrame(to: owner)
+        localPanelOffset = NSPoint(x: window.frame.minX - expected.minX, y: window.frame.minY - expected.minY)
     }
 
     func windowDidDeminiaturize(_ notification: Notification) {
@@ -587,25 +656,26 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
         if allowImmediateClose {
             return true
         }
-        // Full desktop view always detaches cleanly without closing anything on Windows.
-        if isDesktop {
-            onDetachRequested?(windowId)
-            return false
-        }
-        // Option+Click red button detaches without closing the Windows app.
-        if NSEvent.modifierFlags.contains(.option) {
-            onDetachRequested?(windowId)
-            return false
-        }
-        // Second click within 2 seconds forces local detach (escape hatch if Windows app hangs or shows hidden prompt).
-        if let last = lastCloseAttemptAt, Date().timeIntervalSince(last) < 2.0 {
-            onDetachRequested?(windowId)
-            return false
-        }
-        lastCloseAttemptAt = Date()
-        onSendControl?(.closeWindow(CloseWindow(windowId: windowId)))
+        onDetachRequested?(windowId)
         return false
     }
+
+    // Native title-bar actions affect only the local viewer, even in sync mode.
+    func windowShouldZoom(_ sender: NSWindow, toFrame newFrame: NSRect) -> Bool {
+        resizeDebounceTimer?.invalidate()
+        resizeDebounceTimer = nil
+        isApplyingRemoteGeometry = true
+        let target = preZoomFrame ?? newFrame
+        preZoomFrame = preZoomFrame == nil ? sender.frame : nil
+        sender.setFrame(target, display: true)
+        isApplyingRemoteGeometry = false
+        return false
+    }
+
+    func windowWillEnterFullScreen(_ notification: Notification) { localChromeResize = true }
+    func windowDidEnterFullScreen(_ notification: Notification) { localChromeResize = false }
+    func windowWillExitFullScreen(_ notification: Notification) { localChromeResize = true }
+    func windowDidExitFullScreen(_ notification: Notification) { localChromeResize = false }
 
     private func scheduleDebouncedResize() {
         resizeDebounceTimer?.invalidate()
@@ -617,6 +687,7 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
     }
 
     private func sendCurrentSizeToHost() {
+        guard !isLocallyHidden, !info.isDisabled, !localChromeResize else { return }
         guard let window else { return }
         let contentSize = window.contentLayoutRect.size
         let scale = Self.dpiScale(for: info)

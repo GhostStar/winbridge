@@ -55,9 +55,6 @@ impl Session {
             let id = info.window_id;
             if let Some(s) = self.windows.get(&id) {
                 if s.root != id {
-                    if s.info.kind == 2 && info.kind == 1 {
-                        info.kind = 2;
-                    }
                     if let Some(owner) = by_id.get(&s.info.owner_window_id) {
                         relative(&mut info, owner);
                     }
@@ -77,11 +74,6 @@ impl Session {
             if let Some(s) = self.windows.get(&owner) {
                 let root = s.root;
                 let options = s.options;
-                if info.kind == 1 {
-                    // A newly followed image/app window needs a titled, focusable Mac
-                    // window, rather than the nonactivating menu panel.
-                    info.kind = 2;
-                }
                 relative(&mut info, by_id.get(&owner).copied().unwrap_or(&s.info));
                 self.start(info, root, options)?;
             }

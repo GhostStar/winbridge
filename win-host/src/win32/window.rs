@@ -19,6 +19,7 @@ use windows_sys::Win32::{
     },
     UI::{
         HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI},
+        Input::KeyboardAndMouse::IsWindowEnabled,
         WindowsAndMessaging::*,
     },
 };
@@ -228,16 +229,12 @@ pub fn info(id: u64) -> Result<WindowInfo> {
             rects(owner).ok().map(|(_, r)| r)
         };
         let title = title(hwnd);
-        let has_caption = style & WS_CAPTION == WS_CAPTION;
-        let kind = if name == "#32770" || (!owner.is_null() && has_caption) {
+        let is_modal = !owner.is_null() && IsWindowEnabled(owner) == 0;
+        let native_kind = presentation_kind(&name, !owner.is_null(), style, ex);
+        let kind = if is_modal && native_kind != 3 {
             2
-        } else if matches!(name.as_str(), "#32768" | "ComboLBox" | "tooltips_class32")
-            || ex & WS_EX_TOOLWINDOW != 0
-            || (style & WS_POPUP != 0 && (!owner.is_null() || (title.is_empty() && !has_caption)))
-        {
-            3
         } else {
-            1
+            native_kind
         };
         Ok(WindowInfo {
             window_id: id,
@@ -257,6 +254,8 @@ pub fn info(id: u64) -> Result<WindowInfo> {
             is_maximized: IsZoomed(hwnd) != 0,
             is_resizable: style & WS_THICKFRAME != 0,
             has_alpha: ex & WS_EX_LAYERED != 0,
+            is_disabled: IsWindowEnabled(hwnd) == 0,
+            is_modal,
             ..Default::default()
         })
     }
@@ -361,4 +360,35 @@ pub fn restore_if_minimized(id: u64) -> bool {
         }
     }
     false
+}
+
+// Application grouping does not change native presentation: ownerless viewers
+// remain independent, owned/tool windows are panels, menus stay borderless.
+fn presentation_kind(class: &str, owned: bool, _style: u32, ex: u32) -> i32 {
+    if matches!(class, "#32768" | "ComboLBox" | "tooltips_class32") || ex & WS_EX_NOACTIVATE != 0 {
+        3
+    } else if ex & WS_EX_APPWINDOW != 0 {
+        1
+    } else if owned || ex & WS_EX_TOOLWINDOW != 0 || class == "#32770" {
+        2
+    } else {
+        1
+    }
+}
+
+#[cfg(test)]
+mod presentation_tests {
+    use super::*;
+    #[test]
+    fn separate_application_membership_from_window_role() {
+        assert_eq!(
+            presentation_kind("Viewer", false, WS_POPUP, WS_EX_LAYERED),
+            1
+        );
+        assert_eq!(presentation_kind("Card", true, WS_POPUP, WS_EX_LAYERED), 2);
+        assert_eq!(presentation_kind("Tool", false, 0, WS_EX_TOOLWINDOW), 2);
+        assert_eq!(presentation_kind("Viewer", true, 0, WS_EX_APPWINDOW), 1);
+        assert_eq!(presentation_kind("#32768", true, 0, WS_EX_APPWINDOW), 3);
+        assert_eq!(presentation_kind("Tip", true, 0, WS_EX_NOACTIVATE), 3);
+    }
 }

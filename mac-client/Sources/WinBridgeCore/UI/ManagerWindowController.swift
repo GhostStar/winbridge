@@ -842,7 +842,9 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         let row = sender.tag
         guard row >= 0 && row < state.availableWindows.count else { return }
         let win = state.availableWindows[row]
-        if state.subscribedRootIds.contains(win.windowId) {
+        if state.isViewerHidden(win.windowId) {
+            state.focusOrSubscribe(win)
+        } else if state.subscribedRootIds.contains(win.windowId) {
             state.unsubscribeWindow(win.windowId)
         } else {
             state.subscribeWindow(win)
@@ -975,7 +977,7 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
             return cell
 
         case "action":
-            let btn = NSButton(title: isOpen ? "脱离" : "投射", target: self, action: #selector(rowActionClicked(_:)))
+            let btn = NSButton(title: state.isViewerHidden(info.windowId) ? "重新显示" : (isOpen ? "结束投射" : "投射"), target: self, action: #selector(rowActionClicked(_:)))
             btn.bezelStyle = .rounded
             btn.controlSize = .small
             btn.tag = row

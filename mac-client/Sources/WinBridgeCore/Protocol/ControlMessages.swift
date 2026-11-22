@@ -303,6 +303,8 @@ struct WindowInfo: Equatable, Sendable {
     var hasAlpha: Bool = false
     var zOrder: UInt32 = 0
     var iconPng: Data = Data()
+    var isDisabled: Bool = false
+    var isModal: Bool = false
 
     func encode() -> Data {
         var w = ProtoWriter()
@@ -325,6 +327,8 @@ struct WindowInfo: Equatable, Sendable {
         w.writeBool(field: 17, hasAlpha)
         w.writeUInt32(field: 18, zOrder)
         w.writeBytes(field: 19, iconPng)
+        w.writeBool(field: 20, isDisabled)
+        w.writeBool(field: 21, isModal)
         return w.data
     }
 
@@ -353,6 +357,8 @@ struct WindowInfo: Equatable, Sendable {
             case 17: m.hasAlpha = try r.readBool()
             case 18: m.zOrder = try r.readUInt32()
             case 19: m.iconPng = try r.readBytes()
+            case 20: m.isDisabled = try r.readBool()
+            case 21: m.isModal = try r.readBool()
             default: try r.skip(wireType: wire)
             }
         }
