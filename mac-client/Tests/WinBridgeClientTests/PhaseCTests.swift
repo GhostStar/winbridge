@@ -44,5 +44,49 @@ struct PhaseCTests {
         // Explicit .quic mode never silently falls back
         #expect(!WinBridgeConnection.shouldFallbackToTCP(transport: .quic, error: ConnectionError.connectTimeout))
         #expect(!WinBridgeConnection.shouldFallbackToTCP(transport: .tcp, error: ConnectionError.connectTimeout))
+
+        // User-cancelled / already-disconnected attempts must NEVER fall back to TCP or failover host
+        #expect(!WinBridgeConnection.shouldFallbackToTCP(
+            transport: .auto,
+            error: ConnectionError.connectionClosed,
+            isCancelled: true
+        ))
+        #expect(!WinBridgeConnection.shouldFailoverToFallbackHost(
+            primaryHost: "192.168.1.1",
+            fallbackHost: "100.64.0.2",
+            error: ConnectionError.connectionClosed,
+            isCancelled: true
+        ))
+    }
+
+    @Test("Disconnected WinBridgeConnection aborts connect() immediately without zombie fallback")
+    func disconnectedConnectionAbortsConnectImmediately() async {
+        let conn = WinBridgeConnection()
+        conn.disconnect(error: nil)
+        #expect(conn.cancelledOrDisconnected)
+
+        let config = ConnectionConfig(
+            host: "192.168.1.126",
+            fallbackHost: "100.64.0.2",
+            port: 9876,
+            authToken: "tok",
+            useTls: true,
+            transport: .auto,
+            clientName: "TestMac",
+            displayScale: 2.0,
+            supportedCodecs: [.hevcAnnexB]
+        )
+        do {
+            _ = try await conn.connect(config: config)
+            Issue.record("Expected already-disconnected connection to abort connect()")
+        } catch let err as ConnectionError {
+            if case .connectionClosed = err {
+                // Expected
+            } else {
+                Issue.record("Unexpected ConnectionError: \(err)")
+            }
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
     }
 }

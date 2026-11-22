@@ -336,12 +336,24 @@ final class WinBridgeConnection: @unchecked Sendable {
     private(set) var defaultFps: UInt32 = 60
     private(set) var activeTransport: ActiveTransport = .tcp
 
+    var cancelledOrDisconnected: Bool {
+        seqLock.lock()
+        defer { seqLock.unlock() }
+        return isDisconnected
+    }
+
+    private func ensureNotDisconnected() throws {
+        if cancelledOrDisconnected || Task.isCancelled {
+            throw ConnectionError.connectionClosed
+        }
+    }
+
     func currentMicros() -> UInt64 {
         (DispatchTime.now().uptimeNanoseconds &- startTime) / 1_000
     }
 
-    static func shouldFallbackToTCP(transport: TransportPreference, error: Error) -> Bool {
-        guard transport == .auto else { return false }
+    static func shouldFallbackToTCP(transport: TransportPreference, error: Error, isCancelled: Bool = false) -> Bool {
+        guard !isCancelled, transport == .auto else { return false }
         if let ce = error as? ConnectionError {
             switch ce {
             case .handshakeRejected, .certificateMismatch, .localNetworkProhibited, .invalidEndpoint:
@@ -356,8 +368,10 @@ final class WinBridgeConnection: @unchecked Sendable {
     static func shouldFailoverToFallbackHost(
         primaryHost: String,
         fallbackHost: String,
-        error: Error
+        error: Error,
+        isCancelled: Bool = false
     ) -> Bool {
+        guard !isCancelled else { return false }
         let fb = fallbackHost.trimmingCharacters(in: .whitespacesAndNewlines)
         let primary = primaryHost.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !fb.isEmpty, fb.caseInsensitiveCompare(primary) != .orderedSame else {
@@ -375,6 +389,7 @@ final class WinBridgeConnection: @unchecked Sendable {
     }
 
     func connect(config: ConnectionConfig) async throws -> ConnectOutcome {
+        try ensureNotDisconnected()
         let primary = config.host.trimmingCharacters(in: .whitespacesAndNewlines)
         let fallback = config.fallbackHost.trimmingCharacters(in: .whitespacesAndNewlines)
         let hasFallback = !fallback.isEmpty && fallback.caseInsensitiveCompare(primary) != .orderedSame
@@ -389,7 +404,13 @@ final class WinBridgeConnection: @unchecked Sendable {
             )
         } catch {
             cleanupResourcesWithoutNotifying()
-            if Self.shouldFailoverToFallbackHost(primaryHost: primary, fallbackHost: fallback, error: error) {
+            let cancelled = cancelledOrDisconnected || Task.isCancelled
+            if Self.shouldFailoverToFallbackHost(
+                primaryHost: primary,
+                fallbackHost: fallback,
+                error: error,
+                isCancelled: cancelled
+            ) {
                 ClientLogger.shared.info(
                     "Primary host \(primary) unreachable (\(error.localizedDescription)); failing over to fallback host \(fallback)"
                 )
@@ -412,6 +433,7 @@ final class WinBridgeConnection: @unchecked Sendable {
         usedFallbackHost: Bool,
         fastTimeout: Bool
     ) async throws -> ConnectOutcome {
+        try ensureNotDisconnected()
         var hostConfig = config
         hostConfig.host = host
         hostConfig.expectedFingerprint = expectedFingerprint
@@ -432,7 +454,12 @@ final class WinBridgeConnection: @unchecked Sendable {
                 )
             } catch {
                 cleanupResourcesWithoutNotifying()
-                if Self.shouldFallbackToTCP(transport: hostConfig.transport, error: error) {
+                let cancelled = cancelledOrDisconnected || Task.isCancelled
+                if Self.shouldFallbackToTCP(
+                    transport: hostConfig.transport,
+                    error: error,
+                    isCancelled: cancelled
+                ) {
                     ClientLogger.shared.info(
                         "QUIC unavailable on \(host) (\(error.localizedDescription)); falling back to TCP+TLS"
                     )
@@ -539,6 +566,10 @@ final class WinBridgeConnection: @unchecked Sendable {
         self.bulkStream = bulk
 
         // Monitor QUIC tunnel failure after connect
+        if cancelledOrDisconnected || Task.isCancelled {
+            cleanupResourcesWithoutNotifying()
+            throw ConnectionError.connectionClosed
+        }
         group.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
             switch state {
@@ -746,6 +777,10 @@ final class WinBridgeConnection: @unchecked Sendable {
             throw error
         }
 
+        if cancelledOrDisconnected || Task.isCancelled {
+            cleanupResourcesWithoutNotifying()
+            throw ConnectionError.connectionClosed
+        }
         self.mediaStream = media
         self.hostName = ack.hostName
         self.selectedCodec = ack.selectedCodec
@@ -847,6 +882,9 @@ final class WinBridgeConnection: @unchecked Sendable {
         cleanupResourcesWithoutNotifying()
 
         let callback = onDisconnected
+        onControlMessage = nil
+        onMediaFrame = nil
+        onRttUpdated = nil
         onDisconnected = nil
         callback?(error)
     }

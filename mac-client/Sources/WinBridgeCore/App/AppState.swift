@@ -119,6 +119,7 @@ final class AppState {
     private let notificationForwarder = NotificationForwarder()
 
     private var manualDisconnectRequested = false
+    private var connectTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
     private var reconnectAttempt = 0
     private var pendingRestoreTargets: [RestoreWindowTarget] = []
@@ -764,32 +765,37 @@ final class AppState {
         let conn = WinBridgeConnection()
         self.connection = conn
 
-        conn.onControlMessage = { [weak self] msg in
+        conn.onControlMessage = { [weak self, weak conn] msg in
             Task { @MainActor in
-                self?.handleControlMessage(msg)
+                guard let self, let conn, self.connection === conn else { return }
+                self.handleControlMessage(msg)
             }
         }
         let player = self.audioPlayer
-        conn.onMediaFrame = { [weak self] frame in
+        conn.onMediaFrame = { [weak self, weak conn] frame in
+            guard let conn, !conn.cancelledOrDisconnected else { return }
             if frame.header.codec == .audioPcmS16Le || frame.header.codec == .audioOpus {
                 player.enqueue(frame: frame)
                 return
             }
             Task { @MainActor in
-                self?.controllers[frame.header.windowId]?.handleMediaFrame(frame)
+                guard let self, self.connection === conn else { return }
+                self.controllers[frame.header.windowId]?.handleMediaFrame(frame)
             }
         }
-        conn.onRttUpdated = { [weak self] rtt in
+        conn.onRttUpdated = { [weak self, weak conn] rtt in
             Task { @MainActor in
-                self?.rttMs = rtt
-                self?.evaluateWanOptimization(rttMs: rtt)
-                self?.onStateChanged?()
-                self?.pushAdaptiveRttIfNeeded()
+                guard let self, let conn, self.connection === conn else { return }
+                self.rttMs = rtt
+                self.evaluateWanOptimization(rttMs: rtt)
+                self.onStateChanged?()
+                self.pushAdaptiveRttIfNeeded()
             }
         }
-        conn.onDisconnected = { [weak self] error in
+        conn.onDisconnected = { [weak self, weak conn] error in
             Task { @MainActor in
-                self?.handleDisconnected(error: error)
+                guard let self, let conn, self.connection === conn else { return }
+                self.handleDisconnected(error: error)
             }
         }
 
@@ -812,9 +818,17 @@ final class AppState {
             supportedCodecs: settings.codecPreference.offeredCodecs
         )
 
-        Task {
+        connectTask?.cancel()
+        connectTask = Task { [weak self] in
+            guard let self else { return }
             do {
                 let outcome = try await conn.connect(config: config)
+                guard self.connection === conn, !self.manualDisconnectRequested, !Task.isCancelled else {
+                    conn.onDisconnected = nil
+                    conn.disconnect(error: nil)
+                    return
+                }
+                self.connectTask = nil
                 let ack = outcome.ack
                 var updatedSettings = self.settings
                 var settingsModified = false
@@ -893,10 +907,11 @@ final class AppState {
                 self.refreshAppList()
                 self.onStateChanged?()
             } catch {
-                conn.disconnect()
-                if self.connection === conn {
-                    self.connection = nil
-                }
+                conn.onDisconnected = nil
+                conn.disconnect(error: nil)
+                guard self.connection === conn else { return }
+                self.connection = nil
+                self.connectTask = nil
                 self.connectionState = .disconnected
                 ClientLogger.shared.error("Connect failed: \(error.localizedDescription)")
                 self.setBanner("连接失败：\(error.localizedDescription)", isError: true)
@@ -914,9 +929,13 @@ final class AppState {
     func disconnect() {
         manualDisconnectRequested = true
         cancelReconnect()
+        connectTask?.cancel()
+        connectTask = nil
         pendingRestoreTargets.removeAll()
-        if connection != nil {
-            connection?.disconnect(error: nil)
+        if let active = connection {
+            active.disconnect(error: nil)
+        } else if connectionState != .disconnected {
+            handleDisconnected(error: nil)
         } else {
             setBanner("已断开连接", isError: false)
             onStateChanged?()
@@ -1095,6 +1114,8 @@ final class AppState {
         clipboardMonitor.stop()
         gamepadMonitor.stop()
         audioPlayer.stop()
+        connectTask?.cancel()
+        connectTask = nil
         connection = nil
         connectionState = .disconnected
         rttMs = nil
