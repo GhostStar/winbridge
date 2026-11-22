@@ -110,3 +110,32 @@ import Testing
     ring.pushPcmS16Le(burst, channels: 2)
     #expect(ring.bufferedFrames <= 256)
 }
+
+@Test func cursorConfinementSnapsFractionalRectsAndNeverSelfWarpsOnTitleBar() {
+    // Odd aspect ratio (e.g. 1924x1127 game window) producing fractional Retina/letterbox coordinates.
+    let fractionalRect = NSRect(x: 100.3, y: 200.285, width: 962.0, height: 699.43)
+    let bounds = CursorConfinementBounds(videoScreenRect: fractionalRect)!
+
+    // Trigger and warp target rects must be strictly integer-aligned.
+    #expect(bounds.triggerRect.minX == bounds.triggerRect.minX.rounded())
+    #expect(bounds.triggerRect.maxX == bounds.triggerRect.maxX.rounded())
+    #expect(bounds.triggerRect.minY == bounds.triggerRect.minY.rounded())
+    #expect(bounds.triggerRect.maxY == bounds.triggerRect.maxY.rounded())
+    #expect(bounds.warpTargetRect.minY > bounds.triggerRect.minY)
+    #expect(bounds.warpTargetRect.maxY < bounds.triggerRect.maxY)
+
+    // Cursor moving onto the top title bar (above maxY) clamps cleanly below triggerRect.maxY.
+    let onTitleBar = NSPoint(x: 500.4, y: fractionalRect.maxY + 14.0)
+    let warped = bounds.clampedWarpPoint(for: onTitleBar)
+    #expect(warped != nil)
+    #expect(warped!.x == 500.0)
+    #expect(warped!.y == bounds.warpTargetRect.maxY)
+
+    // CRITICAL INVARIANT: the warped destination itself must NEVER trigger another warp
+    // (eliminates the infinite edge-freeze loop).
+    #expect(bounds.clampedWarpPoint(for: warped!) == nil)
+
+    // Points safely inside triggerRect require zero warps.
+    #expect(bounds.clampedWarpPoint(for: NSPoint(x: 500.0, y: bounds.triggerRect.maxY)) == nil)
+    #expect(bounds.clampedWarpPoint(for: NSPoint(x: 500.0, y: 500.0)) == nil)
+}

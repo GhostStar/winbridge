@@ -16,6 +16,50 @@ enum GameLockState: Equatable {
     case relativeLocked
 }
 
+/// Pure integer-snapped confinement math with hysteresis so fractional Retina/aspect-ratio
+/// video rects can NEVER cause a `CGWarpMouseCursorPosition` rounding self-warp freeze loop.
+struct CursorConfinementBounds: Equatable, Sendable {
+    let triggerRect: NSRect
+    let warpTargetRect: NSRect
+
+    init?(videoScreenRect: NSRect) {
+        let trigMinX = ceil(videoScreenRect.minX) + 1
+        let trigMaxX = floor(videoScreenRect.maxX) - 1
+        let trigMinY = ceil(videoScreenRect.minY) + 1
+        let trigMaxY = floor(videoScreenRect.maxY) - 1
+        guard trigMaxX - trigMinX >= 4, trigMaxY - trigMinY >= 4 else { return nil }
+        self.triggerRect = NSRect(
+            x: trigMinX,
+            y: trigMinY,
+            width: trigMaxX - trigMinX,
+            height: trigMaxY - trigMinY
+        )
+        let padX = min(3.0, floor((trigMaxX - trigMinX) * 0.25))
+        let padY = min(3.0, floor((trigMaxY - trigMinY) * 0.25))
+        let dstMinX = trigMinX + padX
+        let dstMaxX = trigMaxX - padX
+        let dstMinY = trigMinY + padY
+        let dstMaxY = trigMaxY - padY
+        self.warpTargetRect = NSRect(
+            x: dstMinX,
+            y: dstMinY,
+            width: max(0, dstMaxX - dstMinX),
+            height: max(0, dstMaxY - dstMinY)
+        )
+    }
+
+    /// Returns a clamped integer Cocoa point strictly inside `warpTargetRect` if `point` escaped
+    /// `triggerRect`, or `nil` if `point` is already safely inside (needing zero warps).
+    func clampedWarpPoint(for point: NSPoint) -> NSPoint? {
+        let escapedX = point.x < triggerRect.minX || point.x > triggerRect.maxX
+        let escapedY = point.y < triggerRect.minY || point.y > triggerRect.maxY
+        guard escapedX || escapedY else { return nil }
+        let x = min(max(point.x.rounded(), warpTargetRect.minX), warpTargetRect.maxX)
+        let y = min(max(point.y.rounded(), warpTargetRect.minY), warpTargetRect.maxY)
+        return NSPoint(x: x, y: y)
+    }
+}
+
 enum TransferToastStyle: Equatable {
     case progress
     case success
@@ -46,6 +90,7 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
     private var remoteCursorHidden = false
     private var isCursorHidden = false
     private var pointerLockedAt: Date?
+    private var gameLockEventMonitor: Any?
 
     private let videoLayer = CALayer()
     private let hudContainer = NSView()
@@ -271,6 +316,14 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil {
+            setGameLockEnabled(false)
+            removeGameLockEventMonitor()
+        }
+        super.viewWillMove(toWindow: newWindow)
+    }
+
     override func layout() {
         super.layout()
         layoutVideoLayer()
@@ -342,9 +395,19 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
     }
 
     private func cocoaToCGPoint(_ cocoaScreenPoint: NSPoint) -> CGPoint {
-        let primaryHeight = NSScreen.screens.first?.frame.height
-            ?? CGDisplayBounds(CGMainDisplayID()).height
+        let primaryHeight = CGDisplayBounds(CGMainDisplayID()).height
         return CGPoint(x: cocoaScreenPoint.x, y: primaryHeight - cocoaScreenPoint.y)
+    }
+
+    /// Warps the macOS cursor without triggering macOS's default 250ms local hardware input
+    /// suppression interval (`CGEventSource.localEventsSuppressionInterval`).
+    private func warpCursorWithoutSuppression(toCocoaPoint point: NSPoint, keepAssociated: Bool) {
+        if let src = CGEventSource(stateID: .combinedSessionState) {
+            src.localEventsSuppressionInterval = 0.0
+        }
+        let cgPt = cocoaToCGPoint(NSPoint(x: point.x.rounded(), y: point.y.rounded()))
+        CGWarpMouseCursorPosition(cgPt)
+        CGAssociateMouseAndMouseCursorPosition(keepAssociated ? 1 : 0)
     }
 
     private func videoRectInCocoaScreen() -> NSRect? {
@@ -353,22 +416,189 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
         return window.convertToScreen(rectInWin)
     }
 
-    private func warpCursorToVideoCenter() {
+    private func warpCursorToVideoCenter(keepAssociated: Bool) {
         guard let screenRect = videoRectInCocoaScreen() else { return }
-        let center = NSPoint(x: screenRect.midX, y: screenRect.midY)
-        CGWarpMouseCursorPosition(cocoaToCGPoint(center))
+        let center = NSPoint(x: screenRect.midX.rounded(), y: screenRect.midY.rounded())
+        warpCursorWithoutSuppression(toCocoaPoint: center, keepAssociated: keepAssociated)
     }
 
-    private func confineCursorIfNeeded() {
+    @discardableResult
+    private func confineCursorIfNeeded() -> NSPoint? {
         guard gameLockState == .confinedVisible,
-              let screenRect = videoRectInCocoaScreen() else { return }
-        let inset = screenRect.insetBy(dx: min(4, screenRect.width * 0.1), dy: min(4, screenRect.height * 0.1))
-        guard inset.width > 0, inset.height > 0 else { return }
+              let screenRect = videoRectInCocoaScreen(),
+              let confinement = CursorConfinementBounds(videoScreenRect: screenRect) else { return nil }
         let pos = NSEvent.mouseLocation
-        let clampedX = min(max(pos.x, inset.minX), inset.maxX)
-        let clampedY = min(max(pos.y, inset.minY), inset.maxY)
-        if clampedX != pos.x || clampedY != pos.y {
-            CGWarpMouseCursorPosition(cocoaToCGPoint(NSPoint(x: clampedX, y: clampedY)))
+        guard let warped = confinement.clampedWarpPoint(for: pos) else { return nil }
+        warpCursorWithoutSuppression(toCocoaPoint: warped, keepAssociated: true)
+        return warped
+    }
+
+    private func normalizedPoint(fromCocoaScreenPoint screenPoint: NSPoint) -> (Float, Float) {
+        guard let window else { return (0.5, 0.5) }
+        let winPt = window.convertPoint(fromScreen: screenPoint)
+        let local = convert(winPt, from: nil)
+        lastMouseViewPoint = local
+        let rect = currentVideoRect
+        let w = max(rect.width, 1.0)
+        let h = max(rect.height, 1.0)
+        let nx = min(max(Float((local.x - rect.minX) / w), 0.0), 1.0)
+        let ny = min(max(Float((local.y - rect.minY) / h), 0.0), 1.0)
+        return (nx, ny)
+    }
+
+    private func installGameLockEventMonitorIfNeeded() {
+        guard gameLockEventMonitor == nil else { return }
+        let mask: NSEvent.EventTypeMask = [
+            .flagsChanged,
+            .mouseMoved,
+            .leftMouseDragged,
+            .rightMouseDragged,
+            .otherMouseDragged,
+            .leftMouseDown,
+            .leftMouseUp,
+            .rightMouseDown,
+            .rightMouseUp,
+            .otherMouseDown,
+            .otherMouseUp,
+            .scrollWheel,
+        ]
+        gameLockEventMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
+            guard let self else { return event }
+            return self.handleGameLockLocalEvent(event)
+        }
+    }
+
+    private func removeGameLockEventMonitor() {
+        if let monitor = gameLockEventMonitor {
+            NSEvent.removeMonitor(monitor)
+            gameLockEventMonitor = nil
+        }
+    }
+
+    /// Window-wide mouse interceptor active only while Game Lock is enabled on the key window.
+    /// Prevents the macOS top title bar (`NSThemeFrame`) from stealing mouse tracking, freezing
+    /// `relativeLocked` deltas, or accidentally starting native window drags during gameplay.
+    private func handleGameLockLocalEvent(_ event: NSEvent) -> NSEvent? {
+        guard gameLockEnabled,
+              let window,
+              window.isKeyWindow,
+              NSApp.isActive else {
+            return event
+        }
+        if event.type == .flagsChanged {
+            if event.modifierFlags.contains([.control, .option]) {
+                setGameLockEnabled(false)
+                releaseAllHeldKeys()
+                return nil
+            }
+            return event
+        }
+
+        switch gameLockState {
+        case .off:
+            return event
+
+        case .relativeLocked:
+            switch event.type {
+            case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
+                sendRelativeMove(event: event)
+                return nil
+            case .leftMouseDown:
+                window.makeFirstResponder(self)
+                sendMouse(event: event, kind: .buttonDown, button: .left)
+                return nil
+            case .leftMouseUp:
+                sendMouse(event: event, kind: .buttonUp, button: .left)
+                return nil
+            case .rightMouseDown:
+                window.makeFirstResponder(self)
+                sendMouse(event: event, kind: .buttonDown, button: .right)
+                return nil
+            case .rightMouseUp:
+                sendMouse(event: event, kind: .buttonUp, button: .right)
+                return nil
+            case .otherMouseDown:
+                window.makeFirstResponder(self)
+                sendMouse(event: event, kind: .buttonDown, button: mapOtherButton(event.buttonNumber))
+                return nil
+            case .otherMouseUp:
+                sendMouse(event: event, kind: .buttonUp, button: mapOtherButton(event.buttonNumber))
+                return nil
+            case .scrollWheel:
+                scrollWheel(with: event)
+                return nil
+            default:
+                return event
+            }
+
+        case .confinedVisible:
+            let warped = confineCursorIfNeeded()
+            let eventInsideView: Bool
+            if event.window === window {
+                eventInsideView = bounds.contains(convert(event.locationInWindow, from: nil))
+            } else {
+                eventInsideView = false
+            }
+
+            guard warped != nil || !eventInsideView else {
+                // Cursor and event are safely inside the video view; let standard NSView handlers run.
+                return event
+            }
+
+            let targetPoint = warped ?? NSEvent.mouseLocation
+            let (nx, ny) = normalizedPoint(fromCocoaScreenPoint: targetPoint)
+            let mods = MacKeyToHID.modifierMask(from: event.modifierFlags, cmdMapsToCtrl: cmdMapsToCtrl())
+            switch event.type {
+            case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
+                let btn: MouseButton
+                switch event.type {
+                case .leftMouseDragged: btn = .left
+                case .rightMouseDragged: btn = .right
+                case .otherMouseDragged: btn = mapOtherButton(event.buttonNumber)
+                default: btn = .unspecified
+                }
+                onSendControl?(.mouseEvent(MouseEvent(
+                    windowId: windowId,
+                    kind: .move,
+                    normX: nx,
+                    normY: ny,
+                    button: btn,
+                    modifiers: mods
+                )))
+                return nil
+            case .leftMouseDown, .rightMouseDown, .otherMouseDown:
+                window.makeFirstResponder(self)
+                let btn: MouseButton = event.type == .leftMouseDown
+                    ? .left
+                    : (event.type == .rightMouseDown ? .right : mapOtherButton(event.buttonNumber))
+                onSendControl?(.mouseEvent(MouseEvent(
+                    windowId: windowId,
+                    kind: .buttonDown,
+                    normX: nx,
+                    normY: ny,
+                    button: btn,
+                    modifiers: mods
+                )))
+                return nil
+            case .leftMouseUp, .rightMouseUp, .otherMouseUp:
+                let btn: MouseButton = event.type == .leftMouseUp
+                    ? .left
+                    : (event.type == .rightMouseUp ? .right : mapOtherButton(event.buttonNumber))
+                onSendControl?(.mouseEvent(MouseEvent(
+                    windowId: windowId,
+                    kind: .buttonUp,
+                    normX: nx,
+                    normY: ny,
+                    button: btn,
+                    modifiers: mods
+                )))
+                return nil
+            case .scrollWheel:
+                scrollWheel(with: event)
+                return nil
+            default:
+                return event
+            }
         }
     }
 
@@ -390,6 +620,7 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
             guard let window else {
                 gameLockState = .off
                 gameLockEnabled = false
+                removeGameLockEventMonitor()
                 return
             }
             window.makeKeyAndOrderFront(nil)
@@ -403,8 +634,8 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
                     normY: 0.5
                 )))
             }
-            warpCursorToVideoCenter()
-            CGAssociateMouseAndMouseCursorPosition(0)
+            installGameLockEventMonitorIfNeeded()
+            warpCursorToVideoCenter(keepAssociated: false)
             if !isCursorHidden {
                 NSCursor.hide()
                 isCursorHidden = true
@@ -413,15 +644,15 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
 
         case .confinedVisible:
             pointerLockedAt = nil
-            CGAssociateMouseAndMouseCursorPosition(1)
+            installGameLockEventMonitorIfNeeded()
             if isCursorHidden {
                 NSCursor.unhide()
                 isCursorHidden = false
             }
             if previous == .relativeLocked {
                 // Game just revealed cursor (Alt / menu open): show cursor right at window center
-                // and align Windows cursor cleanly.
-                warpCursorToVideoCenter()
+                // and align Windows cursor cleanly without 250ms warp suppression.
+                warpCursorToVideoCenter(keepAssociated: true)
                 onSendControl?(.mouseEvent(MouseEvent(
                     windowId: windowId,
                     kind: .move,
@@ -429,6 +660,7 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
                     normY: 0.5
                 )))
             } else {
+                CGAssociateMouseAndMouseCursorPosition(1)
                 window?.makeKeyAndOrderFront(nil)
                 window?.makeFirstResponder(self)
                 confineCursorIfNeeded()
@@ -437,6 +669,7 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
 
         case .off:
             pointerLockedAt = nil
+            removeGameLockEventMonitor()
             CGAssociateMouseAndMouseCursorPosition(1)
             if isCursorHidden {
                 NSCursor.unhide()
@@ -493,7 +726,6 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
             if suppressInactiveHover() && window?.isKeyWindow != true {
                 return
             }
-            confineCursorIfNeeded()
             sendMouse(event: event, kind: .move, button: .unspecified)
         }
     }
@@ -502,7 +734,6 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
         if gameLockState == .relativeLocked {
             sendRelativeMove(event: event)
         } else {
-            confineCursorIfNeeded()
             sendMouse(event: event, kind: .move, button: .left)
         }
     }
@@ -511,7 +742,6 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
         if gameLockState == .relativeLocked {
             sendRelativeMove(event: event)
         } else {
-            confineCursorIfNeeded()
             sendMouse(event: event, kind: .move, button: .right)
         }
     }
@@ -520,7 +750,6 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
         if gameLockState == .relativeLocked {
             sendRelativeMove(event: event)
         } else {
-            confineCursorIfNeeded()
             sendMouse(event: event, kind: .move, button: mapOtherButton(event.buttonNumber))
         }
     }
