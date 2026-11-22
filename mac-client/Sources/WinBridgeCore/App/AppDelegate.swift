@@ -324,20 +324,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         winMenu.addItem(muteItem)
         winMenu.addItem(withTitle: "刷新当前窗口关键帧 (IDR)", action: #selector(requestKeyframeAction), keyEquivalent: "")
         winMenu.addItem(withTitle: "从 Windows 取回文件…", action: #selector(showFilePullAction), keyEquivalent: "")
-        let pullClipItem = NSMenuItem(
-            title: "取回 Windows 剪贴板文件 (写入 Mac ⌘V)",
-            action: #selector(pullClipboardFilesAction),
-            keyEquivalent: sc.pullClipboardFiles.menuKeyEquivalent
-        )
-        pullClipItem.keyEquivalentModifierMask = sc.pullClipboardFiles.modifierFlags
-        winMenu.addItem(pullClipItem)
-        let autoPullItem = NSMenuItem(
-            title: "剪贴板文件自动取回 (≤20 MB)",
-            action: #selector(toggleAutoPullClipboardFilesAction),
-            keyEquivalent: ""
-        )
-        autoPullItem.state = state.settings.autoPullClipboardFiles ? .on : .off
-        winMenu.addItem(autoPullItem)
         let notifyWinItem = NSMenuItem(
             title: "转发 Windows 通知到 macOS 通知中心",
             action: #selector(toggleForwardNotificationsAction),
@@ -440,14 +426,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             processAudio.state = state.settings.audioProcessOnly ? .on : .off
             menu.addItem(processAudio)
             menu.addItem(withTitle: "从 Windows 取回文件…", action: #selector(showFilePullAction), keyEquivalent: "")
-            menu.addItem(withTitle: "取回 Windows 剪贴板文件 (⌥⇧⌘V)", action: #selector(pullClipboardFilesAction), keyEquivalent: "")
-            let autoPullStatus = NSMenuItem(
-                title: "剪贴板文件自动取回 (≤20 MB)",
-                action: #selector(toggleAutoPullClipboardFilesAction),
-                keyEquivalent: ""
-            )
-            autoPullStatus.state = state.settings.autoPullClipboardFiles ? .on : .off
-            menu.addItem(autoPullStatus)
             let notifyStatusItem = NSMenuItem(
                 title: "转发 Windows 通知",
                 action: #selector(toggleForwardNotificationsAction),

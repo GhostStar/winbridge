@@ -143,8 +143,19 @@ final class AppState {
         self.settings = SettingsStore.load()
         clipboardMonitor.isEnabled = settings.syncClipboard
         audioPlayer.volume = settings.audioVolume
-        clipboardMonitor.onLocalChange = { [weak self] sync in
-            self?.sendControl(.clipboardSync(sync))
+        clipboardMonitor.onRequest = { [weak self] request in self?.sendControl(.clipboardRequest(request)) }
+        clipboardMonitor.isSupported = { [weak self] in
+            (self?.connectedHostCapabilities ?? 0) & ProtocolCapabilities.scopedClipboard != 0
+        }
+        clipboardMonitor.activeTarget = { [weak self] in
+            guard let self, case .connected = self.connectionState, NSApp.isActive,
+                  let wc = NSApp.keyWindow?.windowController as? RemoteWindowController,
+                  self.controllers[wc.windowId] === wc, !wc.isLocallyHidden, !wc.info.isDisabled,
+                  wc.window?.isVisible == true, wc.info.clipboardToken != 0 else { return nil }
+            return ClipboardTarget(windowId: wc.windowId, token: wc.info.clipboardToken)
+        }
+        clipboardMonitor.onStatus = { [weak self] message in
+            self?.setBanner(message, isError: false); self?.onStateChanged?()
         }
         hostDiscovery.onHostsChanged = { [weak self] hosts in
             self?.discoveredHosts = hosts
@@ -1502,6 +1513,7 @@ final class AppState {
     }
 
     func sendControl(_ payload: ControlMessage.Payload) {
+        if case .focusWindow(let focus) = payload, !focus.focused { clipboardMonitor.cancel(windowId: focus.windowId) }
         connection?.send(payload)
     }
 
@@ -1679,47 +1691,21 @@ final class AppState {
         return name
     }
 
-    private static let autoPullClipboardLimitBytes: UInt64 = 20 * 1024 * 1024
-
     func toggleAutoPullClipboardFiles() {
-        var s = settings
-        s.autoPullClipboardFiles.toggle()
-        settings = s
-        setBanner(
-            s.autoPullClipboardFiles
-                ? "已开启：Windows 复制 ≤20 MB 文件时自动取回并写入 Mac 剪贴板（按 ⌘V 直接粘贴）"
-                : "已关闭自动取回剪贴板文件（仍可按 ⌥⇧⌘V 手动取回）",
-            isError: false
-        )
+        setBanner("已停止全局剪贴板文件共享，请显式选择文件 / Select files explicitly", isError: false)
         onStateChanged?()
     }
 
     func pullClipboardFilesToPasteboard(isAuto: Bool = false) {
-        guard case .connected = connectionState else {
-            if !isAuto {
-                setBanner("请先连接 Windows 主机", isError: true)
-                onStateChanged?()
-            }
-            return
-        }
-        let requestId = nextTransferId
-        nextTransferId &+= 1
-        pendingPullTargets[requestId] = PendingPullTarget(
-            destinationURL: nil,
-            copyToPasteboard: true,
-            completion: nil
-        )
-        clipboardBatchFiles[requestId] = []
-        let msg = isAuto ? "⬇ 正在自动同步 Windows 剪贴板文件…" : "⬇ 正在取回 Windows 剪贴板文件…"
-        ClientLogger.shared.info("FilePull clipboard request id=\(requestId) auto=\(isAuto)")
-        setBanner(msg, isError: false)
-        showTransferToast(msg, style: .progress, autoHideSeconds: nil)
-        onFilePullStatusChanged?(msg, false)
+        guard !isAuto else { return }
+        setBanner("请使用“从 Windows 取回文件”显式选择文件 / Use the file browser", isError: false)
         onStateChanged?()
-        sendControl(.filePullReq(FilePullRequest(requestId: requestId, path: "clipboard:")))
     }
 
     func pullHostFile(path: String, copyToPasteboard: Bool = true) {
+        guard path.trimmingCharacters(in: .whitespacesAndNewlines) != "clipboard:" else {
+            pullClipboardFilesToPasteboard(); return
+        }
         guard case .connected = connectionState else {
             setBanner("请先连接 Windows 主机", isError: true)
             onStateChanged?()
@@ -1733,6 +1719,7 @@ final class AppState {
             completion: nil
         )
         if copyToPasteboard {
+            clipboardMonitor.beginFilePublication(requestId)
             clipboardBatchFiles[requestId] = []
         }
         let label: String
@@ -1784,36 +1771,6 @@ final class AppState {
         sendControl(.filePullReq(FilePullRequest(requestId: requestId, path: remotePath)))
     }
 
-    private func handleClipboardFilesNotice(_ notice: ClipboardFilesNotice) {
-        guard !notice.files.isEmpty else { return }
-        if notice.changeId != 0 && notice.changeId == lastClipboardFilesChangeId {
-            return
-        }
-        lastClipboardFilesChangeId = notice.changeId
-        lastHostClipboardNotice = notice
-
-        let firstName = notice.files[0].name
-        let summary = notice.files.count == 1
-            ? firstName
-            : "\(firstName) 等 \(notice.files.count) 个文件"
-        let sizeStr = Self.formatByteCount(notice.totalBytes)
-        ClientLogger.shared.info(
-            "ClipboardFilesNotice seq=\(notice.changeId) count=\(notice.files.count) bytes=\(notice.totalBytes) skipped=\(notice.skippedCount)"
-        )
-
-        if settings.syncClipboard
-            && settings.autoPullClipboardFiles
-            && notice.totalBytes <= Self.autoPullClipboardLimitBytes {
-            pullClipboardFilesToPasteboard(isAuto: true)
-        } else {
-            let msg = "📋 Windows 已复制「\(summary)」(\(sizeStr)) — 按 ⌥⇧⌘V 立即取回到 Mac 剪贴板"
-            setBanner(msg, isError: false)
-            showTransferToast(msg, style: .progress, autoHideSeconds: 6.5)
-            onFilePullStatusChanged?(msg, false)
-            onStateChanged?()
-        }
-    }
-
     private func macDropDirectory() -> URL {
         let base = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSTemporaryDirectory())
@@ -1835,6 +1792,8 @@ final class AppState {
             pending = nil
         }
 
+        // Reject unsolicited transfers before creating any file on disk.
+        guard pending != nil else { return }
         guard start.totalBytes <= Self.maxIncomingPullBytes else {
             let msg = "取回「\(name)」失败：文件超过 512 MiB 上限"
             pending?.completion?(NSError(domain: "com.winbridge.client", code: 2, userInfo: [NSLocalizedDescriptionKey: msg]))
@@ -1965,9 +1924,10 @@ final class AppState {
                     var batch = clipboardBatchFiles[pull.requestId] ?? []
                     batch.append(pull.finalURL)
                     clipboardBatchFiles[pull.requestId] = batch
-                    clipboardMonitor.applyRemoteFiles(batch)
+                    let published = clipboardMonitor.applyRemoteFiles(batch, requestId: pull.requestId)
                     let batchNote = batch.count > 1 ? "（共 \(batch.count) 个文件）" : ""
-                    msg = "✓ 「\(name)」已取回并写入 Mac 剪贴板\(batchNote)，按 ⌘V 可直接粘贴"
+                    msg = published ? "✓ 「\(name)」已取回并写入 Mac 剪贴板\(batchNote)，按 ⌘V 可直接粘贴"
+                        : "✓ 文件已保存；剪贴板已变化或同步关闭，保留本地内容 / Local clipboard preserved"
                 } else {
                     msg = "✓ 文件「\(name)」已取回到 Mac：\(pull.finalURL.path)"
                 }
@@ -2036,11 +1996,11 @@ final class AppState {
         case .cursorShape(let shape):
             controllers[shape.windowId]?.applyCursor(shape)
 
-        case .clipboardSync(let sync):
-            clipboardMonitor.applyRemote(sync)
+        case .clipboardResult(let result):
+            clipboardMonitor.receive(result)
 
-        case .clipboardFilesNotice(let notice):
-            handleClipboardFilesNotice(notice)
+        case .clipboardSync, .clipboardFilesNotice:
+            break // Never accept legacy unsolicited global clipboard contents.
 
         case .hostNotification(let note):
             handleHostNotification(note)
@@ -2082,8 +2042,8 @@ final class AppState {
             let targetWin = activeTransferTargetWindow.removeValue(forKey: res.transferId)
             if let name = activeTransferNames.removeValue(forKey: res.transferId) {
                 if res.success {
-                    let bannerMsg = "✓ 文件「\(name)」已保存到 Windows：\(res.savedPath)（已写入 Windows 剪贴板，按 ⌘V 可直接粘贴）"
-                    let toastMsg = "✓ 已发送到 Windows：\(res.savedPath)\n已自动复制到 Windows 剪贴板，按 ⌘V 可直接粘贴"
+                    let bannerMsg = "✓ 文件「\(name)」已保存到 Windows：\(res.savedPath)"
+                    let toastMsg = "✓ 已发送到 Windows：\(res.savedPath)"
                     ClientLogger.shared.info("FileTransfer done id=\(res.transferId) saved=\"\(res.savedPath)\"")
                     setBanner(bannerMsg, isError: false)
                     showTransferToast(toastMsg, style: .success, windowId: targetWin, autoHideSeconds: 5.5)
@@ -2133,6 +2093,7 @@ final class AppState {
         wc.showPerformanceHud = { [weak self] in self?.settings.showPerformanceHud ?? false }
         wc.currentRttMs = { [weak self] in self?.rttMs }
         wc.onSendControl = { [weak self] payload in self?.sendControl(payload) }
+        wc.onClipboardAction = { [weak self] action, id in self?.clipboardMonitor.perform(action, windowId: id) }
         wc.onDetachRequested = { [weak self] id in self?.hideViewer(id) }
         wc.onOwnerMovedOrResized = { [weak self] ownerId in self?.repositionOwnedPopups(for: ownerId) }
         wc.onRequestQuit = { NSApp.terminate(nil) }
@@ -2183,7 +2144,7 @@ final class AppState {
 
     func hideViewer(_ windowId: UInt64) {
         let ids = ViewerVisibility.subtree(windowId, in: controllers.values.map(\.info))
-        for id in ids { controllers[id]?.hideLocally() }
+        for id in ids { clipboardMonitor.cancel(windowId: id); controllers[id]?.hideLocally() }
         onStateChanged?()
     }
 
@@ -2215,6 +2176,7 @@ final class AppState {
     private func closeWindowLocally(_ windowId: UInt64) {
         let ids = ViewerVisibility.subtree(windowId, in: controllers.values.map(\.info))
         for id in ids {
+            clipboardMonitor.cancel(windowId: id)
             controllers.removeValue(forKey: id)?.forceCloseLocally()
             subscribedRootIds.remove(id)
             mutedWindowIds.remove(id)

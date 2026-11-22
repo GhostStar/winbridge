@@ -266,7 +266,7 @@ enum SettingsStore {
         let codec = CodecPreference(rawValue: codecRaw) ?? .auto
         let cmdToCtrl = defaults.object(forKey: "winbridge.cmdToCtrl") as? Bool ?? true
         let clipboard = defaults.object(forKey: "winbridge.syncClipboard") as? Bool ?? true
-        let autoPullClipboardFiles = defaults.object(forKey: "winbridge.autoPullClipboardFiles") as? Bool ?? true
+        let autoPullClipboardFiles = false // Retired global clipboard-file auto sharing; do not migrate unsafe opt-ins.
         let popups = defaults.object(forKey: "winbridge.followPopups") as? Bool ?? true
         let syncResize = defaults.object(forKey: "winbridge.syncWindowResize") as? Bool ?? false
         let audioEnabled = defaults.object(forKey: "winbridge.audioEnabled") as? Bool ?? false

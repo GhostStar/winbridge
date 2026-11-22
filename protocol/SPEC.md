@@ -160,7 +160,7 @@ After the `WBRGMED\x01` + 16-byte `session_id` handshake returns `0x00`, Windows
   - **TLS 1.3 + TOFU pinning**, per-IP auth rate limiting, optional `--allow-cidr`, Named Pipe + `GetNamedPipeClientProcessId` secure-helper IPC, and macOS Keychain storage.
   - **mDNS / Bonjour** LAN auto-discovery (`_winbridge._tcp.local.`), exponential-backoff auto-reconnect with window restoration.
   - **HEVC (`VIDEO_CODEC_HEVC_ANNEX_B = 2`)** hardware encode/decode and **Opus (`AUDIO_CODEC_OPUS = 11`)** 48 kHz stereo 20 ms low-bandwidth audio alongside PCM lossless (`10`). `SetAudioConfig.scope = 1` mixes only subscribed window processes via WASAPI process loopback (Windows 10 20348+ / Windows 11). If that API is missing, a subscribed root is the desktop, or activation fails, the host falls back to system loopback and sends `HostError`. Scope `0` remains whole-system loopback. The host mixes every process into the existing single audio stream (`window_id = 0`) so the client ring buffer is unchanged.
-  - **Smart 3D Game Relative Mouse Lock** (`MOUSE_EVENT_KIND_RELATIVE_MOVE = 5`), **Gamepad passthrough** (`GamepadState`), and **bidirectional chunked File Transfer** (`FileTransferStart` / `FileTransferChunk` / `FileTransferResult`; `direction = 2` is Windows → Mac, with `request_id` correlation for macOS `NSFilePromiseProvider` drag-out). `ListHostFiles` (`root:drop|desktop|downloads|documents` aliases) / `FilePullRequest` let the client browse Downloads, Desktop, and Documents (plus `Downloads\WinBridge`), pull files or on-the-fly `.zip` folders, or pull `CF_HDROP` clipboard files (`path = "clipboard:"`). `ClipboardFilesNotice` (field 68) notifies Mac when Windows copies allowed files so ≤20 MiB files auto-sync onto macOS `NSPasteboard` (or on demand via `⌥⇧⌘V`). All requested paths are canonicalized and rejected outside allowed roots.
+  - **Smart 3D Game Relative Mouse Lock** (`MOUSE_EVENT_KIND_RELATIVE_MOVE = 5`), **Gamepad passthrough** (`GamepadState`), and **bidirectional chunked File Transfer** (`FileTransferStart` / `FileTransferChunk` / `FileTransferResult`; `direction = 2` is Windows → Mac, with `request_id` correlation for macOS `NSFilePromiseProvider` drag-out). `ListHostFiles` (`root:drop|desktop|downloads|documents` aliases) / `FilePullRequest` let the client browse Downloads, Desktop, and Documents (plus `Downloads\WinBridge`), pull files or on-the-fly `.zip` folders, through explicit selection. This fork rejects `path = "clipboard:"`, does not emit or consume `ClipboardFilesNotice`, and never publishes incoming uploads as `CF_HDROP`. All requested paths are canonicalized and rejected outside allowed roots.
   - **Per-window video profiles** (`SetVideoConfig`, field 45): text (≤30 fps), game (host fps cap), or auto, plus optional adaptive bitrate driven by the host media-queue backlog and the client's control-channel RTT (with dynamic `ICodecAPI` bitrate adjustment and cooldown hysteresis). A message with `profile = 0` and zero fps/bitrate only refreshes RTT.
 - **Future (v0.3+)**:
   - Optional **QUIC** transport (`quinn` + `NWProtocolQUIC`) for per-window stream multiplexing without head-of-line blocking on lossy Wi-Fi / WAN links.
@@ -230,3 +230,31 @@ Mac 关闭只隐藏本地窗口及所属子树，独立成员保留。迟到视�
 隐藏拥有者的新浮窗也保持隐藏。恢复子窗会先恢复拥有者。关闭本地模态对话框不解除
 Windows 的父窗口阻断；输入和主机尺寸操作由服务端复查，按键／鼠标释放仍允许。
 标题栏最小化、最大化保持本地操作，开启同步缩放后也只有手动拖动边框才请求主机尺寸。
+
+
+## Scoped clipboard (fork extension)
+
+Capability bit 9 (`SCOPED_CLIPBOARD`) requires both updated endpoints. WindowInfo
+field 22 `clipboard_token` is a nonzero subscription generation, replaced after
+unsubscribe/reopen. It is not an authentication secret. The authenticated control
+channel carries ClipboardRequest (field 80) and ClipboardResult (field 81).
+Requests include monotonically increasing request_id, window_id, token and action
+(`copy`, `cut`, `paste`, `poll`). Only paste has ClipboardSync data; poll may set
+`discard=true` to establish a baseline without returning existing contents.
+Results echo identity/action and carry success, error and optional text/PNG data.
+
+The host rejects unsubscribed/stopped/reused windows, stale tokens, desktop targets,
+replayed requests and legacy unscoped ClipboardSync. It validates exact foreground,
+enabled state and process creation time. Reads additionally require a clipboard
+owner belonging to the subscribed capture group; no clipboard-file reads occur.
+Paste publishes validated data before injecting the shortcut. Copy/cut wait for a
+new clipboard sequence; polling never returns an initial clipboard value.
+
+The Mac accepts only its matching live request while the same viewer remains key,
+visible and enabled. It preserves any newer local clipboard change. Disconnect,
+local close, focus loss and disabling sync invalidate pending work. It never
+exports local changes in the background or accepts unsolicited legacy updates.
+Text is at most 1 MiB UTF-8; PNG at most 8 MiB with at most 16 Mi pixels decoded.
+Explicit file transfers retain separate, guarded publication tickets.
+
+See [design and validation](../docs/scoped-clipboard.md) for privacy boundaries.

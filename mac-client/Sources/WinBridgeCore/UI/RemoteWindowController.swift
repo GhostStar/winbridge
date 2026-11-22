@@ -34,6 +34,7 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
     let decoder: WindowVideoDecoder
 
     var onSendControl: ((ControlMessage.Payload) -> Void)?
+    var onClipboardAction: ((String, UInt64) -> Void)?
     var onDetachRequested: ((UInt64) -> Void)?
     var onOwnerMovedOrResized: ((UInt64) -> Void)?
     var onRequestQuit: (() -> Void)?
@@ -144,6 +145,10 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
         remoteView.mouseSensitivity = { [weak self] in self?.mouseSensitivity() ?? 1.0 }
         remoteView.suppressInactiveHover = { [weak self] in self?.suppressInactiveHover() ?? false }
         remoteView.shortcuts = { [weak self] in self?.shortcuts() ?? .defaults }
+        remoteView.onClipboardAction = { [weak self] action in
+            guard let self else { return }
+            self.onClipboardAction?(action, self.windowId)
+        }
         remoteView.onSendControl = { [weak self] payload in self?.onSendControl?(payload) }
         remoteView.onRequestQuit = { [weak self] in self?.onRequestQuit?() }
         remoteView.onOpenManager = { [weak self] in self?.onOpenManager?() }

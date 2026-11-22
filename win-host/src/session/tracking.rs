@@ -54,6 +54,7 @@ impl Session {
         for mut info in list.iter().rev().cloned() {
             let id = info.window_id;
             if let Some(s) = self.windows.get(&id) {
+                info.clipboard_token = s.info.clipboard_token;
                 if s.root != id {
                     if let Some(owner) = by_id.get(&s.info.owner_window_id) {
                         relative(&mut info, owner);

@@ -71,6 +71,7 @@ enum TransferToastStyle: Equatable {
 @MainActor
 final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
     let windowId: UInt64
+    var onClipboardAction: ((String) -> Void)?
     var cmdMapsToCtrl: () -> Bool = { true }
     var mouseSensitivity: () -> Float = { 1.0 }
     var suppressInactiveHover: () -> Bool = { false }
@@ -944,10 +945,27 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
 
     // MARK: - Keyboard & Shortcuts
 
+    private func handleClipboardShortcut(_ event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        guard flags == .control || (flags == .command && cmdMapsToCtrl()) else { return false }
+        let action: String
+        switch event.keyCode {
+        case UInt16(kVK_ANSI_C): action = "copy"
+        case UInt16(kVK_ANSI_X): action = "cut"
+        case UInt16(kVK_ANSI_V): action = "paste"
+        default: return false
+        }
+        // Consume the shortcut even when unavailable; never paste stale host data.
+        releaseAllHeldKeys()
+        if inputEnabled { onClipboardAction?(action) }
+        return true
+    }
+
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         guard window?.isKeyWindow == true, window?.firstResponder === self else {
             return super.performKeyEquivalent(with: event)
         }
+        if handleClipboardShortcut(event) { return true }
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         if flags == .command && event.keyCode == UInt16(kVK_ANSI_W) {
             window?.performClose(nil)
@@ -1008,6 +1026,7 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
     }
 
     override func keyDown(with event: NSEvent) {
+        if handleClipboardShortcut(event) { return }
         syncModifiers(from: event.modifierFlags)
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let hasShortcutMod = flags.contains(.command) || flags.contains(.control) || flags.contains(.option)

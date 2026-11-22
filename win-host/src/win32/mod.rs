@@ -24,3 +24,5 @@ pub fn init_dpi() {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
 }
+
+pub(crate) mod scoped_clipboard;

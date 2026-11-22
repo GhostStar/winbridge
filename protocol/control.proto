@@ -69,6 +69,8 @@ message ControlMessage {
     HostNotification host_notification = 69;     // Win -> Mac
 
     // --- Diagnostics / Errors (Win -> Mac) ---
+    ClipboardRequest clipboard_request = 80;
+    ClipboardResult clipboard_result = 81;
     HostError host_error = 70;                   // Win -> Mac
   }
 }
@@ -268,6 +270,7 @@ message WindowInfo {
   // Backward-compatible state: absent means enabled/non-modal.
   bool is_disabled = 20;
   bool is_modal = 21;
+  uint64 clipboard_token = 22;
 }
 
 message ListWindowsRequest {
@@ -598,4 +601,23 @@ message HostError {
   uint64 window_id = 1;
   ErrorCode code = 2;
   string message = 3;
+}
+
+// Scoped transactions. Legacy ClipboardSync is not accepted as a global write.
+message ClipboardRequest {
+  uint64 request_id = 1;
+  uint64 window_id = 2;
+  uint64 token = 3;
+  string action = 4; // copy, cut, paste, poll
+  ClipboardSync data = 5;
+  bool discard = 6; // establish polling baseline without returning content
+}
+message ClipboardResult {
+  uint64 request_id = 1;
+  uint64 window_id = 2;
+  uint64 token = 3;
+  string action = 4;
+  bool success = 5;
+  string error = 6;
+  ClipboardSync data = 7;
 }

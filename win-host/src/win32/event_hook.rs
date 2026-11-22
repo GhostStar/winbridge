@@ -1,5 +1,8 @@
-use super::{clipboard, cursor::Tracker};
-use crate::proto::{ClipboardFilesNotice, ClipboardSync, CursorShape, HostFileEntry};
+use super::{
+    cursor::Tracker,
+    scoped_clipboard::{Command, Scope, Transactions},
+};
+use crate::proto::{ClipboardRequest, ClipboardSync, CursorShape};
 use anyhow::{anyhow, ensure, Context, Result};
 use std::{
     cell::RefCell,
@@ -9,11 +12,12 @@ use std::{
         mpsc as sync, Arc,
     },
     thread,
+    time::{Duration, Instant},
 };
 use tokio::sync::mpsc::Sender;
 use windows_sys::Win32::{
     Foundation::HWND,
-    System::{Com::*, DataExchange::*, Threading::GetCurrentThreadId},
+    System::{Com::*, Threading::GetCurrentThreadId},
     UI::{Accessibility::*, WindowsAndMessaging::*},
 };
 
@@ -21,8 +25,6 @@ pub enum Event {
     Changed(u64),
     Hidden(u64),
     Cursor(CursorShape),
-    Clipboard(ClipboardSync),
-    ClipboardFiles(ClipboardFilesNotice),
     Error(String),
 }
 
@@ -88,10 +90,6 @@ impl Resources {
                 "CreateWindowExW: {}",
                 io::Error::last_os_error()
             );
-            ensure!(
-                AddClipboardFormatListener(r.hwnd) != 0,
-                "AddClipboardFormatListener failed"
-            );
             ensure!(SetTimer(r.hwnd, 1, 20, None) != 0, "SetTimer failed");
             for (first, last) in [
                 (EVENT_OBJECT_CREATE, EVENT_OBJECT_HIDE),
@@ -122,7 +120,6 @@ impl Drop for Resources {
             }
             if !self.hwnd.is_null() {
                 KillTimer(self.hwnd, 1);
-                RemoveClipboardFormatListener(self.hwnd);
                 DestroyWindow(self.hwnd);
             }
             CoUninitialize();
@@ -132,7 +129,7 @@ impl Drop for Resources {
 
 pub struct Observer {
     id: u32,
-    commands: sync::SyncSender<ClipboardSync>,
+    commands: sync::SyncSender<Command>,
     stopped: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
 }
@@ -167,14 +164,26 @@ impl Observer {
             thread: Some(thread),
         })
     }
-    pub fn set_clipboard(&self, message: ClipboardSync) -> Result<()> {
+    pub(crate) async fn clipboard(
+        &self,
+        request: ClipboardRequest,
+        scope: Scope,
+    ) -> Result<Option<ClipboardSync>> {
+        let (reply, wait) = tokio::sync::oneshot::channel();
         self.commands
-            .try_send(message)
-            .map_err(|_| anyhow!("clipboard writer is unavailable or busy"))?;
+            .try_send(Command {
+                request,
+                scope,
+                reply,
+                deadline: Instant::now() + Duration::from_secs(2),
+            })
+            .map_err(|_| anyhow!("clipboard worker busy"))?;
         unsafe {
             PostThreadMessageW(self.id, WM_APP, 0, 0);
         }
-        Ok(())
+        tokio::time::timeout(Duration::from_secs(2), wait)
+            .await
+            .context("clipboard timed out")??
     }
 }
 impl Drop for Observer {
@@ -195,24 +204,14 @@ impl Drop for Observer {
     }
 }
 
-fn clipboard_echo(
-    last_sent: Option<&ClipboardSync>,
-    last_remote: Option<u64>,
-    request: &ClipboardSync,
-) -> bool {
-    (request.change_id != 0 && last_remote == Some(request.change_id)) || last_sent == Some(request)
-}
-
 fn observer_loop(
     resources: &Resources,
     events: Sender<Event>,
-    commands: sync::Receiver<ClipboardSync>,
+    commands: sync::Receiver<Command>,
     stopped: &AtomicBool,
 ) {
     let mut cursor = Tracker::new();
-    let mut seen = unsafe { GetClipboardSequenceNumber() };
-    let mut last_remote = None;
-    let mut last_sent = None;
+    let mut transactions = Transactions::default();
     let mut msg: MSG = unsafe { mem::zeroed() };
     while !stopped.load(Ordering::Acquire)
         && unsafe { GetMessageW(&mut msg, ptr::null_mut(), 0, 0) } > 0
@@ -221,67 +220,14 @@ fn observer_loop(
             break;
         }
         match msg.message {
-            WM_TIMER | WM_CLIPBOARDUPDATE | WM_APP => {
-                for request in commands.try_iter() {
-                    if clipboard_echo(last_sent.as_ref(), last_remote, &request) {
+            WM_TIMER | WM_APP => {
+                for command in commands.try_iter() {
+                    if command.reply.is_closed() || Instant::now() > command.deadline {
                         continue;
                     }
-                    let change = request.change_id;
-                    match clipboard::write(resources.hwnd, request) {
-                        Ok(seq) => {
-                            seen = seq;
-                            last_remote = Some(change);
-                        }
-                        Err(e) => {
-                            let _ =
-                                events.try_send(Event::Error(format!("clipboard write: {e:#}")));
-                        }
-                    }
-                }
-                let current = unsafe { GetClipboardSequenceNumber() };
-                if current != seen {
-                    match clipboard::read(resources.hwnd) {
-                        Ok(Some(value)) => {
-                            let seq = value.change_id as u32;
-                            if events.try_send(Event::Clipboard(value.clone())).is_ok() {
-                                last_sent = Some(value);
-                                seen = seq;
-                            }
-                        }
-                        Ok(None) => {
-                            const CF_HDROP: u32 = 15;
-                            if current != super::files::last_self_hdrop_seq()
-                                && unsafe { IsClipboardFormatAvailable(CF_HDROP) } != 0
-                            {
-                                if let Ok(Some((files, total_bytes, skipped_count))) =
-                                    super::files::inspect_clipboard_files()
-                                {
-                                    let notice = ClipboardFilesNotice {
-                                        change_id: u64::from(current),
-                                        files: files
-                                            .into_iter()
-                                            .map(|f| HostFileEntry {
-                                                name: f.name,
-                                                size_bytes: f.size_bytes,
-                                                is_dir: f.is_dir,
-                                            })
-                                            .collect(),
-                                        total_bytes,
-                                        skipped_count,
-                                    };
-                                    let _ = events.try_send(Event::ClipboardFiles(notice));
-                                }
-                            }
-                            seen = current;
-                        }
-                        Err(e) => {
-                            // OpenClipboard contention can clear on the next timer tick.
-                            if e.downcast_ref::<io::Error>().is_none() {
-                                seen = current;
-                            }
-                            let _ = events.try_send(Event::Error(format!("clipboard read: {e:#}")));
-                        }
-                    }
+                    let result =
+                        transactions.execute(resources.hwnd, command.request, command.scope);
+                    let _ = command.reply.send(result);
                 }
                 cursor.sample(&events);
             }
@@ -289,37 +235,6 @@ fn observer_loop(
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             },
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::proto::clipboard_sync::Content;
-
-    #[test]
-    fn suppress_clipboard_echoes_and_retried_remote_changes() {
-        for content in [
-            Content::TextUtf8("ab".into()),
-            Content::ImagePng(vec![1, 2, 3]),
-        ] {
-            let sent = ClipboardSync {
-                change_id: 101,
-                content: Some(content.clone()),
-            };
-            let inbound = ClipboardSync {
-                change_id: 202,
-                content: Some(content),
-            };
-            assert!(clipboard_echo(Some(&sent), None, &sent));
-            assert!(!clipboard_echo(Some(&sent), None, &inbound));
-            assert!(clipboard_echo(Some(&sent), Some(202), &inbound));
-            let fresh = ClipboardSync {
-                change_id: 101,
-                content: Some(Content::TextUtf8("changed".into())),
-            };
-            assert!(!clipboard_echo(Some(&sent), Some(202), &fresh));
         }
     }
 }

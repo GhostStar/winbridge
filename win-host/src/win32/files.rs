@@ -6,16 +6,7 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     ptr,
-    sync::atomic::{AtomicU32, Ordering},
 };
-
-static LAST_SELF_HDROP_SEQ: AtomicU32 = AtomicU32::new(0);
-
-/// Returns the Windows clipboard sequence number written by our own `set_clipboard_file_paths`,
-/// allowing the clipboard listener to suppress echo loops when Mac drops files onto Windows.
-pub fn last_self_hdrop_seq() -> u32 {
-    LAST_SELF_HDROP_SEQ.load(Ordering::Acquire)
-}
 
 pub const MAX_TRANSFER_BYTES: u64 = 512 * 1024 * 1024; // 512 MiB
 const MAX_CONCURRENT_TRANSFERS: usize = 4;
@@ -43,11 +34,7 @@ pub fn sanitize_file_name(raw: &str) -> String {
     if cleaned.len() > 180 {
         cleaned = cleaned.chars().take(180).collect();
     }
-    let stem_upper = cleaned
-        .split('.')
-        .next()
-        .unwrap_or("")
-        .to_ascii_uppercase();
+    let stem_upper = cleaned.split('.').next().unwrap_or("").to_ascii_uppercase();
     if RESERVED_WINDOWS_NAMES.contains(&stem_upper.as_str()) {
         cleaned = format!("_{cleaned}");
     }
@@ -94,10 +81,7 @@ fn unique_destination(dir: &Path, safe_name: &str) -> PathBuf {
         return candidate;
     }
     let p = Path::new(safe_name);
-    let stem = p
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or(safe_name);
+    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or(safe_name);
     let ext = p.extension().and_then(|s| s.to_str());
     for n in 1..10_000u32 {
         let name = match ext {
@@ -260,9 +244,7 @@ impl FileReceiver {
             let _ = fs::remove_file(&part);
             format!("finalize dropped file to {}", final_path.display())
         })?;
-        if let Err(e) = set_clipboard_file_paths(&[&final_path]) {
-            tracing::debug!(error = %e, "could not publish dropped file to Windows clipboard");
-        }
+        // File reception must not overwrite the global clipboard.
         tracing::info!(path = %final_path.display(), "received dragged file from macOS");
         Ok(Some(final_path))
     }
@@ -400,7 +382,10 @@ pub fn canonicalize_in_roots(roots: &[PathBuf], candidate: &Path) -> Result<Path
 /// and rejects anything that escapes `roots` after canonicalization.
 pub fn resolve_host_path(roots: &[PathBuf], drop_dir: &Path, requested: &str) -> Result<PathBuf> {
     let requested = requested.trim();
-    ensure!(requested != CLIPBOARD_PULL, "clipboard pull is not a filesystem path");
+    ensure!(
+        requested != CLIPBOARD_PULL,
+        "clipboard pull is not a filesystem path"
+    );
     let candidate = if let Some(shortcut) = known_shortcut_dir(requested, drop_dir) {
         shortcut
     } else {
@@ -522,165 +507,6 @@ pub fn open_pull_target(path: &Path) -> Result<OpenedPull> {
     })
 }
 
-/// Inspects current Windows clipboard `CF_HDROP` files without reading file contents.
-/// Returns `Ok(Some((allowed_entries, total_bytes, skipped_count)))` if at least one allowed
-/// regular file is present, or `Ok(None)` if the clipboard has no allowed files.
-pub fn inspect_clipboard_files() -> Result<Option<(Vec<HostFileEntryInfo>, u64, u32)>> {
-    let raw = match clipboard_file_paths() {
-        Ok(paths) => paths,
-        Err(_) => return Ok(None),
-    };
-    let drop_dir = default_drop_directory();
-    let roots = allowed_read_roots(&drop_dir);
-    let mut entries = Vec::new();
-    let mut total_bytes = 0u64;
-    let mut skipped_count = 0u32;
-    for path in &raw {
-        match canonicalize_in_roots(&roots, path) {
-            Ok(canon) => match fs::metadata(&canon) {
-                Ok(meta) if meta.is_file() && meta.len() <= MAX_TRANSFER_BYTES => {
-                    let name = canon
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| "winbridge-file.bin".into());
-                    total_bytes = total_bytes.saturating_add(meta.len());
-                    entries.push(HostFileEntryInfo {
-                        name: sanitize_file_name(&name),
-                        size_bytes: meta.len(),
-                        is_dir: false,
-                    });
-                }
-                _ => skipped_count = skipped_count.saturating_add(1),
-            },
-            Err(_) => skipped_count = skipped_count.saturating_add(1),
-        }
-    }
-    if entries.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some((entries, total_bytes, skipped_count)))
-}
-
-#[cfg(windows)]
-pub fn clipboard_file_paths() -> Result<Vec<PathBuf>> {
-    use std::os::windows::ffi::OsStringExt;
-    use windows_sys::Win32::{
-        System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard},
-        UI::Shell::{DragQueryFileW, HDROP},
-    };
-    const CF_HDROP: u32 = 15;
-    unsafe {
-        let mut opened = false;
-        for _ in 0..5 {
-            if OpenClipboard(std::ptr::null_mut()) != 0 {
-                opened = true;
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-        ensure!(opened, "OpenClipboard failed");
-        let hdrop = GetClipboardData(CF_HDROP);
-        if hdrop.is_null() {
-            CloseClipboard();
-            bail!("Windows clipboard has no files");
-        }
-        let drop = hdrop as HDROP;
-        let count = DragQueryFileW(drop, 0xFFFF_FFFF, std::ptr::null_mut(), 0);
-        let mut paths = Vec::with_capacity(count as usize);
-        for i in 0..count {
-            let len = DragQueryFileW(drop, i, std::ptr::null_mut(), 0);
-            let mut buf = vec![0u16; len as usize + 1];
-            DragQueryFileW(drop, i, buf.as_mut_ptr(), buf.len() as u32);
-            buf.truncate(len as usize);
-            paths.push(PathBuf::from(std::ffi::OsString::from_wide(&buf)));
-        }
-        CloseClipboard();
-        ensure!(!paths.is_empty(), "Windows clipboard has no files");
-        Ok(paths)
-    }
-}
-
-/// Builds a Win32 `DROPFILES` (UTF-16LE, double-NUL terminated) memory block for `CF_HDROP`.
-pub fn build_dropfiles_blob(paths: &[&Path]) -> Vec<u8> {
-    // DROPFILES struct: pFiles(u32=20), pt.x(i32=0), pt.y(i32=0), fNC(i32=0), fWide(i32=1)
-    let mut out = Vec::with_capacity(20 + paths.len() * 64);
-    out.extend_from_slice(&20u32.to_le_bytes());
-    out.extend_from_slice(&0i32.to_le_bytes());
-    out.extend_from_slice(&0i32.to_le_bytes());
-    out.extend_from_slice(&0i32.to_le_bytes());
-    out.extend_from_slice(&1i32.to_le_bytes());
-    for path in paths {
-        let text = path.as_os_str().to_string_lossy();
-        for unit in text.encode_utf16() {
-            if unit != 0 {
-                out.extend_from_slice(&unit.to_le_bytes());
-            }
-        }
-        out.extend_from_slice(&0u16.to_le_bytes());
-    }
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out
-}
-
-#[cfg(windows)]
-pub fn set_clipboard_file_paths(paths: &[&Path]) -> Result<()> {
-    use windows_sys::Win32::{
-        Foundation::GlobalFree,
-        System::{
-            DataExchange::{
-                CloseClipboard, EmptyClipboard, GetClipboardSequenceNumber, OpenClipboard,
-                SetClipboardData,
-            },
-            Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE},
-        },
-    };
-    const CF_HDROP: u32 = 15;
-    ensure!(!paths.is_empty(), "no file paths to place on clipboard");
-    let blob = build_dropfiles_blob(paths);
-    unsafe {
-        let mut opened = false;
-        for _ in 0..5 {
-            if OpenClipboard(ptr::null_mut()) != 0 {
-                opened = true;
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        ensure!(opened, "OpenClipboard failed");
-        let hmem = GlobalAlloc(GMEM_MOVEABLE, blob.len());
-        if hmem.is_null() {
-            CloseClipboard();
-            bail!("GlobalAlloc failed for CF_HDROP");
-        }
-        let dst = GlobalLock(hmem);
-        if dst.is_null() {
-            GlobalFree(hmem);
-            CloseClipboard();
-            bail!("GlobalLock failed for CF_HDROP");
-        }
-        ptr::copy_nonoverlapping(blob.as_ptr(), dst.cast(), blob.len());
-        GlobalUnlock(hmem);
-        if EmptyClipboard() == 0 || SetClipboardData(CF_HDROP, hmem).is_null() {
-            GlobalFree(hmem);
-            CloseClipboard();
-            bail!("SetClipboardData(CF_HDROP) failed");
-        }
-        CloseClipboard();
-        LAST_SELF_HDROP_SEQ.store(GetClipboardSequenceNumber(), Ordering::Release);
-    }
-    Ok(())
-}
-
-#[cfg(not(windows))]
-pub fn set_clipboard_file_paths(_paths: &[&Path]) -> Result<()> {
-    Ok(())
-}
-
-#[cfg(not(windows))]
-pub fn clipboard_file_paths() -> Result<Vec<PathBuf>> {
-    bail!("clipboard file pull is only available on Windows")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -688,7 +514,10 @@ mod tests {
     #[test]
     fn sanitizes_path_traversal_and_reserved_windows_names() {
         assert_eq!(sanitize_file_name("../../evil/notes.txt"), "notes.txt");
-        assert_eq!(sanitize_file_name(r"C:\Windows\System32\cmd.exe"), "cmd.exe");
+        assert_eq!(
+            sanitize_file_name(r"C:\Windows\System32\cmd.exe"),
+            "cmd.exe"
+        );
         assert_eq!(sanitize_file_name("CON.txt"), "_CON.txt");
         assert_eq!(sanitize_file_name("hello:world?.png"), "hello_world_.png");
         assert_eq!(sanitize_file_name("..."), "winbridge-file.bin");
@@ -738,7 +567,8 @@ mod tests {
     fn rejects_paths_outside_allowed_roots_and_lists_a_child() {
         let root = std::env::temp_dir().join(format!("winbridge-pull-{}", std::process::id()));
         let drop_dir = root.join("WinBridge");
-        let outside = std::env::temp_dir().join(format!("winbridge-pull-out-{}", std::process::id()));
+        let outside =
+            std::env::temp_dir().join(format!("winbridge-pull-out-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&outside);
         fs::create_dir_all(&drop_dir).unwrap();
@@ -777,21 +607,5 @@ mod tests {
 
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&outside);
-    }
-
-    #[test]
-    fn builds_valid_utf16_dropfiles_blob() {
-        let p1 = Path::new(r"C:\Users\me\Downloads\WinBridge\a.png");
-        let blob = build_dropfiles_blob(&[p1]);
-        assert_eq!(u32::from_le_bytes(blob[0..4].try_into().unwrap()), 20);
-        assert_eq!(i32::from_le_bytes(blob[16..20].try_into().unwrap()), 1);
-        let units: Vec<u16> = blob[20..]
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
-            .collect();
-        // Ends with double NUL terminator
-        assert_eq!(units[units.len() - 2..], [0, 0]);
-        let decoded = String::from_utf16(&units[..units.len() - 2]).unwrap();
-        assert_eq!(decoded, r"C:\Users\me\Downloads\WinBridge\a.png");
     }
 }

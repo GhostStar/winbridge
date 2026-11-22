@@ -17,12 +17,14 @@ use crate::{
     proto::{control_message::Payload, *},
     win32::{self, files::FileReceiver},
 };
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, ensure, Context, Result};
 use tokio::sync::{mpsc, Semaphore};
 
 /// Host-initiated pull transfer IDs live in the high-bit namespace so they can
 /// never collide with client-initiated push transfer IDs (1, 2, 3, ...).
 const HOST_PULL_TRANSFER_ID_BASE: u64 = 0x8000_0000_0000_0001;
+
+static NEXT_CLIPBOARD_TOKEN: AtomicU64 = AtomicU64::new(1);
 
 struct Subscription {
     info: WindowInfo,
@@ -69,6 +71,7 @@ struct Session {
     config: Arc<Config>,
     codec: i32,
     alpha_video: bool,
+    last_clipboard_request: u64,
     mux: Arc<Mux>,
     windows: HashMap<u64, Subscription>,
     apps: HashMap<String, PathBuf>,
@@ -110,7 +113,6 @@ fn updated(info: WindowInfo, ack: u32) -> Payload {
 }
 
 fn send_pulled_files(
-    replies: &mpsc::Sender<Payload>,
     bulk_replies: &mpsc::Sender<Payload>,
     cancel: &AtomicBool,
     transfer_seq: &AtomicU64,
@@ -119,35 +121,19 @@ fn send_pulled_files(
 ) -> Result<()> {
     let drop_dir = win32::files::default_drop_directory();
     let roots = win32::files::allowed_read_roots(&drop_dir);
-    let is_clipboard = requested.trim() == win32::files::CLIPBOARD_PULL;
-    let (paths, skipped) = if is_clipboard {
-        let raw = win32::files::clipboard_file_paths()?;
-        win32::files::filter_allowed_files(&roots, &raw)?
-    } else {
-        (
-            vec![win32::files::resolve_host_path(
-                &roots, &drop_dir, requested,
-            )?],
-            Vec::new(),
-        )
-    };
-    if !skipped.is_empty() {
-        let _ = replies.try_send(Payload::HostError(HostError {
-            window_id: 0,
-            code: 0,
-            message: format!("剪贴板部分项目未取回：{}", skipped.join("；")),
-        }));
-    }
+    ensure!(
+        requested.trim() != win32::files::CLIPBOARD_PULL,
+        "Clipboard files are not shared; select a file explicitly"
+    );
+    let paths = vec![win32::files::resolve_host_path(
+        &roots, &drop_dir, requested,
+    )?];
     ensure_pull_nonempty(&paths)?;
     for path in paths {
         if cancel.load(Ordering::Acquire) {
             return Ok(());
         }
-        let mut opened = if is_clipboard {
-            win32::files::open_pull_file(&path)?
-        } else {
-            win32::files::open_pull_target(&path)?
-        };
+        let mut opened = win32::files::open_pull_target(&path)?;
         let transfer_id = transfer_seq.fetch_add(1, Ordering::Relaxed);
         bulk_replies
             .blocking_send(Payload::FileTransferStart(FileTransferStart {
@@ -238,8 +224,72 @@ impl Session {
             message: message.into(),
         }))
     }
-    fn start(&mut self, info: WindowInfo, root: u64, options: SubscribeWindow) -> Result<()> {
+    fn clipboard_scope(&self, req: &ClipboardRequest) -> Result<win32::scoped_clipboard::Scope> {
+        ensure!(
+            req.window_id != win32::DESKTOP_WINDOW_ID,
+            "clipboard requires an application window"
+        );
+        let sub = self
+            .windows
+            .get(&req.window_id)
+            .context("clipboard window is not subscribed")?;
+        ensure!(
+            req.token != 0 && req.token == sub.info.clipboard_token,
+            "stale clipboard window token"
+        );
+        ensure!(
+            sub.running.load(Ordering::Acquire),
+            "clipboard window stopped"
+        );
+        Ok(win32::scoped_clipboard::Scope {
+            id: req.window_id,
+            pid: sub.info.pid,
+            started: sub.process_started,
+            allowed: self
+                .windows
+                .values()
+                .filter(|s| s.root == sub.root)
+                .map(|s| (s.info.pid, s.process_started))
+                .collect(),
+        })
+    }
+    async fn clipboard_request(
+        &mut self,
+        req: ClipboardRequest,
+        observer: &win32::Observer,
+    ) -> Result<()> {
+        let mut response = ClipboardResult {
+            request_id: req.request_id,
+            window_id: req.window_id,
+            token: req.token,
+            action: req.action.clone(),
+            ..Default::default()
+        };
+        let result = async {
+            ensure!(
+                req.request_id > self.last_clipboard_request,
+                "replayed clipboard request"
+            );
+            self.last_clipboard_request = req.request_id;
+            let scope = self.clipboard_scope(&req)?;
+            observer.clipboard(req, scope).await
+        }
+        .await;
+        match result {
+            Ok(data) => {
+                response.success = true;
+                response.data = data;
+            }
+            Err(error) => {
+                response.error = error.to_string();
+            }
+        }
+        self.send(Payload::ClipboardResult(response))
+    }
+
+    fn start(&mut self, mut info: WindowInfo, root: u64, options: SubscribeWindow) -> Result<()> {
         let id = info.window_id;
+        info.clipboard_token = NEXT_CLIPBOARD_TOKEN.fetch_add(1, Ordering::Relaxed);
         if self.windows.len() >= 64 && !self.windows.contains_key(&id) {
             return self.error(id, 2, "session window limit reached");
         }
@@ -618,6 +668,14 @@ impl Session {
                 };
             }
             Payload::FilePullReq(req) => {
+                if req.path.trim() == win32::files::CLIPBOARD_PULL {
+                    return self.send(Payload::FileTransferRes(FileTransferResult {
+                        transfer_id: req.request_id,
+                        success: false,
+                        message: "Clipboard files are not shared; select a file explicitly".into(),
+                        ..Default::default()
+                    }));
+                }
                 let request_id = req.request_id;
                 let Ok(permit) = self.pull_slots.clone().try_acquire_owned() else {
                     if request_id != 0 {
@@ -639,7 +697,6 @@ impl Session {
                 tokio::task::spawn_blocking(move || {
                     let _permit = permit;
                     if let Err(e) = send_pulled_files(
-                        &replies,
                         &bulk_replies,
                         &cancel,
                         &transfer_seq,
@@ -686,7 +743,10 @@ impl Session {
             return Ok(());
         }
         match self.injector.execute(&s.info, msg).await {
-            Ok(Some(update)) => {
+            Ok(Some(mut update)) => {
+                if let Some(info) = update.window.as_mut() {
+                    info.clipboard_token = s.info.clipboard_token;
+                }
                 s.ack = update.ack_resize_seq;
                 if let Some(info) = &update.window {
                     s.info = info.clone();
@@ -876,6 +936,7 @@ pub async fn run(
         config,
         codec,
         alpha_video,
+        last_clipboard_request: 0,
         mux,
         windows: HashMap::new(),
         apps: HashMap::new(),
@@ -946,8 +1007,6 @@ pub async fn run(
                     }
                     session.cursor=Some(shape);
                 }
-                Some(win32::Event::Clipboard(sync))=>session.send(Payload::ClipboardSync(sync))?,
-                Some(win32::Event::ClipboardFiles(notice))=>session.send(Payload::ClipboardFilesNotice(notice))?,
                 Some(win32::Event::Error(message))=>session.error(0,0,message)?,
                 None=>anyhow::bail!("desktop observer disconnected"),
             },
@@ -965,9 +1024,8 @@ pub async fn run(
             },
             _=sweep.tick()=>{refresh_at=None;session.refresh().await?;},
             msg=rx.recv()=>match msg {
-                Some(Payload::ClipboardSync(sync))=>{
-                    if let Err(e)=observer.set_clipboard(sync) {session.error(0,0,format!("{e:#}"))?;}
-                }
+                Some(Payload::ClipboardSync(_))=>session.error(0,0,"Global clipboard sync is disabled; update the client")?,
+                Some(Payload::ClipboardRequest(req))=>session.clipboard_request(req, &observer).await?,
                 Some(msg)=>session.request(msg).await?,
                 None=>return Ok(()),
             },

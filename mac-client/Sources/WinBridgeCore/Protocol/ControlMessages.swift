@@ -140,11 +140,12 @@ enum ProtocolCapabilities {
     static let perWindowMute: UInt32 = 1 << 4
     static let wolMac: UInt32 = 1 << 5
     static let quic: UInt32 = 1 << 6
+    static let scopedClipboard: UInt32 = 1 << 9
     static let alphaPNG: UInt32 = 1 << 8
     static let notifications: UInt32 = 1 << 7
 
     static let clientSupported: UInt32 =
-        processAudio | filePull | clipboardFiles | adaptiveVideo | perWindowMute | wolMac | quic | notifications | alphaPNG
+        processAudio | filePull | adaptiveVideo | perWindowMute | wolMac | quic | notifications | alphaPNG | scopedClipboard
 }
 
 struct Hello: Equatable, Sendable {
@@ -305,6 +306,7 @@ struct WindowInfo: Equatable, Sendable {
     var iconPng: Data = Data()
     var isDisabled: Bool = false
     var isModal: Bool = false
+    var clipboardToken: UInt64 = 0
 
     func encode() -> Data {
         var w = ProtoWriter()
@@ -329,6 +331,7 @@ struct WindowInfo: Equatable, Sendable {
         w.writeBytes(field: 19, iconPng)
         w.writeBool(field: 20, isDisabled)
         w.writeBool(field: 21, isModal)
+        w.writeUInt64(field: 22, clipboardToken)
         return w.data
     }
 
@@ -359,6 +362,7 @@ struct WindowInfo: Equatable, Sendable {
             case 19: m.iconPng = try r.readBytes()
             case 20: m.isDisabled = try r.readBool()
             case 21: m.isModal = try r.readBool()
+            case 22: m.clipboardToken = try r.readUInt64()
             default: try r.skip(wireType: wire)
             }
         }
@@ -1450,6 +1454,8 @@ struct ControlMessage: Equatable, Sendable {
         case keyEvent(KeyEvent)                         // 51
         case textInput(TextInput)                       // 52
         case gamepadState(GamepadState)                 // 53
+        case clipboardRequest(ClipboardRequest)
+        case clipboardResult(ClipboardResult)
         case clipboardSync(ClipboardSync)               // 60
         case setAudioConfig(SetAudioConfig)             // 61
         case fileTransferStart(FileTransferStart)       // 62
@@ -1498,6 +1504,8 @@ struct ControlMessage: Equatable, Sendable {
         case .keyEvent(let m): w.writeMessage(field: 51, m.encode(), forceEmit: true)
         case .textInput(let m): w.writeMessage(field: 52, m.encode(), forceEmit: true)
         case .gamepadState(let m): w.writeMessage(field: 53, m.encode(), forceEmit: true)
+        case .clipboardRequest(let m): w.writeMessage(field: 80, m.encode(), forceEmit: true)
+        case .clipboardResult(let m): w.writeMessage(field: 81, m.encode(), forceEmit: true)
         case .clipboardSync(let m): w.writeMessage(field: 60, m.encode(), forceEmit: true)
         case .setAudioConfig(let m): w.writeMessage(field: 61, m.encode(), forceEmit: true)
         case .fileTransferStart(let m): w.writeMessage(field: 62, m.encode(), forceEmit: true)
@@ -1550,6 +1558,8 @@ struct ControlMessage: Equatable, Sendable {
             case 51: payload = .keyEvent(try KeyEvent.decode(from: try r.readBytes()))
             case 52: payload = .textInput(try TextInput.decode(from: try r.readBytes()))
             case 53: payload = .gamepadState(try GamepadState.decode(from: try r.readBytes()))
+            case 80: payload = .clipboardRequest(try ClipboardRequest.decode(from: try r.readBytes()))
+            case 81: payload = .clipboardResult(try ClipboardResult.decode(from: try r.readBytes()))
             case 60: payload = .clipboardSync(try ClipboardSync.decode(from: try r.readBytes()))
             case 61: payload = .setAudioConfig(try SetAudioConfig.decode(from: try r.readBytes()))
             case 62: payload = .fileTransferStart(try FileTransferStart.decode(from: try r.readBytes()))
@@ -1573,5 +1583,80 @@ struct ControlMessage: Equatable, Sendable {
             return ControlMessage(seq: seq, timestampUs: ts, payload: .unknown(unknownField))
         }
         throw ProtoError.missingPayload
+    }
+}
+
+struct ClipboardRequest: Equatable, Sendable {
+    var requestId: UInt64 = 0
+    var windowId: UInt64 = 0
+    var token: UInt64 = 0
+    var action: String = ""
+    var data: ClipboardSync? = nil
+    var discard: Bool = false
+    func encode() -> Data {
+        var w = ProtoWriter()
+        w.writeUInt64(field: 1, requestId)
+        w.writeUInt64(field: 2, windowId)
+        w.writeUInt64(field: 3, token)
+        w.writeString(field: 4, action)
+        if let data { w.writeMessage(field: 5, data.encode(), forceEmit: true) }
+        w.writeBool(field: 6, discard)
+        return w.data
+    }
+    static func decode(from data: Data) throws -> ClipboardRequest {
+        var r = ProtoReader(data: data)
+        var m = ClipboardRequest()
+        while !r.isAtEnd {
+            let (field, wire) = try r.readTag()
+            switch field {
+            case 1: m.requestId = try r.readUInt64()
+            case 2: m.windowId = try r.readUInt64()
+            case 3: m.token = try r.readUInt64()
+            case 4: m.action = try r.readString()
+            case 5: m.data = try ClipboardSync.decode(from: r.readBytes())
+            case 6: m.discard = try r.readBool()
+            default: try r.skip(wireType: wire)
+            }
+        }
+        return m
+    }
+}
+
+struct ClipboardResult: Equatable, Sendable {
+    var requestId: UInt64 = 0
+    var windowId: UInt64 = 0
+    var token: UInt64 = 0
+    var action: String = ""
+    var success: Bool = false
+    var error: String = ""
+    var data: ClipboardSync? = nil
+    func encode() -> Data {
+        var w = ProtoWriter()
+        w.writeUInt64(field: 1, requestId)
+        w.writeUInt64(field: 2, windowId)
+        w.writeUInt64(field: 3, token)
+        w.writeString(field: 4, action)
+        w.writeBool(field: 5, success)
+        w.writeString(field: 6, error)
+        if let data { w.writeMessage(field: 7, data.encode(), forceEmit: true) }
+        return w.data
+    }
+    static func decode(from data: Data) throws -> ClipboardResult {
+        var r = ProtoReader(data: data)
+        var m = ClipboardResult()
+        while !r.isAtEnd {
+            let (field, wire) = try r.readTag()
+            switch field {
+            case 1: m.requestId = try r.readUInt64()
+            case 2: m.windowId = try r.readUInt64()
+            case 3: m.token = try r.readUInt64()
+            case 4: m.action = try r.readString()
+            case 5: m.success = try r.readBool()
+            case 6: m.error = try r.readString()
+            case 7: m.data = try ClipboardSync.decode(from: r.readBytes())
+            default: try r.skip(wireType: wire)
+            }
+        }
+        return m
     }
 }

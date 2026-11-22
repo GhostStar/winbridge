@@ -1,128 +1,166 @@
 import AppKit
 import Foundation
+import ImageIO
 
-/// Bidirectional macOS NSPasteboard <-> WinBridge ClipboardSync monitor with echo suppression.
+struct ClipboardTarget: Equatable {
+    let windowId: UInt64
+    let token: UInt64
+}
+
+enum ClipboardContentValidation {
+    static let maxPNG = 8 * 1024 * 1024
+    static let maxText = 1024 * 1024
+    static func png(_ data: Data) -> Data? {
+        guard data.count <= 64 * 1024 * 1024,
+              let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let w = (props[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
+              let h = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue,
+              w > 0, h > 0, w <= 16384, h <= 16384, w * h <= 16 * 1024 * 1024,
+              let image = CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldCache: false] as CFDictionary),
+              let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]),
+              png.count <= maxPNG else { return nil }
+        return png
+    }
+    static func text(_ value: String) -> Bool { value.utf8.count <= maxText && !value.contains("\0") }
+}
+
+/// Target-scoped transactions; never watches or exports the local system clipboard.
 @MainActor
 final class ClipboardMonitor {
-    private static let maxWireBytes = 15 * 1024 * 1024
-
-    var isEnabled: Bool = true
-    var onLocalChange: ((ClipboardSync) -> Void)?
-
+    var isEnabled = true { didSet { if oldValue != isEnabled { cancel() } } }
+    var isSupported: () -> Bool = { false }
+    var activeTarget: () -> ClipboardTarget? = { nil }
+    var onRequest: ((ClipboardRequest) -> Void)?
+    var onStatus: ((String) -> Void)?
+    private let board: NSPasteboard
     private var timer: Timer?
-    private var lastChangeCount: Int = NSPasteboard.general.changeCount
-    private var localSeq: UInt64 = 1
-    private var lastRemoteChangeId: UInt64?
-    private var lastContentHash: UInt64?
+    private var nextID: UInt64 = 0
+    private var generation: UInt64 = 0
+    private var baseline: ClipboardTarget?
+    private struct Pending {
+        let request: ClipboardRequest
+        let changeCount: Int
+        let generation: UInt64
+        let deadline: Date
+    }
+    private var pending: Pending?
+    private struct FileTicket {
+        var changeCount: Int
+        let generation: UInt64
+        let deadline: Date
+    }
+    private var files: [UInt64: FileTicket] = [:]
+
+    init(board: NSPasteboard = .general) { self.board = board }
 
     func start() {
         stop()
-        lastChangeCount = NSPasteboard.general.changeCount
-        timer = Timer.scheduledTimer(withTimeInterval: 0.35, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.poll()
+        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.poll() }
+        }
+    }
+    func stop() { timer?.invalidate(); timer = nil; cancel() }
+    func cancel() {
+        generation &+= 1
+        pending = nil
+        baseline = nil
+        files.removeAll()
+    }
+    func cancel(windowId: UInt64) {
+        if baseline?.windowId == windowId || pending?.request.windowId == windowId {
+            generation &+= 1; pending = nil; baseline = nil
+        }
+    }
+    func poll() {
+        guard isEnabled, isSupported(), let target = activeTarget(), target.token != 0 else {
+            if baseline != nil || pending != nil { cancel() }
+            return
+        }
+        if (pending?.deadline ?? .distantFuture) < Date() { pending = nil; baseline = nil }
+        if let pending, pending.request.windowId == target.windowId && pending.request.token == target.token { return }
+        if baseline != target { pending = nil }
+        let discard = baseline != target
+        baseline = target
+        send(action: "poll", target: target, discard: discard, content: nil)
+    }
+    func perform(_ action: String, windowId: UInt64) {
+        guard isEnabled else { onStatus?("剪贴板同步已关闭 / Clipboard is disabled"); return }
+        guard isSupported() else { onStatus?("请更新 Windows 主机以使用安全剪贴板 / Update the host for scoped clipboard"); return }
+        guard ["copy", "cut", "paste"].contains(action), let target = activeTarget(),
+              target.windowId == windowId, target.token != 0 else { return }
+        var content: ClipboardSync.Content?
+        if action == "paste" {
+            guard board.types?.contains(.fileURL) != true else {
+                onStatus?("不通过剪贴板传输文件，请显式选择文件 / Select files explicitly"); return
+            }
+            if let data = board.data(forType: .png) ?? board.data(forType: .tiff) {
+                guard let normalized = ClipboardContentValidation.png(data) else {
+                    onStatus?("图片无效或超过限制 / Invalid or oversized image"); return
+                }
+                content = .imagePng(normalized)
+            } else if let text = board.string(forType: .string), ClipboardContentValidation.text(text) {
+                content = .textUtf8(text)
+            } else {
+                onStatus?("剪贴板没有可用文本或图片 / No supported clipboard content"); return
             }
         }
+        baseline = target
+        send(action: action, target: target, discard: false, content: content)
     }
-
-    func stop() {
-        timer?.invalidate()
-        timer = nil
+    private func send(action: String, target: ClipboardTarget, discard: Bool, content: ClipboardSync.Content?) {
+        nextID &+= 1
+        let request = ClipboardRequest(requestId: nextID, windowId: target.windowId, token: target.token,
+            action: action, data: content.map { ClipboardSync(content: $0) }, discard: discard)
+        pending = Pending(request: request, changeCount: board.changeCount, generation: generation,
+            deadline: Date().addingTimeInterval(3))
+        onRequest?(request)
     }
-
-    func applyRemote(_ sync: ClipboardSync) {
-        guard isEnabled, let content = sync.content else { return }
-        if sync.changeId != 0 && sync.changeId == lastRemoteChangeId {
+    func receive(_ result: ClipboardResult) {
+        guard let saved = pending, saved.request.requestId == result.requestId else { return }
+        pending = nil
+        guard isEnabled, isSupported(), saved.generation == generation, saved.deadline >= Date(),
+              result.windowId == saved.request.windowId, result.token == saved.request.token,
+              result.action == saved.request.action,
+              activeTarget() == ClipboardTarget(windowId: result.windowId, token: result.token) else { return }
+        guard result.success else {
+            baseline = nil
+            if result.action != "poll" { onStatus?(result.error) }
             return
         }
-        let hash = hashContent(content)
-        if hash == lastContentHash {
-            lastRemoteChangeId = sync.changeId
-            return
+        guard !saved.request.discard, result.action != "paste", let content = result.data?.content else { return }
+        guard board.changeCount == saved.changeCount else {
+            onStatus?("本地剪贴板已变化，保留新内容 / New local clipboard contents preserved"); return
         }
-
-        let pb = NSPasteboard.general
-        pb.clearContents()
+        let item = NSPasteboardItem()
         switch content {
         case .textUtf8(let text):
-            pb.setString(text, forType: .string)
-        case .imagePng(let pngData):
-            pb.setData(pngData, forType: .png)
-            if let img = NSImage(data: pngData), let tiff = img.tiffRepresentation {
-                pb.setData(tiff, forType: .tiff)
-            }
+            guard ClipboardContentValidation.text(text) else { return }
+            item.setString(text, forType: .string)
+        case .imagePng(let data):
+            guard data.count <= ClipboardContentValidation.maxPNG,
+                  let png = ClipboardContentValidation.png(data) else { return }
+            item.setData(png, forType: .png)
+            if let tiff = NSBitmapImageRep(data: png)?.tiffRepresentation { item.setData(tiff, forType: .tiff) }
         }
-
-        lastChangeCount = pb.changeCount
-        lastRemoteChangeId = sync.changeId
-        lastContentHash = hash
+        board.clearContents()
+        board.writeObjects([item])
     }
 
-    /// Publishes received file URLs onto the macOS clipboard so the user can press ⌘V
-    /// directly in Finder or any app, without triggering an outbound clipboard echo.
-    func applyRemoteFiles(_ urls: [URL]) {
-        guard !urls.isEmpty else { return }
-        let pb = NSPasteboard.general
-        pb.clearContents()
-        pb.writeObjects(urls.map { $0 as NSURL })
-        lastChangeCount = pb.changeCount
-        lastContentHash = nil
+    // Explicit file-browser transfers are separate from clipboard polling.
+    func beginFilePublication(_ requestId: UInt64) {
+        files = files.filter { $0.value.deadline >= Date() }
+        guard isEnabled, files.count < 64 else { return }
+        files[requestId] = FileTicket(changeCount: board.changeCount, generation: generation,
+            deadline: Date().addingTimeInterval(600))
     }
-
-    private func poll() {
-        guard isEnabled else { return }
-        let pb = NSPasteboard.general
-        let current = pb.changeCount
-        guard current != lastChangeCount else { return }
-        lastChangeCount = current
-
-        guard let content = readLocalContent(from: pb) else { return }
-        let hash = hashContent(content)
-        if hash == lastContentHash { return }
-        lastContentHash = hash
-
-        let id = localSeq
-        localSeq &+= 1
-        onLocalChange?(ClipboardSync(changeId: id, content: content))
-    }
-
-    private func readLocalContent(from pb: NSPasteboard) -> ClipboardSync.Content? {
-        // Prefer PNG image if present (e.g. screenshots), otherwise TIFF -> PNG, otherwise UTF-8 text.
-        if let png = pb.data(forType: .png), !png.isEmpty, png.count <= Self.maxWireBytes {
-            return .imagePng(png)
-        }
-        if let tiff = pb.data(forType: .tiff),
-           let rep = NSBitmapImageRep(data: tiff),
-           let png = rep.representation(using: .png, properties: [:]),
-           !png.isEmpty,
-           png.count <= Self.maxWireBytes {
-            return .imagePng(png)
-        }
-        if let text = pb.string(forType: .string), text.utf8.count <= Self.maxWireBytes {
-            return .textUtf8(text)
-        }
-        return nil
-    }
-
-    private func hashContent(_ content: ClipboardSync.Content) -> UInt64 {
-        // 64-bit FNV-1a
-        var hash: UInt64 = 14695981039346656037
-        func mix(_ bytes: UnsafeRawBufferPointer) {
-            for b in bytes {
-                hash ^= UInt64(b)
-                hash &*= 1099511628211
-            }
-        }
-        switch content {
-        case .textUtf8(let s):
-            var tag: UInt8 = 1
-            withUnsafeBytes(of: &tag, mix)
-            Data(s.utf8).withUnsafeBytes(mix)
-        case .imagePng(let d):
-            var tag: UInt8 = 2
-            withUnsafeBytes(of: &tag, mix)
-            d.withUnsafeBytes(mix)
-        }
-        return hash
+    @discardableResult func applyRemoteFiles(_ urls: [URL], requestId: UInt64) -> Bool {
+        guard isEnabled, !urls.isEmpty, var ticket = files[requestId], ticket.generation == generation,
+              ticket.deadline >= Date(), ticket.changeCount == board.changeCount else { return false }
+        board.clearContents()
+        let success = board.writeObjects(urls.map { $0 as NSURL })
+        ticket.changeCount = board.changeCount
+        files[requestId] = ticket
+        return success
     }
 }

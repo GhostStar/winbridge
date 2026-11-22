@@ -9,18 +9,19 @@ pub const CAP_ADAPTIVE_VIDEO: u32 = 1 << 3;
 pub const CAP_PER_WINDOW_MUTE: u32 = 1 << 4;
 pub const CAP_WOL_MAC: u32 = 1 << 5;
 pub const CAP_QUIC: u32 = 1 << 6;
+pub const CAP_SCOPED_CLIPBOARD: u32 = 1 << 9;
 pub const CAP_ALPHA_PNG: u32 = 1 << 8;
 pub const CAP_NOTIFICATIONS: u32 = 1 << 7;
 
 pub const HOST_CAPABILITIES: u32 = CAP_PROCESS_AUDIO
     | CAP_FILE_PULL
-    | CAP_CLIPBOARD_FILES
     | CAP_ADAPTIVE_VIDEO
     | CAP_PER_WINDOW_MUTE
     | CAP_WOL_MAC
     | CAP_QUIC
     | CAP_NOTIFICATIONS
-    | CAP_ALPHA_PNG;
+    | CAP_ALPHA_PNG
+    | CAP_SCOPED_CLIPBOARD;
 
 const IF_TYPE_ETHERNET_CSMACD: u32 = 6;
 const IF_TYPE_SOFTWARE_LOOPBACK: u32 = 24;

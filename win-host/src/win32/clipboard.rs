@@ -10,7 +10,8 @@ use windows_sys::Win32::{
 const TEXT: u32 = 13;
 const DIB: u32 = 8;
 const DIBV5: u32 = 17;
-const MAX_WIRE: usize = 16 * 1024 * 1024 - 128;
+const MAX_WIRE: usize = 8 * 1024 * 1024;
+const MAX_TEXT: usize = 1024 * 1024;
 const MAX_BITMAP: usize = 64 * 1024 * 1024;
 fn png_format() -> u32 {
     unsafe { RegisterClipboardFormatW(windows_sys::w!("PNG")) }
@@ -187,8 +188,15 @@ fn png_dib(data: &[u8]) -> Result<Vec<u8>> {
     Ok(dib)
 }
 
-pub(super) fn read(hwnd: HWND) -> Result<Option<ClipboardSync>> {
+pub(super) fn read(
+    hwnd: HWND,
+    scope: &super::scoped_clipboard::Scope,
+) -> Result<Option<ClipboardSync>> {
     let guard = Open::new(hwnd)?;
+    scope.validate()?;
+    if !scope.owns_clipboard() || unsafe { IsClipboardFormatAvailable(15) } != 0 {
+        return Ok(None);
+    }
     let seq = unsafe { GetClipboardSequenceNumber() };
     let image = contents(png_format(), MAX_WIRE)?;
     let bitmap = if image.is_none() {
@@ -200,7 +208,7 @@ pub(super) fn read(hwnd: HWND) -> Result<Option<ClipboardSync>> {
         None
     };
     let text = if image.is_none() && bitmap.is_none() {
-        contents(TEXT, MAX_WIRE * 2)?
+        contents(TEXT, MAX_TEXT * 2 + 2)?
     } else {
         None
     };
@@ -222,8 +230,15 @@ pub(super) fn read(hwnd: HWND) -> Result<Option<ClipboardSync>> {
         return Ok(None);
     };
     let len = match &content {
-        Content::TextUtf8(s) => s.len(),
-        Content::ImagePng(b) => b.len(),
+        Content::TextUtf8(s) => {
+            ensure!(s.len() <= MAX_TEXT, "clipboard text exceeds 1 MiB");
+            s.len()
+        }
+        Content::ImagePng(b) => {
+            ensure!(b.len() <= MAX_WIRE, "clipboard PNG exceeds 8 MiB");
+            png_dib(b)?;
+            b.len()
+        }
     };
     ensure!(
         len <= MAX_WIRE,
@@ -235,11 +250,18 @@ pub(super) fn read(hwnd: HWND) -> Result<Option<ClipboardSync>> {
     }))
 }
 
-pub(super) fn write(hwnd: HWND, message: ClipboardSync) -> Result<u32> {
+pub(super) fn write(
+    hwnd: HWND,
+    message: ClipboardSync,
+    scope: &super::scoped_clipboard::Scope,
+) -> Result<u32> {
     let mut formats = Vec::new();
     match message.content.context("empty clipboard update")? {
         Content::TextUtf8(value) => {
-            ensure!(!value.contains('\0'), "embedded NUL in clipboard text");
+            ensure!(
+                value.len() <= MAX_TEXT && !value.contains('\0'),
+                "invalid or oversized clipboard text"
+            );
             let bytes: Vec<_> = value
                 .encode_utf16()
                 .chain([0])
@@ -248,6 +270,7 @@ pub(super) fn write(hwnd: HWND, message: ClipboardSync) -> Result<u32> {
             formats.push((TEXT, Block::copy(&bytes)?));
         }
         Content::ImagePng(data) => {
+            ensure!(data.len() <= MAX_WIRE, "clipboard PNG exceeds 8 MiB");
             let format = png_format();
             ensure!(format != 0, "PNG clipboard format is unavailable");
             let dib = png_dib(&data)?;
@@ -256,6 +279,7 @@ pub(super) fn write(hwnd: HWND, message: ClipboardSync) -> Result<u32> {
         }
     }
     let guard = Open::new(hwnd)?;
+    scope.validate()?;
     ensure!(unsafe { EmptyClipboard() } != 0, "EmptyClipboard failed");
     for (format, block) in formats {
         block.publish(format)?;
