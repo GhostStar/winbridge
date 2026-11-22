@@ -19,6 +19,7 @@ pub const AUDIO_OPUS: u8 = 11;
 const MAX_AUDIO_QUEUE: usize = 12;
 const KEY: u8 = 1;
 const EOS: u8 = 4;
+const ALPHA_PNG: u8 = 8;
 
 pub(crate) struct Frame {
     pub(crate) id: u64,
@@ -110,6 +111,31 @@ impl Mux {
         key: bool,
         bytes: Vec<u8>,
     ) {
+        self.push_alpha(id, token, codec, size, key, bytes, None);
+    }
+
+    pub fn push_alpha(
+        &self,
+        id: u64,
+        token: &Arc<AtomicBool>,
+        codec: u8,
+        size: (u16, u16),
+        key: bool,
+        mut bytes: Vec<u8>,
+        alpha: Option<Arc<Vec<u8>>>,
+    ) {
+        let has_alpha = alpha.is_some();
+        if let Some(alpha) = alpha {
+            if alpha.len() > 8 * 1024 * 1024 || bytes.len() + alpha.len() + 4 > MAX_MEDIA {
+                token.store(true, Ordering::Release);
+                return;
+            }
+            let mut envelope = Vec::with_capacity(4 + bytes.len() + alpha.len());
+            envelope.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+            envelope.extend_from_slice(&bytes);
+            envelope.extend_from_slice(&alpha);
+            bytes = envelope;
+        }
         let (width, height) = size;
         let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         let Some(slot) = slots.by_id.get_mut(&id) else {
@@ -135,7 +161,7 @@ impl Mux {
             width,
             height,
             codec,
-            flags: if key { KEY } else { 0 },
+            flags: (if key { KEY } else { 0 }) | (if has_alpha { ALPHA_PNG } else { 0 }),
             seq,
             bytes,
         });
@@ -195,7 +221,11 @@ impl Mux {
 
     pub fn backlog(&self, id: u64) -> usize {
         let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
-        slots.by_id.get(&id).map(|slot| slot.queue.len()).unwrap_or(0)
+        slots
+            .by_id
+            .get(&id)
+            .map(|slot| slot.queue.len())
+            .unwrap_or(0)
     }
 
     pub fn reset(&self) {
@@ -350,5 +380,37 @@ mod tests {
             seen[frame.id as usize] += 1;
         }
         assert!(seen[0] > 0 && seen[1] > 0 && seen[2] >= 6);
+    }
+    #[test]
+    fn alpha_is_atomic_with_color_across_drops_and_opaque_frames() {
+        let mux = Mux::default();
+        let force = Arc::new(AtomicBool::new(false));
+        mux.register(1, true, force.clone());
+        mux.push_alpha(
+            1,
+            &force,
+            3,
+            (2, 2),
+            true,
+            vec![9, 8],
+            Some(Arc::new(vec![1, 2, 3])),
+        );
+        mux.push_alpha(
+            1,
+            &force,
+            3,
+            (2, 2),
+            true,
+            vec![7],
+            Some(Arc::new(vec![4, 5])),
+        );
+        let frame = mux.pop().unwrap();
+        assert_eq!(frame.flags, KEY | ALPHA_PNG);
+        assert_eq!(frame.bytes, vec![0, 0, 0, 1, 7, 4, 5]);
+        assert_eq!(frame.header()[25], KEY | ALPHA_PNG);
+        mux.push(1, &force, 3, (2, 2), true, vec![6]);
+        let plain = mux.pop().unwrap();
+        assert_eq!(plain.flags, KEY);
+        assert_eq!(plain.bytes, vec![6]);
     }
 }

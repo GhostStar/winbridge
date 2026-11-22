@@ -147,6 +147,7 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
         remoteView.onGameLockStateChanged = { [weak self] _ in self?.updateWindowTitle() }
 
         updateResizeBehavior()
+        applyTransparency(info.hasAlpha)
 
         decoder.onDecodedFrame = { [weak self] image, w, h in
             DispatchQueue.main.async {
@@ -156,6 +157,7 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
                 if changed {
                     self.updateResizeBehavior()
                 }
+                self.applyTransparency(image.hasAlpha)
                 self.remoteView.display(frame: image)
             }
         }
@@ -210,6 +212,14 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
         guard let window else { return .zero }
         let rectInWin = remoteView.convert(remoteView.currentVideoRect, to: nil)
         return window.convertToScreen(rectInWin)
+    }
+
+    func applyTransparency(_ enabled:Bool) {
+        window?.isOpaque = !enabled
+        window?.backgroundColor = enabled ? .clear : .black
+        // WGC already includes the source shadow in its alpha pixels.
+        window?.hasShadow = !enabled
+        remoteView.setTransparency(enabled)
     }
 
     func updateResizeBehavior() {

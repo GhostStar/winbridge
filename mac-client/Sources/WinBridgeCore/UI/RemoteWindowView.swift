@@ -142,6 +142,10 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
         registerForDraggedTypes([.fileURL])
     }
 
+    func setTransparency(_ enabled:Bool) {
+        layer?.backgroundColor = enabled ? NSColor.clear.cgColor : NSColor.black.cgColor
+    }
+
     private func setupHudOverlay() {
         hudContainer.wantsLayer = true
         hudContainer.layer?.backgroundColor = NSColor(calibratedWhite: 0.06, alpha: 0.72).cgColor

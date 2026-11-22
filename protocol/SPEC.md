@@ -77,7 +77,7 @@ After the `WBRGMED\x01` + 16-byte `session_id` handshake returns `0x00`, Windows
 | `20` | 2 | `u16` | `width` | Frame width in physical pixels (for audio codecs `10`/`11`: sample rate in Hz, e.g. `48000`) |
 | `22` | 2 | `u16` | `height` | Frame height in physical pixels (for audio codecs `10`/`11`: channel count, e.g. `2`) |
 | `24` | 1 | `u8` | `codec` | `1`=H264, `2`=HEVC, `3`=JPEG, `4`=RAW_BGRA, `10`=AUDIO_PCM_S16LE, `11`=AUDIO_OPUS |
-| `25` | 1 | `u8` | `flags` | Bitmask: `0x01`=KEYFRAME, `0x02`=CONFIG_ONLY, `0x04`=END_OF_STREAM |
+| `25` | 1 | `u8` | `flags` | Bitmask: `0x01`=KEYFRAME, `0x02`=CONFIG_ONLY, `0x04`=END_OF_STREAM, `0x08`=ALPHA_PNG |
 | `26` | 2 | `u16` | `frame_seq` | Per-window wrapping frame counter (`0..65535`) |
 | `28` | 4 | `u32` | `payload_len` | Byte length of the following payload (max **64 MiB**) |
 
@@ -164,3 +164,46 @@ After the `WBRGMED\x01` + 16-byte `session_id` handshake returns `0x00`, Windows
   - **Per-window video profiles** (`SetVideoConfig`, field 45): text (≤30 fps), game (host fps cap), or auto, plus optional adaptive bitrate driven by the host media-queue backlog and the client's control-channel RTT (with dynamic `ICodecAPI` bitrate adjustment and cooldown hysteresis). A message with `profile = 0` and zero fps/bitrate only refreshes RTT.
 - **Future (v0.3+)**:
   - Optional **QUIC** transport (`quinn` + `NWProtocolQUIC`) for per-window stream multiplexing without head-of-line blocking on lossy Wi-Fi / WAN links.
+
+
+## Followed application windows and alpha (fork extension)
+
+With `follow_popups=true`, the host follows explicit owner chains, including invisible
+intermediate owners. It also follows a newly visible foreground normal window in the
+subscribed application when there is exactly one eligible root. Windows visible when
+the root was subscribed are excluded. Helper processes require a live, creation-time
+validated parent chain in the same installation directory; names alone never match.
+Automatically followed normal windows are sent as `DIALOG`, with the subscribed owner
+and relative offsets, so the Mac creates a focusable native window rather than a menu
+panel. Real transient menus remain `POPUP`. Disabling tracking, ambiguous roots, and
+unrelated applications never opt into this new association path.
+
+`Hello.capabilities` and `HelloAck.capabilities` bit 8 advertise `ALPHA_PNG`. Only a
+client advertising this bit receives media flag `0x08`. The codec byte is unchanged.
+The payload then contains `u32 big-endian color_length`, `color_length` bytes of the
+usual codec payload, and one lossless **8-bit grayscale PNG** containing alpha. PNG
+width/height must equal the media header. Alpha and color are one queue item; every
+flagged frame is self-contained, including repeated masks after dropped frames.
+The host matches asynchronous encoder output by MFT sample timestamp; it does not
+shift the next mask forward when an encoder skips an input. Missing timestamps are
+rejected for alpha-enabled capture instead of attaching an unverified mask.
+The 64 MiB total payload limit still applies; alpha PNG is limited to 8 MiB and the
+alpha surface to 16,777,216 pixels. No flag means opaque/ordinary codec behavior;
+clients must not retain the previous frame's mask. EOS has no alpha envelope.
+
+Window-mode WGC capture preserves alpha for followed windows, dialogs/popups and
+layered roots. Opaque pixels do not produce a sidecar. Screen-crop capture includes
+the desktop composition and does not carry window alpha. WGC premultiplied color
+components are preserved through the codec; the client replaces alpha, without a
+second RGB multiplication or treating black as transparent. Color compression is
+still lossy under JPEG/H.264/HEVC. Opaque normal windows retain the GPU-only host
+path and normal IOSurface presentation. Eligible windows require GPU readback for
+the alpha plane; masked frames currently use CPU composition on macOS. This is not
+a zero-copy alpha pipeline or a guaranteed high-FPS result.
+
+中文：开启“追踪弹窗”后，新增的前台普通窗口也可跟随同一应用的唯一投射根窗口，
+使用可聚焦的 Mac 标题栏窗口；菜单仍按浮层展示。不会顺带打开投射前已存在的窗口。
+同目录辅助进程还必须通过真实父子关系和创建时间验证，不能只看进程名。
+透明度通过能力位 8 协商，以媒体标志 `0x08` 将颜色码流与灰度 PNG 遮罩封装在同一帧，
+丢帧不会使遮罩错配；不带标志的帧清除旧遮罩。保留黑色内容和半透明边缘，不使用黑色抠图。
+透明窗口当前增加 GPU 回读和 Mac CPU 合成成本；普通不透明主窗口维持原路径。

@@ -28,6 +28,8 @@ struct Subscription {
     info: WindowInfo,
     // Explicit subscriptions own themselves; automatically followed windows belong to a root.
     root: u64,
+    process_started: u64,
+    initial_windows: HashSet<(u64, u32)>,
     options: SubscribeWindow,
     ack: u32,
     running: Arc<AtomicBool>,
@@ -66,6 +68,7 @@ pub(super) struct PendingLaunch {
 struct Session {
     config: Arc<Config>,
     codec: i32,
+    alpha_video: bool,
     mux: Arc<Mux>,
     windows: HashMap<u64, Subscription>,
     apps: HashMap<String, PathBuf>,
@@ -122,7 +125,9 @@ fn send_pulled_files(
         win32::files::filter_allowed_files(&roots, &raw)?
     } else {
         (
-            vec![win32::files::resolve_host_path(&roots, &drop_dir, requested)?],
+            vec![win32::files::resolve_host_path(
+                &roots, &drop_dir, requested,
+            )?],
             Vec::new(),
         )
     };
@@ -163,7 +168,11 @@ fn send_pulled_files(
                 }
                 let n = opened.read(&mut buf)?;
                 let is_last = n == 0 || offset + n as u64 >= opened.total_bytes;
-                let data = if n == 0 { Vec::new() } else { buf[..n].to_vec() };
+                let data = if n == 0 {
+                    Vec::new()
+                } else {
+                    buf[..n].to_vec()
+                };
                 let chunk_offset = offset;
                 offset += n as u64;
                 bulk_replies
@@ -234,6 +243,15 @@ impl Session {
         if self.windows.len() >= 64 && !self.windows.contains_key(&id) {
             return self.error(id, 2, "session window limit reached");
         }
+        let initial_windows = if root == id && options.follow_popups {
+            win32::candidates()?
+                .into_iter()
+                .map(|w| (w.window_id, w.pid))
+                .collect()
+        } else {
+            HashSet::new()
+        };
+        let process_started = win32::processes::started(info.pid).unwrap_or(0);
         let ack = self.windows.get(&id).map_or(0, |s| s.ack);
         let running = Arc::new(AtomicBool::new(true));
         let key = Arc::new(AtomicBool::new(true));
@@ -258,6 +276,8 @@ impl Session {
             2 => true,
             _ => self.config.capture_mode == crate::config::CaptureMode::MonitorCrop,
         };
+        let preserve_alpha =
+            self.alpha_video && !monitor_crop && (root != id || info.kind != 1 || info.has_alpha);
         let notices = self.notices.clone();
         let mux = self.mux.clone();
         self.mux.register(id, info.kind == 3, key.clone());
@@ -283,10 +303,13 @@ impl Session {
                     codec,
                     cursor,
                     monitor_crop,
+                    preserve_alpha,
                     &alive,
                     &force,
                     move || mux_backlog.backlog(id),
-                    |w, h, k, data| mux.push(id, &force, codec as u8, (w, h), k, data),
+                    |w, h, k, data, alpha| {
+                        mux.push_alpha(id, &force, codec as u8, (w, h), k, data, alpha)
+                    },
                     |code, msg| report(code, msg, false),
                 );
                 if alive.load(Ordering::Acquire) {
@@ -309,6 +332,8 @@ impl Session {
             Subscription {
                 info: info.clone(),
                 root,
+                process_started,
+                initial_windows,
                 options,
                 ack,
                 running,
@@ -550,18 +575,20 @@ impl Session {
                 })
                 .await?;
                 return match listed {
-                    Ok((path, entries)) => self.send(Payload::ListHostFilesRes(ListHostFilesResponse {
-                        path,
-                        entries: entries
-                            .into_iter()
-                            .map(|e| HostFileEntry {
-                                name: e.name,
-                                size_bytes: e.size_bytes,
-                                is_dir: e.is_dir,
-                            })
-                            .collect(),
-                        error: String::new(),
-                    })),
+                    Ok((path, entries)) => {
+                        self.send(Payload::ListHostFilesRes(ListHostFilesResponse {
+                            path,
+                            entries: entries
+                                .into_iter()
+                                .map(|e| HostFileEntry {
+                                    name: e.name,
+                                    size_bytes: e.size_bytes,
+                                    is_dir: e.is_dir,
+                                })
+                                .collect(),
+                            error: String::new(),
+                        }))
+                    }
                     Err(e) => self.send(Payload::ListHostFilesRes(ListHostFilesResponse {
                         path: requested,
                         entries: Vec::new(),
@@ -746,9 +773,7 @@ impl Session {
                 requested_rate,
             );
             sub.rates.fps.store(fps, Ordering::Release);
-            sub.rates
-                .base_bitrate_kbps
-                .store(rate, Ordering::Release);
+            sub.rates.base_bitrate_kbps.store(rate, Ordering::Release);
             sub.rates.generation.fetch_add(1, Ordering::Release);
         }
         Ok(())
@@ -818,6 +843,7 @@ impl Session {
 pub async fn run(
     config: Arc<Config>,
     codec: i32,
+    alpha_video: bool,
     mux: Arc<Mux>,
     mut rx: mpsc::Receiver<Payload>,
     replies: mpsc::Sender<Payload>,
@@ -828,6 +854,7 @@ pub async fn run(
     let mut session = Session {
         config,
         codec,
+        alpha_video,
         mux,
         windows: HashMap::new(),
         apps: HashMap::new(),

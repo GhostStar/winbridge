@@ -15,6 +15,7 @@ enum WireConstants {
 
 struct MediaFrameFlags: OptionSet, Equatable, Sendable {
     let rawValue: UInt8
+    static let alphaPNG = MediaFrameFlags(rawValue: 0x08)
     static let keyframe   = MediaFrameFlags(rawValue: 0x01)
     static let configOnly = MediaFrameFlags(rawValue: 0x02)
     static let endOfStream = MediaFrameFlags(rawValue: 0x04)

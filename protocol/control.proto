@@ -196,6 +196,7 @@ message Hello {
   // Client application version string (e.g. "0.3.0") for mismatch diagnostics.
   string app_version = 6;
   // Bitmask of optional protocol capabilities supported by client.
+  // Bit 8 = ALPHA_PNG: accept the atomic color + alpha media envelope (SPEC.md).
   uint32 capabilities = 7;
 }
 

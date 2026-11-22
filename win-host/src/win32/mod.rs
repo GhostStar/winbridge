@@ -8,6 +8,7 @@ pub use event_hook::{Event, Observer};
 pub mod files;
 mod image;
 pub mod notifications;
+pub(crate) mod processes;
 pub mod tray;
 mod window;
 mod zip_pack;
@@ -15,7 +16,7 @@ pub use window::{
     candidates, foreground_id, info, list, primary_desktop_info, restore_if_minimized,
     DESKTOP_WINDOW_ID,
 };
-pub(crate) use window::{checked_hwnd, fast_bounds, resize, FastWindowBounds};
+pub(crate) use window::{checked_hwnd, fast_bounds, owner_links, resize, FastWindowBounds};
 
 pub fn init_dpi() {
     use windows_sys::Win32::UI::HiDpi::*;

@@ -1,3 +1,4 @@
+mod alpha;
 mod d3d11;
 mod wgc;
 
@@ -18,6 +19,7 @@ struct Reader {
     width: u16,
     height: u16,
     texture: Option<ID3D11Texture2D>,
+    readback: Option<ID3D11Texture2D>,
 }
 
 impl Reader {
@@ -28,6 +30,7 @@ impl Reader {
             width: 0,
             height: 0,
             texture: None,
+            readback: None,
         })
     }
 
@@ -50,6 +53,7 @@ impl Reader {
         }
         if self.width != w || self.height != h {
             self.texture = Some(self.capture.gpu.texture(w, h, self.staging)?);
+            self.readback = None;
             self.width = w;
             self.height = h;
         }
@@ -60,12 +64,21 @@ impl Reader {
         Ok(true)
     }
 
-    fn pixels(&self) -> Result<Vec<u8>> {
-        self.capture.gpu.read(
-            self.texture.as_ref().context("no capture available")?,
-            self.width,
-            self.height,
-        )
+    fn pixels(&mut self) -> Result<Vec<u8>> {
+        let texture = self.texture.as_ref().context("no capture available")?;
+        if self.staging {
+            return self.capture.gpu.read(texture, self.width, self.height);
+        }
+        // Encoder textures are DEFAULT usage, never CPU-mappable. Allocate one
+        // separate staging texture only for windows that need an alpha sidecar.
+        if self.readback.is_none() {
+            self.readback = Some(self.capture.gpu.texture(self.width, self.height, true)?);
+        }
+        let staging = self.readback.as_ref().unwrap();
+        unsafe {
+            self.capture.gpu.ctx.CopyResource(staging, texture);
+        }
+        self.capture.gpu.read(staging, self.width, self.height)
     }
 }
 
@@ -150,10 +163,11 @@ pub fn stream(
     codec: i32,
     cursor: bool,
     monitor_crop: bool,
+    preserve_alpha: bool,
     running: &AtomicBool,
     keyframe: &AtomicBool,
     backlog: impl Fn() -> usize,
-    mut emit: impl FnMut(u16, u16, bool, Vec<u8>),
+    mut emit: impl FnMut(u16, u16, bool, Vec<u8>, Option<std::sync::Arc<Vec<u8>>>),
     mut report: impl FnMut(i32, String),
 ) -> Result<()> {
     let _apt = wgc::Apartment::new()?;
@@ -186,11 +200,12 @@ pub fn stream(
     let mut samples = 0;
     // Baseline H.264 has no picture reordering. Match async output to its capture
     // time so the diagnostic includes time spent waiting inside the encoder.
-    let mut pending_capture = VecDeque::<Instant>::new();
-    let mut deliver = |w, h, key, bytes, captured: Instant| {
+    let mut pending_capture = VecDeque::<(i64, Instant, Option<std::sync::Arc<Vec<u8>>>)>::new();
+    let mut alpha_mask = alpha::Mask::default();
+    let mut deliver = |w, h, key, bytes, captured: Instant, alpha| {
         measured += captured.elapsed();
         samples += 1;
-        emit(w, h, key, bytes);
+        emit(w, h, key, bytes, alpha);
         if samples == 300 {
             tracing::debug!(
                 window_id = id,
@@ -270,8 +285,16 @@ pub fn stream(
                 .and_then(|cap| cap.recv_timeout(Duration::from_millis(60)))
             {
                 let frame_start = Instant::now();
-                let w = if mf_codec.is_some() { raw_w & !1 } else { raw_w };
-                let h = if mf_codec.is_some() { raw_h & !1 } else { raw_h };
+                let w = if mf_codec.is_some() {
+                    raw_w & !1
+                } else {
+                    raw_w
+                };
+                let h = if mf_codec.is_some() {
+                    raw_h & !1
+                } else {
+                    raw_h
+                };
                 if w >= 2 && h >= 2 {
                     let pixels = if w == raw_w && h == raw_h {
                         raw_pixels
@@ -308,9 +331,7 @@ pub fn stream(
                                 0,
                             );
                         }
-                        let resized = video_enc
-                            .as_ref()
-                            .is_none_or(|(dims, _)| *dims != (w, h));
+                        let resized = video_enc.as_ref().is_none_or(|(dims, _)| *dims != (w, h));
                         if resized {
                             drop(video_enc.take());
                             pending_capture.clear();
@@ -323,7 +344,9 @@ pub fn stream(
                                 applied_fps.min(30),
                                 applied_rate,
                             )
-                            .context("encoder: cannot initialize video encoder for secure desktop")?;
+                            .context(
+                                "encoder: cannot initialize video encoder for secure desktop",
+                            )?;
                             video_enc = Some(((w, h), enc));
                             last_rebuild_rate = applied_rate;
                         }
@@ -332,15 +355,14 @@ pub fn stream(
                             pending_capture.len() < 64,
                             "encoder: video MFT has stopped returning frames"
                         );
-                        pending_capture.push_back(frame_start);
-                        for (key, data) in enc
+                        pending_capture.push_back((enc.next_timestamp(), frame_start, None));
+                        for (key, data, timestamp) in enc
                             .encode(tex, force || resized)
                             .context("encoder: secure desktop encode failed")?
                         {
-                            let captured = pending_capture
-                                .pop_front()
-                                .unwrap_or(frame_start);
-                            deliver(w, h, key, data, captured);
+                            let (captured, alpha) =
+                                take_capture(&mut pending_capture, timestamp, false)?;
+                            deliver(w, h, key, data, captured, alpha);
                         }
                     } else {
                         let payload = if codec == 3 {
@@ -352,7 +374,7 @@ pub fn stream(
                         } else {
                             pixels
                         };
-                        deliver(w, h, true, payload, frame_start);
+                        deliver(w, h, true, payload, frame_start, None);
                     }
                 }
             }
@@ -398,14 +420,13 @@ pub fn stream(
         let now = Instant::now();
         if !fresh {
             if let Some(((w, h), encoder)) = video_enc.as_mut() {
-                for (key, data) in encoder
+                for (key, data, timestamp) in encoder
                     .drain_ready()
                     .context("encoder: draining asynchronous video output")?
                 {
-                    let captured = pending_capture
-                        .pop_front()
-                        .context("unexpected video encoder output")?;
-                    deliver(*w, *h, key, data, captured);
+                    let (captured, alpha) =
+                        take_capture(&mut pending_capture, timestamp, preserve_alpha)?;
+                    deliver(*w, *h, key, data, captured, alpha);
                 }
             }
         }
@@ -422,6 +443,10 @@ pub fn stream(
             codec != 4 || u64::from(w) * u64::from(h) * 4 <= 64 * 1024 * 1024,
             "encoder: RAW_BGRA frame exceeds 64 MiB"
         );
+        ensure!(
+            !preserve_alpha || u64::from(w) * u64::from(h) <= 16_777_216,
+            "alpha surface exceeds pixel limit"
+        );
         if let Some(bs_codec) = mf_codec {
             let resized = video_enc
                 .as_ref()
@@ -430,8 +455,16 @@ pub fn stream(
                 drop(video_enc.take());
                 pending_capture.clear();
                 let gpu = &src.capture.gpu;
-                let encoder = VideoEncoder::new(bs_codec, &gpu.device, &gpu.ctx, w, h, applied_fps, applied_rate)
-                    .context("encoder: cannot initialize video encoder")?;
+                let encoder = VideoEncoder::new(
+                    bs_codec,
+                    &gpu.device,
+                    &gpu.ctx,
+                    w,
+                    h,
+                    applied_fps,
+                    applied_rate,
+                )
+                .context("encoder: cannot initialize video encoder")?;
                 video_enc = Some(((w, h), encoder));
                 last_rebuild_rate = applied_rate;
             }
@@ -440,18 +473,27 @@ pub fn stream(
                 pending_capture.len() < 64,
                 "encoder: video MFT has stopped returning frames"
             );
-            pending_capture.push_back(start);
+            let alpha = if preserve_alpha {
+                alpha_mask.encode(&src.pixels()?, w, h)?
+            } else {
+                None
+            };
+            pending_capture.push_back((encoder.next_timestamp(), start, alpha));
             let packets = encoder
                 .encode(src.texture.as_ref().unwrap(), force || resized)
                 .context("encoder: video encoding failed")?;
-            for (key, data) in packets {
-                let captured = pending_capture
-                    .pop_front()
-                    .context("unexpected video encoder output")?;
-                deliver(w, h, key, data, captured);
+            for (key, data, timestamp) in packets {
+                let (captured, alpha) =
+                    take_capture(&mut pending_capture, timestamp, preserve_alpha)?;
+                deliver(w, h, key, data, captured, alpha);
             }
         } else {
             let pixels = src.pixels()?;
+            let alpha = if preserve_alpha {
+                alpha_mask.encode(&pixels, w, h)?
+            } else {
+                None
+            };
             let payload = if codec == 3 {
                 let mut jpeg = Vec::new();
                 jpeg_encoder::Encoder::new(&mut jpeg, 85)
@@ -461,7 +503,7 @@ pub fn stream(
             } else {
                 pixels
             };
-            deliver(w, h, true, payload, start);
+            deliver(w, h, true, payload, start, alpha);
         }
         // Advance on the original clock even after a slow frame. An early keyframe
         // is an out-of-band recovery point and should not delay the next regular frame.
@@ -478,7 +520,15 @@ pub fn supports_h264() -> bool {
     let probe = || -> Result<()> {
         let _apt = wgc::Apartment::new()?;
         let gpu = d3d11::Graphics::new()?;
-        let _encoder = VideoEncoder::new(BitstreamCodec::H264, &gpu.device, &gpu.ctx, 640, 480, 30, 4000)?;
+        let _encoder = VideoEncoder::new(
+            BitstreamCodec::H264,
+            &gpu.device,
+            &gpu.ctx,
+            640,
+            480,
+            30,
+            4000,
+        )?;
         Ok(())
     };
     if let Err(error) = probe() {
@@ -492,7 +542,15 @@ pub fn supports_hevc() -> bool {
     let probe = || -> Result<()> {
         let _apt = wgc::Apartment::new()?;
         let gpu = d3d11::Graphics::new()?;
-        let _encoder = VideoEncoder::new(BitstreamCodec::Hevc, &gpu.device, &gpu.ctx, 640, 480, 30, 4000)?;
+        let _encoder = VideoEncoder::new(
+            BitstreamCodec::Hevc,
+            &gpu.device,
+            &gpu.ctx,
+            640,
+            480,
+            30,
+            4000,
+        )?;
         Ok(())
     };
     if let Err(error) = probe() {
@@ -541,5 +599,49 @@ mod tests {
             &nv12[luma..luma + 2]
         );
         Ok(())
+    }
+}
+
+// Match alpha by the actual MFT sample time, not packet count: a driver may drop
+// an input frame. B-frames are disabled, so older pending captures can be retired.
+fn take_capture<T>(
+    pending: &mut VecDeque<(i64, Instant, T)>,
+    timestamp: Option<i64>,
+    require_time: bool,
+) -> Result<(Instant, T)> {
+    let index = if let Some(timestamp) = timestamp {
+        pending
+            .iter()
+            .position(|(t, _, _)| *t == timestamp)
+            .context("encoder output has unknown sample time")?
+    } else {
+        ensure!(
+            !require_time,
+            "encoder did not preserve sample time required for alpha"
+        );
+        0
+    };
+    for _ in 0..index {
+        pending.pop_front();
+    }
+    let (_, time, alpha) = pending
+        .pop_front()
+        .context("unexpected video encoder output")?;
+    Ok((time, alpha))
+}
+#[cfg(test)]
+mod alpha_timing_tests {
+    use super::*;
+    #[test]
+    fn dropped_encoder_frame_does_not_shift_alpha_to_next_picture() {
+        let now = Instant::now();
+        let mut q = VecDeque::from([(0, now, 1), (10, now, 2), (20, now, 3)]);
+        assert_eq!(take_capture(&mut q, Some(0), true).unwrap().1, 1);
+        assert_eq!(take_capture(&mut q, Some(20), true).unwrap().1, 3);
+        assert!(q.is_empty());
+        q.push_back((30, now, 4));
+        assert!(take_capture(&mut q, None, true).is_err());
+        assert!(take_capture(&mut q, Some(25), true).is_err());
+        assert_eq!(take_capture(&mut q, None, false).unwrap().1, 4);
     }
 }

@@ -11,6 +11,10 @@ enum DecodedImage {
     case pixelBuffer(CVPixelBuffer)
     case cgImage(CGImage)
 
+    var hasAlpha: Bool {
+        if case .cgImage(let image)=self {return [.premultipliedFirst,.premultipliedLast,.first,.last].contains(image.alphaInfo)}
+        return false
+    }
     var layerContents: Any? {
         switch self {
         case .pixelBuffer(let pb):
@@ -84,27 +88,39 @@ final class WindowVideoDecoder {
     private func decodeSync(_ frame: MediaFrame) {
         let w = frame.header.width
         let h = frame.header.height
+        let payload:Data
+        let alpha:FrameAlpha?
+        do {(payload,alpha)=try FrameAlpha.unpack(frame)} catch {
+            waitingForKeyframe=true;onRequestKeyframe?();return
+        }
         switch frame.header.codec {
         case .h264AnnexB:
-            decodeH264(frame.payload, width: w, height: h, flags: frame.header.flags)
+            decodeH264(payload, width: w, height: h, flags: frame.header.flags, alpha:alpha)
         case .hevcAnnexB:
-            decodeHEVC(frame.payload, width: w, height: h, flags: frame.header.flags)
+            decodeHEVC(payload, width: w, height: h, flags: frame.header.flags, alpha:alpha)
         case .jpeg:
-            if let img = decodeJPEG(frame.payload) {
-                onDecodedFrame?(.cgImage(img), w, h)
+            if let img = decodeJPEG(payload) {
+                publish(.cgImage(img),width:w,height:h,alpha:alpha)
             }
         case .rawBgra:
-            if let img = decodeRawBGRA(frame.payload, width: Int(w), height: Int(h)) {
-                onDecodedFrame?(.cgImage(img), w, h)
+            if let img = decodeRawBGRA(payload, width: Int(w), height: Int(h)) {
+                publish(.cgImage(img),width:w,height:h,alpha:alpha)
             }
         default:
             break
         }
     }
 
+    private func publish(_ image:DecodedImage,width:UInt16,height:UInt16,alpha:FrameAlpha?) {
+        if let alpha {
+            guard let result=alpha.composite(image) else {onRequestKeyframe?();return}
+            onDecodedFrame?(.cgImage(result),width,height)
+        } else {onDecodedFrame?(image,width,height)}
+    }
+
     // MARK: - H.264 & HEVC VideoToolbox
 
-    private func decodeH264(_ payload: Data, width: UInt16, height: UInt16, flags: MediaFrameFlags) {
+    private func decodeH264(_ payload: Data, width: UInt16, height: UInt16, flags: MediaFrameFlags, alpha:FrameAlpha?) {
         let au = AnnexBParser.parseH264(payload)
 
         if let sps = au.sps, let pps = au.pps {
@@ -124,10 +140,10 @@ final class WindowVideoDecoder {
             waitingForKeyframe = false
         }
 
-        submitToVideoToolbox(lengthPrefixedPayload: au.avccPayload, width: width, height: height)
+        submitToVideoToolbox(lengthPrefixedPayload: au.avccPayload, width: width, height: height, alpha:alpha)
     }
 
-    private func decodeHEVC(_ payload: Data, width: UInt16, height: UInt16, flags: MediaFrameFlags) {
+    private func decodeHEVC(_ payload: Data, width: UInt16, height: UInt16, flags: MediaFrameFlags, alpha:FrameAlpha?) {
         let au = AnnexBParser.parseHEVC(payload)
 
         if let vps = au.vps, let sps = au.sps, let pps = au.pps {
@@ -147,10 +163,10 @@ final class WindowVideoDecoder {
             waitingForKeyframe = false
         }
 
-        submitToVideoToolbox(lengthPrefixedPayload: au.hvccPayload, width: width, height: height)
+        submitToVideoToolbox(lengthPrefixedPayload: au.hvccPayload, width: width, height: height, alpha:alpha)
     }
 
-    private func submitToVideoToolbox(lengthPrefixedPayload payload: Data, width: UInt16, height: UInt16) {
+    private func submitToVideoToolbox(lengthPrefixedPayload payload: Data, width: UInt16, height: UInt16, alpha:FrameAlpha?) {
         guard let session, let formatDesc, !payload.isEmpty else {
             return
         }
@@ -221,7 +237,7 @@ final class WindowVideoDecoder {
                 return
             }
             if let pixelBuffer = imageBuffer {
-                self.onDecodedFrame?(.pixelBuffer(pixelBuffer), width, height)
+                self.publish(.pixelBuffer(pixelBuffer),width:width,height:height,alpha:alpha)
             }
         }
 

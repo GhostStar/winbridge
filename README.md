@@ -160,3 +160,19 @@ cargo test --locked -- --ignored --test-threads=1
 - 协议 Schema：[protocol/control.proto](protocol/control.proto)
 - 协议规范（TLS / 帧格式 / HEVC / Opus / 文件传输 / 手柄）：[protocol/SPEC.md](protocol/SPEC.md)
 - Windows 端开发设计文档：[win-host/DESIGN.md](win-host/DESIGN.md)
+
+
+## Fork: QQ / WeChat image windows and transparent cards
+
+此分支补充普通顶层图片查看器、隐藏 owner 链和同安装目录辅助进程的自动追踪。
+两端更新后启用 **追踪弹窗**，先投射 QQ／微信，再打开图片。图片查看器以可聚焦、
+带标题栏的 Mac 窗口显示；资料卡与菜单通过逐帧透明遮罩保留透明边缘，黑色图片不会被抠掉。
+透明处理需要“单窗”采集；屏幕裁剪只得到桌面合成结果。已有窗口或归属不明确的窗口仍需手动投射。
+
+This fork follows newly opened image/application windows and verified same-installation
+helper processes, and preserves per-frame transparency for followed cards and menus.
+Update **both** host and client, enable **Follow popups**, project the chat window, then
+open an image. Existing or ambiguously associated windows still require manual selection.
+See [protocol and performance limits](protocol/SPEC.md#followed-application-windows-and-alpha-fork-extension).
+
+[Test coverage / 测试范围](docs/popup-alpha-validation.md).

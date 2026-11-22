@@ -103,11 +103,10 @@ fn negotiate(pref: Codec, offered: &[i32], caps: VideoCaps) -> Option<i32> {
         Codec::Jpeg => &[3],
         Codec::Raw => &[4],
     };
-    offered.iter().copied().find(|c| {
-        supported.contains(c)
-            && (*c != 1 || caps.h264)
-            && (*c != 2 || caps.hevc)
-    })
+    offered
+        .iter()
+        .copied()
+        .find(|c| supported.contains(c) && (*c != 1 || caps.h264) && (*c != 2 || caps.hevc))
 }
 
 pub(super) struct Lease<'a>(&'a Server, Arc<Active>);
@@ -228,6 +227,7 @@ async fn control<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     let Payload::Hello(hello) = timeout(IDLE, read_message(&mut socket)).await?? else {
         bail!("expected Hello")
     };
+    let alpha_video = hello.capabilities & host_info::CAP_ALPHA_PNG != 0;
     let (ack, active) = handshake_control(server, peer_ip, local_ip, hello, false).await;
     let selected = ack.selected_codec;
     let lease = active.map(|active| Lease::new(server, active));
@@ -267,7 +267,7 @@ async fn control<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     tokio::select! {
         res = read => res,
         res = write => res,
-        res = session::run(server.config.clone(), selected, lease.1.mux.clone(), rx, replies, bulk_replies) => res,
+        res = session::run(server.config.clone(), selected, alpha_video, lease.1.mux.clone(), rx, replies, bulk_replies) => res,
     }
 }
 

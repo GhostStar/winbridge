@@ -140,10 +140,11 @@ enum ProtocolCapabilities {
     static let perWindowMute: UInt32 = 1 << 4
     static let wolMac: UInt32 = 1 << 5
     static let quic: UInt32 = 1 << 6
+    static let alphaPNG: UInt32 = 1 << 8
     static let notifications: UInt32 = 1 << 7
 
     static let clientSupported: UInt32 =
-        processAudio | filePull | clipboardFiles | adaptiveVideo | perWindowMute | wolMac | quic | notifications
+        processAudio | filePull | clipboardFiles | adaptiveVideo | perWindowMute | wolMac | quic | notifications | alphaPNG
 }
 
 struct Hello: Equatable, Sendable {

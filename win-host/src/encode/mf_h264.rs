@@ -183,10 +183,7 @@ impl Transform {
                 mt.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base.0 as u32)?;
             }
             BitstreamCodec::Hevc => {
-                let _ = mt.SetUINT32(
-                    &MF_MT_MPEG2_PROFILE,
-                    eAVEncH265VProfile_Main_420_8.0 as u32,
-                );
+                let _ = mt.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH265VProfile_Main_420_8.0 as u32);
             }
         }
         mt.SetUINT32(&MF_MT_AVG_BITRATE, bitrate)?;
@@ -271,7 +268,8 @@ impl VideoEncoder {
                 }
             };
             for activation in list {
-                match unsafe { Transform::open(&activation, codec, hw, device, w, h, fps, bitrate) } {
+                match unsafe { Transform::open(&activation, codec, hw, device, w, h, fps, bitrate) }
+                {
                     Ok(transform) => {
                         tracing::info!(
                             codec = label,
@@ -324,7 +322,7 @@ impl VideoEncoder {
     }
 
     // Synchronous MFTs signal NEED_MORE_INPUT; async MFTs grant an output event per sample.
-    fn output(&mut self) -> Result<Option<(bool, Vec<u8>)>> {
+    fn output(&mut self) -> Result<Option<(bool, Vec<u8>, Option<i64>)>> {
         unsafe {
             for _ in 0..3 {
                 let t = &self.transform;
@@ -373,6 +371,7 @@ impl VideoEncoder {
                 let Some(sample) = sample else {
                     return Ok(None);
                 };
+                let timestamp = sample.GetSampleTime().ok();
                 let buf = sample.ConvertToContiguousBuffer()?;
                 let (mut data, mut len) = (ptr::null_mut(), 0);
                 buf.Lock(&mut data, None, Some(&mut len))?;
@@ -383,7 +382,7 @@ impl VideoEncoder {
                 } else {
                     self.sets
                         .packet(slice::from_raw_parts(data, len as usize))
-                        .map(Some)
+                        .map(|(key, data)| Some((key, data, timestamp)))
                 };
                 buf.Unlock()?;
                 return result;
@@ -392,7 +391,7 @@ impl VideoEncoder {
         }
     }
 
-    pub fn drain_ready(&mut self) -> Result<Vec<(bool, Vec<u8>)>> {
+    pub fn drain_ready(&mut self) -> Result<Vec<(bool, Vec<u8>, Option<i64>)>> {
         let mut frames = Vec::new();
         unsafe {
             if let Some(events) = self.transform.events.clone() {
@@ -433,7 +432,15 @@ impl VideoEncoder {
         }
     }
 
-    pub fn encode(&mut self, tex: &ID3D11Texture2D, force: bool) -> Result<Vec<(bool, Vec<u8>)>> {
+    pub fn next_timestamp(&self) -> i64 {
+        self.time
+    }
+
+    pub fn encode(
+        &mut self,
+        tex: &ID3D11Texture2D,
+        force: bool,
+    ) -> Result<Vec<(bool, Vec<u8>, Option<i64>)>> {
         let mut frames = self.drain_ready()?;
         let deadline = Instant::now() + Duration::from_secs(2);
         while self.transform.events.is_some() && self.transform.credits == 0 {
@@ -587,7 +594,11 @@ mod tests {
             frames.len()
         );
         for index in [0, 8] {
-            let (key, bytes) = &frames[index];
+            let (key, bytes, timestamp) = &frames[index];
+            ensure!(
+                *timestamp == Some(index as i64 * encoder.duration),
+                "encoder timestamp mismatch"
+            );
             ensure!(
                 *key && bytes.starts_with(&[0, 0, 0, 1, 0x67]),
                 "missing SPS on requested IDR"

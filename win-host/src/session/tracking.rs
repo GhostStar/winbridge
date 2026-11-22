@@ -9,15 +9,19 @@ impl Session {
             return Ok(());
         }
         let has_desktop = self.windows.contains_key(&win32::DESKTOP_WINDOW_ID);
-        let (list, front, desktop_info) = tokio::task::spawn_blocking(move || -> Result<_> {
-            let desktop = if has_desktop {
-                win32::primary_desktop_info().ok()
-            } else {
-                None
-            };
-            Ok((win32::candidates()?, win32::foreground_id(), desktop))
-        })
-        .await??;
+        let (list, front, desktop_info, processes, owners) =
+            tokio::task::spawn_blocking(move || -> Result<_> {
+                let desktop = if has_desktop {
+                    win32::primary_desktop_info().ok()
+                } else {
+                    None
+                };
+                let list = win32::candidates()?;
+                let processes = win32::processes::Snapshot::capture(list.iter().map(|w| w.pid));
+                let owners = win32::owner_links(&list);
+                Ok((list, win32::foreground_id(), desktop, processes, owners))
+            })
+            .await??;
 
         if let Some(info) = desktop_info {
             if let Some(sub) = self.windows.get_mut(&win32::DESKTOP_WINDOW_ID) {
@@ -43,6 +47,10 @@ impl Session {
             self.remove(id, true)?;
         }
 
+        for sub in self.windows.values_mut() {
+            sub.initial_windows
+                .retain(|(id, pid)| by_id.get(id).is_some_and(|w| w.pid == *pid));
+        }
         for mut info in list.iter().rev().cloned() {
             let id = info.window_id;
             if let Some(s) = self.windows.get(&id) {
@@ -61,17 +69,17 @@ impl Session {
                 }
                 continue;
             }
-            let Some((owner, explicit_owner)) =
-                resolve_popup_owner(&info, &by_id, &self.windows, front)
+            let Some((owner, _explicit_owner)) =
+                resolve_popup_owner(&info, &owners, &self.windows, front, &processes)
             else {
                 continue;
             };
             if let Some(s) = self.windows.get(&owner) {
                 let root = s.root;
                 let options = s.options;
-                if explicit_owner && info.kind == 1 {
-                    // Treat explicitly owned cross-process webviews/overlays without WS_POPUP
-                    // as owned dialogs so they can receive both pointer and keyboard focus.
+                if info.kind == 1 {
+                    // A newly followed image/app window needs a titled, focusable Mac
+                    // window, rather than the nonactivating menu panel.
                     info.kind = 2;
                 }
                 relative(&mut info, by_id.get(&owner).copied().unwrap_or(&s.info));
@@ -136,11 +144,13 @@ struct SubMeta {
     root: u64,
     pid: u32,
     follow_popups: bool,
+    related_process: bool,
+    new_normal: bool,
 }
 
 fn resolve_popup_owner_meta(
     info: &WindowInfo,
-    by_id: &HashMap<u64, &WindowInfo>,
+    by_id: &HashMap<u64, u64>,
     subs: &HashMap<u64, SubMeta>,
     front: u64,
 ) -> Option<(u64, bool)> {
@@ -151,7 +161,7 @@ fn resolve_popup_owner_meta(
         let mut owner = info.owner_window_id;
         let mut visited = HashSet::new();
         while owner != 0 && !subs.contains_key(&owner) && visited.insert(owner) {
-            owner = by_id.get(&owner).map_or(0, |w| w.owner_window_id);
+            owner = by_id.get(&owner).copied().unwrap_or(0);
         }
         if let Some(s) = subs.get(&owner).filter(|s| s.follow_popups) {
             return Some((s.window_id, true));
@@ -159,20 +169,24 @@ fn resolve_popup_owner_meta(
         return None;
     }
 
-    // 2. Unowned dialogs/popups (owner_window_id == 0): stay strictly within the same PID
-    //    so unrelated applications never attach to a subscribed window.
-    if !matches!(info.kind, 2 | 3) {
+    // 2. Ownerless normal windows are common for QQ/WeChat image viewers.
+    // Follow only a newly appearing foreground window; do not scoop up already
+    // open conversations. Other PIDs require verified process-instance ancestry.
+    if !matches!(info.kind, 1 | 2 | 3) || info.is_minimized {
         return None;
     }
-    let owner = if let Some(focused) = subs
-        .get(&front)
-        .filter(|s| s.pid == info.pid && s.follow_popups)
-    {
+    let eligible = |s: &&SubMeta| {
+        s.follow_popups
+            && (s.pid == info.pid || s.related_process)
+            && (info.kind != 1 || (s.new_normal && front == info.window_id))
+    };
+    let owner = if let Some(focused) = subs.get(&front).filter(eligible) {
         focused.window_id
     } else if front == info.window_id {
         let mut matches = subs
             .values()
-            .filter(|s| s.root == s.window_id && s.pid == info.pid && s.follow_popups);
+            .filter(|s| s.root == s.window_id)
+            .filter(eligible);
         let one = matches.next()?;
         if matches.next().is_some() {
             return None;
@@ -186,9 +200,10 @@ fn resolve_popup_owner_meta(
 
 fn resolve_popup_owner(
     info: &WindowInfo,
-    by_id: &HashMap<u64, &WindowInfo>,
+    by_id: &HashMap<u64, u64>,
     windows: &HashMap<u64, Subscription>,
     front: u64,
+    processes: &win32::processes::Snapshot,
 ) -> Option<(u64, bool)> {
     let subs: HashMap<u64, SubMeta> = windows
         .iter()
@@ -200,6 +215,13 @@ fn resolve_popup_owner(
                     root: s.root,
                     pid: s.info.pid,
                     follow_popups: s.options.follow_popups,
+                    related_process: processes.same_application(
+                        s.info.pid,
+                        s.process_started,
+                        info.pid,
+                    ),
+                    new_normal: !s.initial_windows.contains(&(info.window_id, info.pid))
+                        && processes.same_application(s.info.pid, s.process_started, info.pid),
                 },
             )
         })
@@ -217,6 +239,8 @@ mod tests {
             root: window_id,
             pid,
             follow_popups,
+            related_process: false,
+            new_normal: false,
         }
     }
 
@@ -258,11 +282,14 @@ mod tests {
         };
 
         let mut by_id = HashMap::new();
-        by_id.insert(game.window_id, &game);
-        by_id.insert(webview_popup.window_id, &webview_popup);
-        by_id.insert(hidden_mid.window_id, &hidden_mid);
-        by_id.insert(multi_hop_webview.window_id, &multi_hop_webview);
-        by_id.insert(unrelated_popup.window_id, &unrelated_popup);
+        by_id.insert(game.window_id, game.owner_window_id);
+        by_id.insert(webview_popup.window_id, webview_popup.owner_window_id);
+        by_id.insert(hidden_mid.window_id, hidden_mid.owner_window_id);
+        by_id.insert(
+            multi_hop_webview.window_id,
+            multi_hop_webview.owner_window_id,
+        );
+        by_id.insert(unrelated_popup.window_id, unrelated_popup.owner_window_id);
 
         let mut subs = HashMap::new();
         subs.insert(0x100, sub(0x100, 1000, true));
@@ -287,5 +314,54 @@ mod tests {
             resolve_popup_owner_meta(&webview_popup, &by_id, &subs, 0x100),
             None
         );
+    }
+    #[test]
+    fn new_normal_image_viewer_is_followed_but_existing_or_ambiguous_windows_are_not() {
+        let info = WindowInfo {
+            window_id: 2,
+            pid: 10,
+            kind: 1,
+            ..Default::default()
+        };
+        let by_id = HashMap::new();
+        let mut root = sub(1, 10, true);
+        root.new_normal = true;
+        let mut subs = HashMap::from([(1, root)]);
+        assert_eq!(
+            resolve_popup_owner_meta(&info, &by_id, &subs, 2),
+            Some((1, false))
+        );
+        assert_eq!(resolve_popup_owner_meta(&info, &by_id, &subs, 1), None);
+        subs.get_mut(&1).unwrap().new_normal = false;
+        assert_eq!(resolve_popup_owner_meta(&info, &by_id, &subs, 2), None);
+        subs.get_mut(&1).unwrap().new_normal = true;
+        subs.insert(
+            3,
+            SubMeta {
+                window_id: 3,
+                root: 3,
+                ..root
+            },
+        );
+        assert_eq!(resolve_popup_owner_meta(&info, &by_id, &subs, 2), None);
+        subs.remove(&3);
+        subs.get_mut(&1).unwrap().follow_popups = false;
+        assert_eq!(resolve_popup_owner_meta(&info, &by_id, &subs, 2), None);
+        subs.get_mut(&1).unwrap().follow_popups = true;
+        let helper = WindowInfo {
+            pid: 20,
+            ..info.clone()
+        };
+        assert_eq!(resolve_popup_owner_meta(&helper, &by_id, &subs, 2), None);
+        subs.get_mut(&1).unwrap().related_process = true;
+        assert_eq!(
+            resolve_popup_owner_meta(&helper, &by_id, &subs, 2),
+            Some((1, false))
+        );
+        let minimized = WindowInfo {
+            is_minimized: true,
+            ..info
+        };
+        assert_eq!(resolve_popup_owner_meta(&minimized, &by_id, &subs, 2), None);
     }
 }

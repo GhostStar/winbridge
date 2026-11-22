@@ -9,6 +9,7 @@ pub const CAP_ADAPTIVE_VIDEO: u32 = 1 << 3;
 pub const CAP_PER_WINDOW_MUTE: u32 = 1 << 4;
 pub const CAP_WOL_MAC: u32 = 1 << 5;
 pub const CAP_QUIC: u32 = 1 << 6;
+pub const CAP_ALPHA_PNG: u32 = 1 << 8;
 pub const CAP_NOTIFICATIONS: u32 = 1 << 7;
 
 pub const HOST_CAPABILITIES: u32 = CAP_PROCESS_AUDIO
@@ -18,7 +19,8 @@ pub const HOST_CAPABILITIES: u32 = CAP_PROCESS_AUDIO
     | CAP_PER_WINDOW_MUTE
     | CAP_WOL_MAC
     | CAP_QUIC
-    | CAP_NOTIFICATIONS;
+    | CAP_NOTIFICATIONS
+    | CAP_ALPHA_PNG;
 
 const IF_TYPE_ETHERNET_CSMACD: u32 = 6;
 const IF_TYPE_SOFTWARE_LOOPBACK: u32 = 24;
@@ -195,8 +197,7 @@ pub fn detect_lan_ipv4_and_mac(preferred: Option<IpAddr>) -> (Option<Ipv4Addr>, 
 pub fn percent_encode(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for byte in input.bytes() {
-        let unreserved = byte.is_ascii_alphanumeric()
-            || matches!(byte, b'-' | b'_' | b'.' | b'~');
+        let unreserved = byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~');
         if unreserved {
             out.push(byte as char);
         } else {

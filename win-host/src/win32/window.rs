@@ -261,6 +261,25 @@ pub fn info(id: u64) -> Result<WindowInfo> {
         })
     }
 }
+/// Include invisible intermediate owners for association, without exposing their metadata.
+pub(crate) fn owner_links(windows: &[WindowInfo]) -> HashMap<u64, u64> {
+    let mut links: HashMap<u64, u64> = windows
+        .iter()
+        .map(|w| (w.window_id, w.owner_window_id))
+        .collect();
+    for window in windows {
+        let mut owner = window.owner_window_id;
+        for _ in 0..32 {
+            if owner == 0 || links.contains_key(&owner) {
+                break;
+            }
+            let next = unsafe { GetWindow(owner as usize as HWND, GW_OWNER) } as usize as u64;
+            links.insert(owner, next);
+            owner = next;
+        }
+    }
+    links
+}
 pub fn candidates() -> Result<Vec<WindowInfo>> {
     unsafe extern "system" fn collect(hwnd: HWND, param: LPARAM) -> i32 {
         (*(param as *mut Vec<u64>)).push(hwnd as usize as u64);

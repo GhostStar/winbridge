@@ -1,17 +1,12 @@
 use crate::{
     net::{
-        handshake_control, media::Frame, read_message, tls, write_message, Lease, Mux, Server,
-        IDLE,
+        handshake_control, media::Frame, read_message, tls, write_message, Lease, Mux, Server, IDLE,
     },
     proto::control_message::Payload,
     security, session,
 };
 use anyhow::{bail, Context, Result};
-use std::{
-    collections::HashMap,
-    net::SocketAddr,
-    sync::Arc,
-};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use tokio::{
     sync::{mpsc, watch, Mutex as AsyncMutex, Semaphore},
     time::timeout,
@@ -78,9 +73,7 @@ async fn pump_quic_media(
                     continue;
                 }
 
-                let needs_spawn = writers
-                    .get(&window_id)
-                    .is_none_or(|tx| tx.is_closed());
+                let needs_spawn = writers.get(&window_id).is_none_or(|tx| tx.is_closed());
                 if needs_spawn {
                     let (tx, mut rx) = mpsc::channel::<Frame>(4);
                     let conn_w = video_conn.clone();
@@ -204,10 +197,15 @@ async fn handle_quic_connection(
     let Payload::Hello(hello) = timeout(IDLE, read_message(&mut ctl_recv)).await?? else {
         bail!("expected Hello on QUIC control stream");
     };
+    let alpha_video = hello.capabilities & super::host_info::CAP_ALPHA_PNG != 0;
     let (ack, active) = handshake_control(&server, peer_ip, local_ip, hello, true).await;
     let selected = ack.selected_codec;
     let lease = active.map(|a| Lease::new(&server, a));
-    timeout(IDLE, write_message(&mut ctl_send, 1, Payload::HelloAck(ack))).await??;
+    timeout(
+        IDLE,
+        write_message(&mut ctl_send, 1, Payload::HelloAck(ack)),
+    )
+    .await??;
     let Some(lease) = lease else {
         let _ = ctl_send.finish();
         return Ok(());
@@ -250,7 +248,10 @@ async fn handle_quic_connection(
                 break;
             };
             let mut pref = [0u8; 8];
-            if !matches!(timeout(IDLE, b_recv.read_exact(&mut pref)).await, Ok(Ok(()))) {
+            if !matches!(
+                timeout(IDLE, b_recv.read_exact(&mut pref)).await,
+                Ok(Ok(()))
+            ) {
                 continue;
             }
             if &pref != PREFACE_BULK {
@@ -287,6 +288,7 @@ async fn handle_quic_connection(
     let session_task = session::run(
         server.config.clone(),
         selected,
+        alpha_video,
         lease.active().mux.clone(),
         rx,
         replies,
