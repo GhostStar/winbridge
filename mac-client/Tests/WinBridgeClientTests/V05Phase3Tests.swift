@@ -23,9 +23,9 @@ struct V05Phase3Tests {
         #expect(decodedEnv == envelope)
     }
 
-    @Test("ProtocolCapabilities includes notifications bit and v0.5.0 version")
+    @Test("ProtocolCapabilities includes notifications bit and v0.5.x version")
     func notificationsCapabilityBitAndVersion() {
-        #expect(ProtocolCapabilities.currentAppVersion == "0.5.0")
+        #expect(ProtocolCapabilities.currentAppVersion == "0.5.1")
         #expect(ProtocolCapabilities.notifications == (1 << 7))
         #expect((ProtocolCapabilities.clientSupported & ProtocolCapabilities.notifications) != 0)
     }
