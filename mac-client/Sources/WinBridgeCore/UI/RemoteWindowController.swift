@@ -46,6 +46,7 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
     var onPullClipboardFiles: (() -> Void)?
     var onFilesDropped: ((UInt64, [URL]) -> Void)?
     var cmdMapsToCtrl: () -> Bool = { true }
+    var compatibleTrackpadScroll: () -> Bool = { true }
     var syncWindowResize: () -> Bool = { false }
     var mouseSensitivity: () -> Float = { 1.0 }
     var suppressInactiveHover: () -> Bool = { false }
@@ -141,6 +142,7 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
         super.init(window: window)
         window.delegate = self
 
+        remoteView.compatibleTrackpadScroll = { [weak self] in self?.compatibleTrackpadScroll() ?? true }
         remoteView.cmdMapsToCtrl = { [weak self] in self?.cmdMapsToCtrl() ?? true }
         remoteView.mouseSensitivity = { [weak self] in self?.mouseSensitivity() ?? 1.0 }
         remoteView.suppressInactiveHover = { [weak self] in self?.suppressInactiveHover() ?? false }

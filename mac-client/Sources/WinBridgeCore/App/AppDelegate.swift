@@ -79,6 +79,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    @objc private func toggleTrackpadCompatibilityAction() {
+        state.settings.compatibleTrackpadScroll.toggle()
+        state.onStateChanged?()
+    }
+
+    private func trackpadCompatibilityItem() -> NSMenuItem {
+        let item = NSMenuItem(title: "触摸板兼容滚动 / Compatible trackpad scrolling",
+            action: #selector(toggleTrackpadCompatibilityAction), keyEquivalent: "")
+        item.target = self
+        item.state = state.settings.compatibleTrackpadScroll ? .on : .off
+        item.toolTip = "QQ 等控件使用标准滚轮步进；关闭后使用平滑增量。立即生效。 / Standard wheel steps; turn off for smooth deltas. Applies immediately."
+        return item
+    }
+
     @objc private func showShortcutsAction() {
         if shortcutsController == nil {
             shortcutsController = ShortcutsWindowController(state: state)
@@ -284,6 +298,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let winMenu = windowMenu else { return }
         let sc = state.settings.shortcuts
         winMenu.removeAllItems()
+        winMenu.addItem(trackpadCompatibilityItem())
         let launcherItem = NSMenuItem(
             title: "快速启动 / 切换窗口 (\(sc.quickLauncher.displayString))",
             action: #selector(toggleQuickLauncherAction),
@@ -396,6 +411,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         launcherStatusItem.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: nil)
         menu.addItem(launcherStatusItem)
         menu.addItem(withTitle: "打开管理窗口…", action: #selector(showManager), keyEquivalent: "")
+        menu.addItem(trackpadCompatibilityItem())
         if state.connectionState == .disconnected,
            WakeOnLan.normalizeMac(state.settings.macAddress) != nil {
             let wolItem = NSMenuItem(

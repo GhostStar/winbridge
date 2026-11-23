@@ -73,6 +73,8 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
     let windowId: UInt64
     var onClipboardAction: ((String) -> Void)?
     var cmdMapsToCtrl: () -> Bool = { true }
+    var compatibleTrackpadScroll: () -> Bool = { true }
+    private var scrollMapper = ScrollDeltaMapper()
     var mouseSensitivity: () -> Float = { 1.0 }
     var suppressInactiveHover: () -> Bool = { false }
     var shortcuts: () -> ShortcutBindings = { .defaults }
@@ -711,6 +713,7 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
     // MARK: - Focus & Stuck-Key Safety
 
     func releaseAllHeldKeys() {
+        scrollMapper.reset()
         // Releases must pass even when a modal update has disabled the target.
         for var event in heldMouseButtons.values {
             event.kind = .buttonUp
@@ -742,6 +745,7 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
     }
 
     override func mouseExited(with event: NSEvent) {
+        scrollMapper.reset()
         if gameLockState == .confinedVisible {
             confineCursorIfNeeded()
             return
@@ -815,20 +819,18 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
     }
 
     override func scrollWheel(with event: NSEvent) {
-        let (nx, ny) = normalizedPoint(from: event)
-        let wheelX: Float
-        let wheelY: Float
-        if event.hasPreciseScrollingDeltas {
-            // Trackpad: ~40pt scroll ~= 120 WHEEL_DELTA.
-            // macOS scrollingDeltaY > 0 already matches Windows WHEEL_DELTA > 0 (scroll up).
-            // macOS scrollingDeltaX > 0 moves content right (scroll left), opposite of Windows HWHEEL > 0.
-            let scale: Float = 3.0
-            wheelY = Float(event.scrollingDeltaY) * scale
-            wheelX = -Float(event.scrollingDeltaX) * scale
-        } else {
-            wheelY = Float(event.scrollingDeltaY) * 120.0
-            wheelX = -Float(event.scrollingDeltaX) * 120.0
+        guard inputEnabled, !event.phase.contains(.cancelled),
+              !event.momentumPhase.contains(.cancelled) else { scrollMapper.reset(); return }
+        if gameLockState == .off {
+            guard currentVideoRect.contains(convert(event.locationInWindow, from: nil)) else {
+                scrollMapper.reset(); return
+            }
         }
+        let (nx, ny) = normalizedPoint(from: event)
+        let (wheelX, wheelY) = scrollMapper.map(
+            x: Double(event.scrollingDeltaX), y: Double(event.scrollingDeltaY),
+            precise: event.hasPreciseScrollingDeltas, compatible: compatibleTrackpadScroll(),
+            began: event.phase.contains(.began))
         guard wheelX != 0 || wheelY != 0 else { return }
         let mods = MacKeyToHID.modifierMask(from: event.modifierFlags, cmdMapsToCtrl: cmdMapsToCtrl())
         emitControl(.mouseEvent(MouseEvent(

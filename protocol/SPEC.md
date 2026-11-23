@@ -151,7 +151,7 @@ After the `WBRGMED\x01` + 16-byte `session_id` handshake returns `0x00`, Windows
 3. **Focus Before Input**
    - On `MOUSE_EVENT_KIND_BUTTON_DOWN`, `KeyEvent`, or `TextInput`, if the target `window_id` (or its owner for popups) is not the Windows foreground window, Windows brings it to the foreground first before calling `SendInput`.
 4. **High-Precision Trackpad Scroll**
-   - macOS converts `NSEvent.scrollingDeltaY` / `scrollingDeltaX` (respecting natural scroll direction) into Windows `WHEEL_DELTA` units (`120.0 = 1 notch`). Windows injects fractional deltas directly via `MOUSEEVENTF_WHEEL` / `MOUSEEVENTF_HWHEEL` (supported natively since Windows Precision Touchpad / modern Win10+ apps).
+   - macOS converts `NSEvent.scrollingDeltaY` / `scrollingDeltaX` into Windows wheel units (`120.0 = 1 notch`). Trackpad scaling is 12x; default compatibility mode accumulates complete 120-unit detents per view/axis. Users may select smooth small deltas instead. Windows retains fractional-unit remainder and injects integer values via `MOUSEEVENTF_WHEEL` / `MOUSEEVENTF_HWHEEL`; target applications determine support for partial detents. See [trackpad behavior](../docs/trackpad-scrolling.md).
 
 ---
 

@@ -2086,6 +2086,7 @@ final class AppState {
             syncWindowResize: { [weak self] in self?.settings.syncWindowResize ?? false }
         )
         let procName = info.processName
+        wc.compatibleTrackpadScroll = { [weak self] in self?.settings.compatibleTrackpadScroll ?? true }
         wc.cmdMapsToCtrl = { [weak self] in self?.settings.cmdMapsToCtrl ?? true }
         wc.mouseSensitivity = { [weak self] in self?.mouseSensitivity(forProcess: procName) ?? 1.0 }
         wc.suppressInactiveHover = { [weak self] in self?.settings.suppressInactiveHover ?? false }

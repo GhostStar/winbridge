@@ -159,6 +159,7 @@ struct ClientSettings {
     var forwardNotifications: Bool
     var codecPreference: CodecPreference
     var cmdMapsToCtrl: Bool
+    var compatibleTrackpadScroll: Bool = true
     var syncClipboard: Bool
     var autoPullClipboardFiles: Bool
     var followPopups: Bool
@@ -348,6 +349,7 @@ enum SettingsStore {
             forwardNotifications: forwardNotifications,
             codecPreference: codec,
             cmdMapsToCtrl: cmdToCtrl,
+            compatibleTrackpadScroll: defaults.object(forKey: "winbridge.compatibleTrackpadScroll") as? Bool ?? true,
             syncClipboard: clipboard,
             autoPullClipboardFiles: autoPullClipboardFiles,
             followPopups: popups,
@@ -399,6 +401,7 @@ enum SettingsStore {
         defaults.set(s.suppressInactiveHover, forKey: "winbridge.suppressInactiveHover")
         defaults.set(s.forwardNotifications, forKey: "winbridge.forwardNotifications")
         defaults.set(s.codecPreference.rawValue, forKey: "winbridge.codec")
+        defaults.set(s.compatibleTrackpadScroll, forKey: "winbridge.compatibleTrackpadScroll")
         defaults.set(s.cmdMapsToCtrl, forKey: "winbridge.cmdToCtrl")
         defaults.set(s.syncClipboard, forKey: "winbridge.syncClipboard")
         defaults.set(s.autoPullClipboardFiles, forKey: "winbridge.autoPullClipboardFiles")
