@@ -2190,6 +2190,16 @@ final class AppState {
     }
 
     private func handleHostError(_ err: HostError) {
+        if let blocker = ViewerVisibility.obscuringWindowID(from: err.message) {
+            controllers[err.windowId]?.remoteView.releaseAllHeldKeys()
+            let restored = controllers[blocker]?.isLocallyHidden == true
+            if restored { restoreViewer(blocker) }
+            let message = ViewerVisibility.obscuredMessage(restored: restored)
+            controllers[restored ? blocker : err.windowId]?.showToast(message, style: .progress, autoHideSeconds: 4)
+            setBanner(message, isError: !restored)
+            onStateChanged?()
+            return
+        }
         ClientLogger.shared.error("HostError window=0x\(String(err.windowId, radix: 16)) code=\(err.code) msg=\(err.message)")
         let prefix: String
         switch err.code {

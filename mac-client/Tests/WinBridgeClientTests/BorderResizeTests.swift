@@ -184,3 +184,58 @@ private func note(_ name: Notification.Name, _ window: NSWindow) -> Notification
     #expect(sent.count == 2) // no delayed request after mouse-up
     #expect(!wc.remoteView.localBorderGesture)
 }
+
+@Test func localResizeAxisDoesNotOscillateWithAppKitFeedback() {
+    var horizontal = BorderResizeGesture(option: false, hostAllowed: true,
+        source: NSSize(width: 640, height: 480), displayed: NSSize(width: 640, height: 480),
+        aspect: NSSize(width: 640, height: 480))
+    // AppKit's proposal on the non-dragged axis can lag behind our aspect correction.
+    // Using the last corrected frame would repeatedly switch the driving axis.
+    for w in stride(from: CGFloat(650), through: 900, by: 10) {
+        let fitted = horizontal.proportional(NSSize(width: w, height: 480))
+        #expect(fitted == NSSize(width: w, height: w * 0.75))
+    }
+    var vertical = BorderResizeGesture(option: false, hostAllowed: true,
+        source: NSSize(width: 640, height: 480), displayed: NSSize(width: 640, height: 480),
+        aspect: NSSize(width: 640, height: 480))
+    for h in stride(from: CGFloat(490), through: 700, by: 10) {
+        let fitted = vertical.proportional(NSSize(width: 640, height: h))
+        #expect(abs(fitted.width - h * 4 / 3) < 0.001)
+        #expect(abs(fitted.height - h) < 0.001)
+    }
+}
+
+@MainActor @Test func optionIsCapturedBeforeFirstNativeSizeQueryForBothWindowTypes() throws {
+    _ = NSApplication.shared
+    for kind: WindowKind in [.normal, .dialog] {
+        let wc = RemoteWindowController(info: WindowInfo(windowId: 9, kind: kind,
+            width: 640, height: 480, isResizable: true), owner: nil)
+        defer { wc.forceCloseLocally() }
+        let window = try #require(wc.window)
+        let source = try #require(window as? NativeBorderEventSource)
+        let down = try #require(NSEvent.mouseEvent(with: .leftMouseDown,
+            location: .zero, modifierFlags: [.option], timestamp: 0,
+            windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+        var sent: [ResizeWindow] = []
+        wc.onSendControl = { if case .resizeWindow(let size) = $0 { sent.append(size) } }
+        let wanted = NSSize(width: 800, height: 550) // deliberately not 4:3
+        let frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: wanted)).size
+        source.borderEvent.dispatch(down) {
+            #expect(wc.windowWillResize(window, to: frame) == frame)
+            wc.windowWillStartLiveResize(note(NSWindow.willStartLiveResizeNotification, window))
+            window.setContentSize(wanted)
+        }
+        #expect(source.borderEvent.modifiers == nil)
+        wc.windowDidEndLiveResize(note(NSWindow.didEndLiveResizeNotification, window))
+        #expect(sent.last?.width == 800 && sent.last?.height == 550)
+    }
+}
+
+@MainActor @Test func programmaticResizeDoesNotEnterAspectFeedback() throws {
+    _ = NSApplication.shared
+    let wc = controller()
+    defer { wc.forceCloseLocally() }
+    let window = try #require(wc.window)
+    let frame = NSSize(width: 715, height: 543)
+    #expect(wc.windowWillResize(window, to: frame) == frame)
+}

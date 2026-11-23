@@ -149,3 +149,11 @@ import Testing
     #expect(independent.usesIndependentLayout)
     #expect(!panelInfo.usesIndependentLayout)
 }
+
+@Test func occlusionIdentityOnlyAcceptsExactHostRejection() {
+    #expect(ViewerVisibility.obscuringWindowID(from: "TARGET_OBSCURED blocker=123") == 123)
+    #expect(ViewerVisibility.obscuringWindowID(from: "TARGET_OBSCURED blocker=0") == 0)
+    for invalid in ["other error", "TARGET_OBSCURED blocker=-1", "TARGET_OBSCURED blocker=12 other", "TARGET_OBSCURED blocker=18446744073709551616"] {
+        #expect(ViewerVisibility.obscuringWindowID(from: invalid) == nil)
+    }
+}

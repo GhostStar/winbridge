@@ -13,7 +13,7 @@ use windows_sys::Win32::{
     UI::{Input::KeyboardAndMouse::*, WindowsAndMessaging::*},
 };
 
-fn is_foreground_or_same_process(hwnd: HWND) -> bool {
+fn is_foreground_target(hwnd: HWND) -> bool {
     unsafe {
         let fg = GetForegroundWindow();
         if fg == hwnd {
@@ -22,11 +22,10 @@ fn is_foreground_or_same_process(hwnd: HWND) -> bool {
         if fg.is_null() {
             return false;
         }
-        let mut fg_pid = 0u32;
-        let mut target_pid = 0u32;
-        GetWindowThreadProcessId(fg, &mut fg_pid);
-        GetWindowThreadProcessId(hwnd, &mut target_pid);
-        fg_pid != 0 && fg_pid == target_pid
+        // Ownership / a shared PID is not focus: a hidden-on-Mac sibling may
+        // still be the foreground Windows surface. Only actual child controls
+        // of this target are equivalent.
+        IsChild(hwnd, fg) != 0
     }
 }
 
@@ -35,7 +34,7 @@ fn is_foreground_or_same_process(hwnd: HWND) -> bool {
 /// or UI message-pump glitches in apps such as WeChat).
 fn foreground(hwnd: HWND) -> Result<()> {
     unsafe {
-        if is_foreground_or_same_process(hwnd) {
+        if is_foreground_target(hwnd) {
             return Ok(());
         }
         if IsIconic(hwnd) != 0 {
@@ -52,17 +51,17 @@ fn foreground(hwnd: HWND) -> Result<()> {
         );
         let _ = BringWindowToTop(hwnd);
         let _ = SetForegroundWindow(hwnd);
-        if is_foreground_or_same_process(hwnd) {
+        if is_foreground_target(hwnd) {
             return Ok(());
         }
         for _ in 0..3 {
             std::thread::sleep(std::time::Duration::from_millis(5));
-            if is_foreground_or_same_process(hwnd) {
+            if is_foreground_target(hwnd) {
                 return Ok(());
             }
         }
         ensure!(
-            is_foreground_or_same_process(hwnd),
+            is_foreground_target(hwnd),
             "Windows declined foreground activation"
         );
         Ok(())

@@ -247,7 +247,9 @@ impl DirectExecutor {
         payload: Payload,
     ) -> Result<Option<WindowUpdated>> {
         match win32::desktop::sync_thread_desktop() {
-            Ok(on_secure) => self.0.apply_privileged_inner(target_window_id, payload, on_secure),
+            Ok(on_secure) => self
+                .0
+                .apply_privileged_inner(target_window_id, payload, on_secure),
             Err(err) if err.to_string().contains("170") => {
                 // ERROR_BUSY fallback: execute on a clean one-shot thread with zero desktop affinity.
                 let handle = std::thread::Builder::new()
@@ -313,7 +315,11 @@ impl State {
         }) == AccessStatus::ElevatedOrProtected
     }
 
-    fn resolve_pointer_rect(&mut self, target: FastWindowBounds, ev: &MouseEvent) -> (i32, i32, u32, u32) {
+    fn resolve_pointer_rect(
+        &mut self,
+        target: FastWindowBounds,
+        ev: &MouseEvent,
+    ) -> (i32, i32, u32, u32) {
         if let Some(anchor) = self.drag_anchor {
             if anchor.window_id != target.window_id {
                 self.drag_anchor = None;
@@ -359,7 +365,12 @@ impl State {
         Ok(events)
     }
 
-    fn mouse(&mut self, target: FastWindowBounds, ev: MouseEvent, on_secure_desktop: bool) -> Result<()> {
+    fn mouse(
+        &mut self,
+        target: FastWindowBounds,
+        ev: MouseEvent,
+        on_secure_desktop: bool,
+    ) -> Result<()> {
         unsafe {
             // Pure relative pointer movement (3D game Mouse Lock mode): inject raw relative
             // MOUSEEVENTF_MOVE (without ABSOLUTE/VIRTUALDESK) with sub-pixel accumulation.
@@ -462,6 +473,37 @@ impl State {
                 let (map_x, map_y, map_w, map_h) = self.resolve_pointer_rect(target, &ev);
                 let px = screen_pixel_axis(map_x, map_w, ev.norm_x)?;
                 let py = screen_pixel_axis(map_y, map_h, ev.norm_y)?;
+                // Never let a global SendInput click/wheel land on another
+                // top-level HWND, including another window of the same process.
+                // A left drag already captured by this target may leave its rect.
+                let continuing_drag = self.buttons.contains(&1)
+                    && self
+                        .drag_anchor
+                        .is_some_and(|a| a.window_id == target.window_id)
+                    && matches!(ev.kind, 1 | 3);
+                if target.window_id != win32::DESKTOP_WINDOW_ID && !continuing_drag {
+                    let expected = win32::checked_hwnd(target.window_id)?;
+                    let hit = WindowFromPoint(POINT { x: px, y: py });
+                    if hit != expected && (hit.is_null() || IsChild(expected, hit) == 0) {
+                        self.drag_anchor = None;
+                        if ev.kind == 3 {
+                            // Releases must not warp onto the occluding surface.
+                            if self.buttons.remove(&ev.button) {
+                                send(&[button(ev.button, false)?])?;
+                            }
+                            return Ok(());
+                        }
+                        if ev.kind == 1 {
+                            return Ok(());
+                        } // silent hover rejection
+                        let root = if hit.is_null() {
+                            hit
+                        } else {
+                            GetAncestor(hit, GA_ROOT)
+                        };
+                        bail!("TARGET_OBSCURED blocker={}", root as usize as u64);
+                    }
+                }
                 let mut cur: POINT = mem::zeroed();
                 if GetCursorPos(&mut cur) == 0 || cur.x != px || cur.y != py {
                     let _ = SetCursorPos(px, py);
@@ -498,7 +540,11 @@ impl State {
         }
     }
 
-    fn apply_desktop(&mut self, payload: Payload, on_secure_desktop: bool) -> Result<Option<WindowUpdated>> {
+    fn apply_desktop(
+        &mut self,
+        payload: Payload,
+        on_secure_desktop: bool,
+    ) -> Result<Option<WindowUpdated>> {
         let desktop = if on_secure_desktop {
             // On Winlogon, primary screen metrics match the captured GDI desktop directly.
             let w = unsafe { GetSystemMetrics(SM_CXSCREEN) }.max(1) as u32;
@@ -559,9 +605,8 @@ impl State {
         let current = win32::fast_bounds(target_window_id)?;
         let hwnd = win32::checked_hwnd(current.window_id)?;
         let focus = || -> Result<()> {
-            let style = unsafe { GetWindowLongW(hwnd, GWL_STYLE) as u32 };
-            let is_popup =
-                current.owner_window_id != 0 && (style & WS_POPUP != 0) && (style & WS_CAPTION != WS_CAPTION);
+            let ex = unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 };
+            let is_popup = current.owner_window_id != 0 && ex & WS_EX_NOACTIVATE != 0;
             let owner = if is_popup {
                 win32::checked_hwnd(current.owner_window_id)?
             } else {
@@ -642,7 +687,9 @@ impl State {
                 self.mouse(current, ev, false)?;
             }
             Payload::KeyEvent(ev) => {
-                focus_best_effort();
+                if ev.is_down {
+                    focus()?;
+                }
                 send(&[key_input(ev.hid_usage, ev.is_down)?])?;
                 if ev.is_down {
                     self.keys.insert(ev.hid_usage);
@@ -651,7 +698,7 @@ impl State {
                 }
             }
             Payload::TextInput(t) => {
-                focus_best_effort();
+                focus()?;
                 text(&t.text)?;
             }
             _ => bail!("unsupported input command"),
@@ -773,11 +820,18 @@ mod tests {
             norm_y: 0.05,
             ..Default::default()
         };
-        assert_eq!(state.resolve_pointer_rect(start, &down), (100, 200, 800, 600));
+        assert_eq!(
+            state.resolve_pointer_rect(start, &down),
+            (100, 200, 800, 600)
+        );
         state.buttons.insert(1);
 
         // Window has moved +120px on Windows while dragging; anchor must hold initial rect.
-        let moved = FastWindowBounds { x: 220, y: 240, ..start };
+        let moved = FastWindowBounds {
+            x: 220,
+            y: 240,
+            ..start
+        };
         let drag = MouseEvent {
             kind: 1,
             button: 0,
@@ -785,7 +839,10 @@ mod tests {
             norm_y: 0.1,
             ..Default::default()
         };
-        assert_eq!(state.resolve_pointer_rect(moved, &drag), (100, 200, 800, 600));
+        assert_eq!(
+            state.resolve_pointer_rect(moved, &drag),
+            (100, 200, 800, 600)
+        );
 
         // Release still maps against the anchor, then clears after mouse-up handling.
         let up = MouseEvent {
@@ -800,6 +857,9 @@ mod tests {
         state.drag_anchor = None;
 
         // Next hover uses the new live window bounds.
-        assert_eq!(state.resolve_pointer_rect(moved, &drag), (220, 240, 800, 600));
+        assert_eq!(
+            state.resolve_pointer_rect(moved, &drag),
+            (220, 240, 800, 600)
+        );
     }
 }

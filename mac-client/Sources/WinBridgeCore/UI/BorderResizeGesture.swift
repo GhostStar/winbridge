@@ -6,9 +6,12 @@ struct BorderResizeGesture {
     let changesHost: Bool
     let sourceAspect: NSSize
     let pixelsPerPoint: NSSize
+    let initialDisplaySize: NSSize
+    private var widthDriven: Bool?
 
     init(option: Bool, hostAllowed: Bool, source: NSSize, displayed: NSSize, aspect: NSSize) {
         changesHost = option && hostAllowed
+        initialDisplaySize = displayed
         sourceAspect = aspect
         pixelsPerPoint = NSSize(width: source.width / max(1, displayed.width),
                                 height: source.height / max(1, displayed.height))
@@ -22,12 +25,17 @@ struct BorderResizeGesture {
         return (dimension(content.width * pixelsPerPoint.width), dimension(content.height * pixelsPerPoint.height))
     }
 
-    static func proportional(_ proposed: NSSize, from current: NSSize, source: NSSize) -> NSSize {
-        guard source.width > 0, source.height > 0 else { return proposed }
-        let ratio = source.width / source.height
-        let widthChange = abs(proposed.width - current.width) / max(1, current.width)
-        let heightChange = abs(proposed.height - current.height) / max(1, current.height)
-        let width = widthChange >= heightChange ? proposed.width : proposed.height * ratio
+    mutating func proportional(_ proposed: NSSize) -> NSSize {
+        guard sourceAspect.width > 0, sourceAspect.height > 0 else { return proposed }
+        let ratio = sourceAspect.width / sourceAspect.height
+        if widthDriven == nil {
+            let dw = abs(proposed.width - initialDisplaySize.width)
+            let dh = abs(proposed.height - initialDisplaySize.height)
+            if dw > 0.01 || dh > 0.01 {
+                widthDriven = dw / max(1, initialDisplaySize.width) >= dh / max(1, initialDisplaySize.height)
+            }
+        }
+        let width = widthDriven != false ? proposed.width : proposed.height * ratio
         let bounded = max(max(160, 100 * ratio), width)
         return NSSize(width: bounded, height: bounded / ratio)
     }
@@ -41,4 +49,21 @@ enum ResizeInteractionText {
         : "Drag a border to scale the local view. Hold Option (⌥) when starting the drag to resize the Windows window. The mode ends on release." }
     static var active: String { chinese ? "调整主机大小" : "Resizing host" }
     static var unavailable: String { chinese ? "此窗口当前不能调整主机大小，已使用本地缩放" : "Host resizing is unavailable for this window; scaling locally" }
+}
+
+// AppKit runs native frame tracking inside sendEvent. Capture the initiating
+// event before that nested loop; resizeFlags/global mouse state may be stale
+// when the first delegate size query arrives. Shared by normal and owned windows.
+@MainActor final class NativeBorderEventContext {
+    private(set) var modifiers: NSEvent.ModifierFlags?
+    func dispatch(_ event: NSEvent, body: () -> Void) {
+        guard event.type == .leftMouseDown else { body(); return }
+        let previous = modifiers
+        modifiers = event.modifierFlags
+        defer { modifiers = previous }
+        body()
+    }
+}
+@MainActor protocol NativeBorderEventSource: AnyObject {
+    var borderEvent: NativeBorderEventContext { get }
 }

@@ -2,6 +2,21 @@ import Foundation
 
 /// Presentation ownership is independent of the host's capture-group root.
 enum ViewerVisibility {
+    static func obscuringWindowID(from message: String) -> UInt64? {
+        guard message.hasPrefix("TARGET_OBSCURED blocker=") else { return nil }
+        return UInt64(message.dropFirst("TARGET_OBSCURED blocker=".count))
+    }
+
+    static func obscuredMessage(restored: Bool) -> String {
+        let chinese = Locale.preferredLanguages.first?.hasPrefix("zh") == true
+        if restored {
+            return chinese ? "弹窗仍在 Windows 上打开，已重新显示；本次操作未执行。"
+                : "The popup is still open on Windows and has been shown again. This input was not sent."
+        }
+        return chinese ? "目标窗口被其他窗口遮挡，本次操作未执行。"
+            : "Another window covers the target. This input was not sent."
+    }
+
     static func parent(of info: WindowInfo) -> UInt64? {
         guard info.kind == .dialog || info.kind == .popup, info.ownerWindowId != 0 else { return nil }
         return info.ownerWindowId

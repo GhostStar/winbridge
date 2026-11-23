@@ -6,7 +6,14 @@ private final class PopupPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
-private final class OwnedPanel: NSPanel {
+private final class ViewerWindow: NSWindow, NativeBorderEventSource {
+    let borderEvent = NativeBorderEventContext()
+    override func sendEvent(_ event: NSEvent) { borderEvent.dispatch(event) { super.sendEvent(event) } }
+}
+
+private final class OwnedPanel: NSPanel, NativeBorderEventSource {
+    let borderEvent = NativeBorderEventContext()
+    override func sendEvent(_ event: NSEvent) { borderEvent.dispatch(event) { super.sendEvent(event) } }
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
 }
@@ -122,7 +129,7 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
             window = win
 
         case .normal, .unspecified:
-            let win = NSWindow(
+            let win = ViewerWindow(
                 contentRect: contentRect,
                 styleMask: [.titled, .closable, .miniaturizable, .resizable],
                 backing: .buffered,
@@ -654,15 +661,21 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
 
     func windowWillStartLiveResize(_ notification: Notification) {
         guard let resizingWindow = notification.object as? NSWindow else { return }
-        beginBorderResize(option: resizingWindow.resizeFlags.contains(.option), pointerDown: NSEvent.pressedMouseButtons & 1 != 0)
+        let flags = (resizingWindow as? NativeBorderEventSource)?.borderEvent.modifiers
+            ?? NSApp.currentEvent?.modifierFlags ?? NSEvent.modifierFlags
+        beginBorderResize(option: flags.contains(.option), pointerDown: true)
     }
 
     func windowWillResize(_ sender: NSWindow, to proposedFrame: NSSize) -> NSSize {
         guard !isApplyingRemoteGeometry, !localChromeResize, info.kind != .popup else { return proposedFrame }
+        if !isLiveResizing, let flags = (sender as? NativeBorderEventSource)?.borderEvent.modifiers {
+            beginBorderResize(option: flags.contains(.option), pointerDown: true)
+        }
+        // Programmatic sizing / AppKit's local zoom must not enter a feedback loop.
+        guard resizeGesture != nil else { return proposedFrame }
         if resizeGesture?.changesHost == true { return proposedFrame }
         let proposed = sender.contentRect(forFrameRect: NSRect(origin: .zero, size: proposedFrame)).size
-        let size = BorderResizeGesture.proportional(proposed, from: sender.contentLayoutRect.size,
-                                                    source: resizeGesture?.sourceAspect ?? activeSourceSize)
+        let size = resizeGesture!.proportional(proposed)
         return sender.frameRect(forContentRect: NSRect(origin: .zero, size: size)).size
     }
 

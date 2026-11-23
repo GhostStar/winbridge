@@ -69,7 +69,39 @@ AppKit window/delegate behavior, tracking-mode timers, scale conversion, panel r
 capability gates and cancellation, alongside Quinn interoperability. Physical border gestures
 and real QQ/WeChat resize constraints remain user acceptance checks.
 
-AppKit supplies the initiating modifier flags through
-[NSWindow.resizeFlags](https://developer.apple.com/documentation/appkit/nswindow/resizeflags)
-and delegates proportional size decisions through
-[windowWillResize](https://developer.apple.com/documentation/appkit/nswindowdelegate/windowwillresize(_:to:)).
+The initiating left-mouse-down event is captured by the native NSWindow/NSPanel
+`sendEvent` override before AppKit enters its nested resize loop. Its modifiers
+are retained across the first `windowWillResize` query, which may precede the
+live-resize notification. Global mouse-button state and `resizeFlags` no longer
+determine whether this already-started native gesture is accepted.
+
+
+## 2026-11-24 correction / 回归修正
+
+Native event routing now captures Option before the first size callback, for both
+normal windows and owned panels. The live-resize notification itself establishes
+that a gesture is running; it does not depend on a later global pressed-button
+snapshot. Local scaling latches its driving width/height axis against the initial
+displayed size. Recomputing it from the previously corrected frame caused the
+axis to oscillate when AppKit proposed the old non-dragged dimension. Programmatic
+size changes outside a border gesture no longer pass through the aspect delegate.
+
+现从 NSWindow／NSPanel 的原始鼠标按下事件捕获 Option，覆盖首次尺寸回调早于
+开始缩放通知的顺序。原生缩放通知不再依赖滞后的全局鼠标按键状态。普通等比缩放
+按初始画面锁定驱动轴，避免使用上一步已修正尺寸反复判断宽／高而抖动；程序触发的
+尺寸更新不再经过手势比例修正。新增回归覆盖连续水平／垂直拖动、两类窗口的
+Option 原生事件上下文和回调顺序，以及程序性尺寸更新。物理拖动仍需用户复测。
+
+
+An opt-in `nativeResizeLiveGestures` harness opens an isolated Mac window and
+records actual UI resize requests when `WINBRIDGE_LIVE_RESIZE_REPORT` is set.
+This run could not complete that extra check: the UI automation tool failed to
+select the test application, sent no border gesture, and the harness timed out
+with zero requests. This is not counted as a passing live-input test. The regular
+callback/event-context tests passed. Actual Mac mouse/trackpad acceptance remains
+pending; Windows native ResizeWindow is checked on the synthetic test surface.
+
+可选 `nativeResizeLiveGestures` 夹具在设置 `WINBRIDGE_LIVE_RESIZE_REPORT` 时打开
+隔离 Mac 窗口并记录真实边框手势。本次额外界面自动化未能选中测试应用，没有发出
+拖动，夹具因零请求超时；不计入实测通过。常规事件上下文／回调回归通过，真实
+Mac 鼠标／触摸板操作仍待验收。Windows 原生尺寸变化另由合成窗口验证。

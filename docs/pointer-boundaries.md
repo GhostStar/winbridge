@@ -50,3 +50,46 @@ Native AppKit tests cover two-window routing, real window-server overlap, all fo
 missing exit notifications, release without warping, re-entry, letterboxing, hidden viewers and
 invalid coordinates. They create and close synthetic windows without clicking user content or
 moving the physical pointer. Physical QQ/WeChat acceptance remains a user verification step.
+
+
+## Hidden Windows popups / Windows 上仍打开的弹窗
+
+A Mac close still hides only the local viewer. The Windows popup may remain above
+its owner. The host previously treated any foreground window from the same PID
+as success and injected global mouse input at screen coordinates without checking
+which HWND received it. It now focuses the exact target (or a genuine child),
+checks the point against that HWND/its child controls, and rejects clicks and
+wheel input on other top-level surfaces. Rejected hover is silent; release
+cleanup remains possible without warping. An already-held left drag retains its
+existing anchor. Game-relative and secure-desktop paths retain their own behavior.
+Keyboard/text input also requires successful target activation instead of sending
+into whichever application happens to be foreground.
+
+`HostError` uses `TARGET_OBSCURED blocker=<decimal HWND>` for this rejection, with
+no title or process details. The Mac only restores a blocker already in its live
+controller map and locally hidden, never creates a new subscription from this ID.
+The failed input is not replayed. A visible message explains the popup is still
+open on Windows. Unknown/untracked blockers show a refusal without revealing or
+controlling them. Both endpoints must be updated for the complete behavior.
+
+Mac 关闭仍只隐藏本地查看窗口，Windows 弹窗可能继续挡住主窗口。旧逻辑把同一
+进程的其他前台窗口也当作聚焦成功，并直接按屏幕坐标注入。现在聚焦必须命中准确
+目标或真正子控件；点击／滚轮遇到其他顶层窗口则拒绝，悬停不刷错误，释放按键
+仍可原地完成。已有左键拖动保留锚点；游戏相对输入和安全桌面保持独立路径。
+键盘／文字也必须成功激活目标后才能注入。
+
+拒绝时仅返回遮挡 HWND，不包含标题或进程详情。Mac 只恢复已订阅、已有控制器且
+本地隐藏的对应窗口，不因错误中新 ID 扩大订阅，不重放被拦截的输入；提示弹窗仍在
+Windows 打开。未知遮挡只提示拒绝，不显示或控制该窗口。完整修复需同时更新两端。
+
+Validation uses synthetic windows on the interactive Windows test desktop: an
+owned same-process popup receives zero clicks/wheel events, the rejected pointer
+does not move, and a real child control remains clickable after hiding the popup.
+No private application was clicked. Mac regression covers error identity parsing
+and retains local-close/no-remote-close checks. Actual QQ/WeChat remains acceptance
+testing; this does not claim atomic exclusion against every desktop race.
+
+验证使用 Windows 交互测试桌面的合成主窗口、同进程附属弹窗和子控件：遮挡弹窗
+收到的点击／滚轮为零、拒绝时鼠标不移动、隐藏弹窗后正常子控件仍可点击；没有
+点击私人应用。Mac 回归验证错误身份解析，并保留本地关闭不远端关闭的检查。
+真实 QQ／微信仍需用户验收。
