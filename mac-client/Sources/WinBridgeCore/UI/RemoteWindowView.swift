@@ -381,13 +381,15 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
     }
 
     override func cursorUpdate(with event: NSEvent) {
-        if gameLockState != .relativeLocked {
+        if gameLockState == .off {
+            (ordinaryPointerEventIsInside(event) ? activeCursor : NSCursor.arrow).set()
+        } else if gameLockState != .relativeLocked {
             activeCursor.set()
         }
     }
 
     override func resetCursorRects() {
-        addCursorRect(bounds, cursor: activeCursor)
+        addCursorRect(currentVideoRect, cursor: activeCursor)
     }
 
     // MARK: - Smart 3D Game Mouse Lock (Auto-switches between 3D Relative & Confined Menu Pointer)
@@ -489,6 +491,7 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
         guard gameLockEnabled,
               let window,
               window.isKeyWindow,
+              event.window === window,
               NSApp.isActive else {
             return event
         }
@@ -699,6 +702,14 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
     func emitControl(_ payload: ControlMessage.Payload) {
         guard inputEnabled, !localBorderGesture else { return }
         if case .mouseEvent(let event) = payload {
+            if !event.isRelative && event.kind != .relativeMove {
+                guard event.normX.isFinite, event.normY.isFinite,
+                      (0...1).contains(event.normX), (0...1).contains(event.normY) else {
+                    releaseHeldMouseButtons()
+                    return
+                }
+            }
+            if event.kind == .buttonUp && heldMouseButtons[event.button] == nil { return }
             if event.kind == .buttonDown { heldMouseButtons[event.button] = event }
             if event.kind == .buttonUp { heldMouseButtons.removeValue(forKey: event.button) }
             if event.kind == .move {
@@ -716,12 +727,7 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
     func releaseAllHeldKeys() {
         scrollMapper.reset()
         // Releases must pass even when a modal update has disabled the target.
-        for var event in heldMouseButtons.values {
-            event.kind = .buttonUp
-            event.modifiers = 0
-            onSendControl?(.mouseEvent(event))
-        }
-        heldMouseButtons.removeAll()
+        releaseHeldMouseButtons()
         let wasEnabled = inputEnabled
         inputEnabled = true
         defer { inputEnabled = wasEnabled }
@@ -736,11 +742,42 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
         clearMarkedText()
     }
 
+    /// Release in place: the host's existing relative-button path does not warp
+    /// the global Windows pointer to this viewer's old position on focus/exit.
+    private func releaseHeldMouseButtons() {
+        let held = Array(heldMouseButtons.values)
+        heldMouseButtons.removeAll()
+        for var event in held {
+            event.kind = .buttonUp
+            event.modifiers = 0
+            event.isRelative = true
+            event.deltaX = 0; event.deltaY = 0
+            onSendControl?(.mouseEvent(event))
+        }
+    }
+
+    private func ordinaryPointerEventIsInside(_ event: NSEvent) -> Bool {
+        guard inputEnabled, !localBorderGesture, !isHiddenOrHasHiddenAncestor,
+              let window, window.isVisible, !window.isMiniaturized,
+              event.window === window else { return false }
+        let point = convert(event.locationInWindow, from: nil)
+        guard point.x.isFinite, point.y.isFinite, currentVideoRect.contains(point) else { return false }
+        // A key window may still receive stale tracking events where another local
+        // window now covers it. Ask the window server which window owns this hit.
+        let screenPoint = window.convertPoint(toScreen: event.locationInWindow)
+        return NSWindow.windowNumber(at: screenPoint, belowWindowWithWindowNumber: 0) == window.windowNumber
+    }
+
+    private func ownsLockedPointerEvent(_ event: NSEvent) -> Bool {
+        guard inputEnabled, !localBorderGesture, let window else { return false }
+        return window.isKeyWindow && event.window === window && NSApp.isActive
+    }
+
     // MARK: - Mouse & Trackpad
 
     override func mouseEntered(with event: NSEvent) {
-        mouseInside = true
-        if gameLockState != .relativeLocked {
+        mouseInside = ordinaryPointerEventIsInside(event)
+        if mouseInside && gameLockState != .relativeLocked {
             activeCursor.set()
         }
     }
@@ -752,6 +789,8 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
             return
         }
         mouseInside = false
+        pinchAccumulator = 0
+        if gameLockState == .off { releaseHeldMouseButtons() }
         if gameLockState != .relativeLocked {
             NSCursor.arrow.set()
         }
@@ -761,9 +800,6 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
         if gameLockState == .relativeLocked {
             sendRelativeMove(event: event)
         } else {
-            if suppressInactiveHover() && window?.isKeyWindow != true {
-                return
-            }
             sendMouse(event: event, kind: .move, button: .unspecified)
         }
     }
@@ -793,7 +829,6 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
     }
 
     override func mouseDown(with event: NSEvent) {
-        window?.makeFirstResponder(self)
         sendMouse(event: event, kind: .buttonDown, button: .left)
     }
 
@@ -802,7 +837,6 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
     }
 
     override func rightMouseDown(with event: NSEvent) {
-        window?.makeFirstResponder(self)
         sendMouse(event: event, kind: .buttonDown, button: .right)
     }
 
@@ -811,7 +845,6 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
     }
 
     override func otherMouseDown(with event: NSEvent) {
-        window?.makeFirstResponder(self)
         sendMouse(event: event, kind: .buttonDown, button: mapOtherButton(event.buttonNumber))
     }
 
@@ -820,13 +853,13 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
     }
 
     override func scrollWheel(with event: NSEvent) {
-        guard inputEnabled, !event.phase.contains(.cancelled),
+        guard inputEnabled, !localBorderGesture, !event.phase.contains(.cancelled),
               !event.momentumPhase.contains(.cancelled) else { scrollMapper.reset(); return }
         if gameLockState == .off {
-            guard currentVideoRect.contains(convert(event.locationInWindow, from: nil)) else {
-                scrollMapper.reset(); return
+            guard ordinaryPointerEventIsInside(event) else {
+                scrollMapper.reset(); releaseHeldMouseButtons(); return
             }
-        }
+        } else if !ownsLockedPointerEvent(event) { return }
         let (nx, ny) = normalizedPoint(from: event)
         let (wheelX, wheelY) = scrollMapper.map(
             x: Double(event.scrollingDeltaX), y: Double(event.scrollingDeltaY),
@@ -849,6 +882,10 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
 
     /// Maps macOS two-finger trackpad pinch-to-zoom to Windows Ctrl+MouseWheel at cursor position.
     override func magnify(with event: NSEvent) {
+        guard gameLockState == .off ? ordinaryPointerEventIsInside(event) : ownsLockedPointerEvent(event) else {
+            pinchAccumulator = 0
+            return
+        }
         if event.phase == .began {
             pinchAccumulator = 0
         }
@@ -903,6 +940,7 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
     }
 
     private func sendRelativeMove(event: NSEvent) {
+        guard ownsLockedPointerEvent(event) else { return }
         if let lockedAt = pointerLockedAt, Date().timeIntervalSince(lockedAt) < 0.035 {
             return
         }
@@ -922,6 +960,21 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
     }
 
     private func sendMouse(event: NSEvent, kind: MouseEventKind, button: MouseButton) {
+        if gameLockState == .off {
+            guard ordinaryPointerEventIsInside(event) else {
+                mouseInside = false
+                releaseHeldMouseButtons()
+                return
+            }
+            mouseInside = true
+            // AppKit continues delivering drag/up to the original view after exit.
+            // Re-entering does not restart a drag that was already released remotely.
+            if kind == .buttonUp || (kind == .move && button != .unspecified) {
+                guard heldMouseButtons[button] != nil else { return }
+            }
+            if kind == .move && button == .unspecified && suppressInactiveHover() && window?.isKeyWindow != true { return }
+        } else if !ownsLockedPointerEvent(event) { return }
+        if kind == .buttonDown { window?.makeFirstResponder(self) }
         let mods = MacKeyToHID.modifierMask(from: event.modifierFlags, cmdMapsToCtrl: cmdMapsToCtrl())
         if gameLockState == .relativeLocked {
             emitControl(.mouseEvent(MouseEvent(
