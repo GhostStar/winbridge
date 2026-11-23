@@ -155,7 +155,15 @@ final class AppState {
             return ClipboardTarget(windowId: wc.windowId, token: wc.info.clipboardToken)
         }
         clipboardMonitor.onStatus = { [weak self] message in
-            self?.setBanner(message, isError: false); self?.onStateChanged?()
+            guard let self else { return }
+            self.setBanner(message, isError: false)
+            // The manager may be behind the app being controlled. Show clipboard
+            // failures where the shortcut was used, including unsupported hosts.
+            if let wc = NSApp.keyWindow?.windowController as? RemoteWindowController,
+               self.controllers[wc.windowId] === wc, !wc.isLocallyHidden {
+                wc.showToast(message, style: .error, autoHideSeconds: 8)
+            }
+            self.onStateChanged?()
         }
         hostDiscovery.onHostsChanged = { [weak self] hosts in
             self?.discoveredHosts = hosts
@@ -891,6 +899,9 @@ final class AppState {
                 } else {
                     tlsNote = " · 明文"
                 }
+                let clipboardNotice = self.settings.syncClipboard
+                    && (ack.capabilities & ProtocolCapabilities.scopedClipboard) == 0
+                    ? " · 剪贴板不可用：请更新并重启 Windows 主机 / Clipboard requires host update and restart" : ""
                 let versionNotice: String
                 if ack.hostVersion.isEmpty
                     || (ack.capabilities & (ProtocolCapabilities.perWindowMute | ProtocolCapabilities.wolMac)) == 0 {
@@ -902,7 +913,7 @@ final class AppState {
                     "Connected to \(ack.hostName) endpoint=\(outcome.connectedHost) fallback=\(outcome.usedFallbackHost) wanOpt=\(self.wanOptimizationActive) transport=\(outcome.transport.rawValue) fellBack=\(outcome.fellBackToTcp) v=\(ack.hostVersion) caps=\(ack.capabilities) mac=\(ack.macAddress) codec=\(ack.selectedCodec.displayName)\(tlsNote)"
                 )
                 self.setBanner(
-                    "已连接到 \(ack.hostName)（\(ack.selectedCodec.displayName)\(transportNote)\(fallbackNote)\(wanNote)\(tlsNote)\(versionNotice)）",
+                    "已连接到 \(ack.hostName)（\(ack.selectedCodec.displayName)\(transportNote)\(fallbackNote)\(wanNote)\(tlsNote)\(versionNotice)\(clipboardNotice)）",
                     isError: false
                 )
                 self.clipboardMonitor.start()
@@ -1326,7 +1337,7 @@ final class AppState {
         if info.windowId == SyntheticWindow.primaryDesktop {
             return "__desktop__"
         }
-        guard info.kind != .popup else { return nil }
+        guard info.usesIndependentLayout else { return nil }
         let proc = info.processName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return proc.isEmpty ? nil : "proc:\(proc)"
     }
@@ -1352,7 +1363,7 @@ final class AppState {
             return false
         }
         let openControllers = controllers.values
-            .filter { $0.info.kind != .popup }
+            .filter { $0.info.usesIndependentLayout }
             .sorted { a, b in
                 let aDesk = a.windowId == SyntheticWindow.primaryDesktop
                 let bDesk = b.windowId == SyntheticWindow.primaryDesktop

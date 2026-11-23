@@ -63,3 +63,33 @@ continue decoding.
 窗口管理回归使用合成窗口，未对真实 QQ／微信账号做操作。关闭／恢复、窗口菜单排除、
 输入释放、主机模态阻断以及根窗口消失后的独立成员保留分别验证；隐藏流量暂停及重连
 保留偏好暂未实现。
+
+## 2026-11-23: owned-panel layout isolation / 附属弹窗布局隔离
+
+A WeChat sticker panel was enlarged and placed over the parent title/HUD. The Mac
+layout key excluded only POPUP windows, so DIALOG panels shared `proc:<process>`
+with their main window. Applying that saved frame overwrote the correct initial
+owner-relative geometry. Owned panels could also overwrite the saved main layout.
+
+Only NORMAL/legacy UNSPECIFIED viewers now persist/restore independent layouts or
+enter workspace presets. Both DIALOG and POPUP remain owner-relative and cannot
+consume a saved process layout. Owned panels have no separate HUD. A panel size or
+DPI update also recomputes parent-relative geometry, even when its offset is stable;
+independent-window aspect/size reconciliation no longer overwrites that result.
+Related normal document/image viewers remain independent. Local panel dragging,
+resizing and close semantics remain available; no window is closed on Windows.
+
+微信表情窗放大且覆盖父窗口标题/HUD的原因是：DIALOG 附属面板与主窗口使用同一进程布局键，
+正确的初始相对位置随后被主窗口保存的尺寸和位置覆盖。现在附属面板既不读取也不写入独立
+窗口布局，不进入工作区预设；其尺寸/位置按父窗口画面比例处理，且不重复显示性能 HUD。
+面板自身尺寸或 DPI 变化时，即使相对偏移未变，也会重新计算。普通独立图片/文档窗口仍保留
+独立窗口行为，附属面板的本地拖动、缩放和关闭语义保留。
+
+Validation: 68 Mac tests pass, including native AppKit regression for a saved main
+frame applied to a same-process panel, panel snapshot rejection, parent-relative
+size updates and independent viewer layout eligibility. The bundle also includes
+clipboard capability-mismatch messages in the active viewer and connection banner.
+Physical WeChat confirmation is pending. No Windows host/protocol update is needed.
+
+验证：68 项 Mac 测试通过，包含真实 AppKit 窗口几何回归。同包保留滚动修复，并补充剪贴板
+能力不匹配的可见提示。微信实机效果待复测；本次无需更新 Windows 主机。

@@ -285,6 +285,9 @@ struct Pong: Equatable, Sendable {
 }
 
 struct WindowInfo: Equatable, Sendable {
+    // App grouping does not make normal image/document viewers into owned panels.
+    var usesIndependentLayout: Bool { kind == .normal || kind == .unspecified }
+
     var windowId: UInt64 = 0
     var ownerWindowId: UInt64 = 0
     var pid: UInt32 = 0

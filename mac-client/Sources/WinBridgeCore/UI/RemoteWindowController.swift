@@ -285,6 +285,7 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
         guard let newInfo = update.window else { return }
         let oldInfo = self.info
         self.info = newInfo
+        if newInfo.kind != oldInfo.kind { updateHudVisibility() }
         if newInfo.isDisabled && !oldInfo.isDisabled { remoteView.releaseAllHeldKeys() }
         remoteView.inputEnabled = !isLocallyHidden && !newInfo.isDisabled
 
@@ -300,7 +301,8 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
         if isLocallyHidden { return }
         if newInfo.kind == .popup || newInfo.kind == .dialog {
             if let owner, let ownerWindow = owner.window {
-                if newInfo.kind == .popup || newInfo.offsetX != oldInfo.offsetX || newInfo.offsetY != oldInfo.offsetY {
+                if newInfo.kind == .popup || newInfo.offsetX != oldInfo.offsetX || newInfo.offsetY != oldInfo.offsetY
+                    || newInfo.width != oldInfo.width || newInfo.height != oldInfo.height || newInfo.dpi != oldInfo.dpi {
                     repositionRelative(to: owner)
                 }
                 if window.parent !== ownerWindow {
@@ -314,6 +316,8 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
         if dimsChanged {
             updateResizeBehavior()
         }
+
+        if info.kind == .dialog, owner != nil { return }
 
         // In Local Scale Mode (and always for Full Desktop), never override the user's chosen Mac window size
         // unless Windows changed aspect ratio (e.g. emulator rotated portrait <-> landscape).
@@ -404,7 +408,7 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func updateHudVisibility() {
-        let visible = info.kind != .popup && showPerformanceHud()
+        let visible = info.usesIndependentLayout && showPerformanceHud()
         remoteView.setHudVisible(visible)
         if visible {
             if hudTimer == nil {
@@ -500,7 +504,7 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func snapshotLayout() -> SavedWindowLayout? {
-        guard info.kind != .popup, let window else { return nil }
+        guard info.usesIndependentLayout, let window else { return nil }
         return SavedWindowLayout(
             rect: window.frame,
             isPinnedOnTop: isPinnedOnTop,
@@ -509,7 +513,7 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func applySavedLayout(_ layout: SavedWindowLayout) {
-        guard info.kind != .popup, let window else { return }
+        guard info.usesIndependentLayout, let window else { return }
         let clamped = SavedWindowLayout.clampToActiveScreens(layout.rect)
         isApplyingRemoteGeometry = true
         window.setFrame(clamped, display: true)
@@ -519,7 +523,7 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
     }
 
     private func scheduleLayoutSave() {
-        guard info.kind != .popup else { return }
+        guard info.usesIndependentLayout else { return }
         layoutSaveTimer?.invalidate()
         layoutSaveTimer = Timer.scheduledTimer(withTimeInterval: 0.35, repeats: false) { [weak self] _ in
             Task { @MainActor in

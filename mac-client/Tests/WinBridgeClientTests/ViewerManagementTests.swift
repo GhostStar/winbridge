@@ -110,3 +110,42 @@ import Testing
     #expect(panel.window?.parent === root.window)
     #expect(panelWindow.frame == movedPanelFrame)
 }
+
+@MainActor @Test func ownedPanelsNeverInheritOrOverwriteMainWindowLayouts() throws {
+    _ = NSApplication.shared
+    let rootInfo = WindowInfo(windowId: 100, processName: "Synthetic.exe", kind: .normal,
+        width: 1400, height: 1000, dpi: 144)
+    let panelInfo = WindowInfo(windowId: 101, ownerWindowId: 100, processName: "Synthetic.exe",
+        kind: .dialog, width: 400, height: 300, offsetX: 90, offsetY: 80, dpi: 144)
+    let root = RemoteWindowController(info: rootInfo, owner: nil, syncWindowResize: { false })
+    let panel = RemoteWindowController(info: panelInfo, owner: root, syncWindowResize: { false })
+    defer { panel.forceCloseLocally(); root.forceCloseLocally() }
+    #expect(AppState.layoutKey(for: rootInfo) == "proc:synthetic.exe")
+    #expect(AppState.layoutKey(for: panelInfo) == nil)
+    #expect(panel.snapshotLayout() == nil)
+    // Previously the same process key applied this main-window frame to the panel.
+    let panelWindow = try #require(panel.window)
+    let before = panelWindow.frame
+    let rootLayout = try #require(root.snapshotLayout())
+    panel.applySavedLayout(rootLayout)
+    #expect(panelWindow.frame == before)
+    #expect(!panel.isPinnedOnTop && !panel.isAudioMuted)
+    let video = root.videoRectInScreen
+    #expect(abs(panelWindow.contentLayoutRect.width - video.width * 400 / 1400) <= 1)
+    #expect(abs(panelWindow.contentLayoutRect.height - video.height * 300 / 1000) <= 1)
+
+    // A panel may change size without changing its anchor; it must still use the
+    // parent's scale, even when the client is in local-scale mode.
+    var resized = panelInfo
+    resized.width = 600; resized.height = 450
+    panel.applyUpdate(WindowUpdated(window: resized), owner: root)
+    #expect(abs(panelWindow.contentLayoutRect.width - video.width * 600 / 1400) <= 1)
+    #expect(abs(panelWindow.contentLayoutRect.height - video.height * 450 / 1000) <= 1)
+
+    // Related independent document/image viewers retain layout persistence.
+    var independent = panelInfo
+    independent.kind = .normal
+    #expect(AppState.layoutKey(for: independent) == "proc:synthetic.exe")
+    #expect(independent.usesIndependentLayout)
+    #expect(!panelInfo.usesIndependentLayout)
+}

@@ -8,10 +8,12 @@ import Testing
     var target: ClipboardTarget? = ClipboardTarget(windowId: 7, token: 101)
     var supported = true
     var requests: [ClipboardRequest] = []
+    var statuses: [String] = []
     init() {
         monitor.activeTarget = { [weak self] in self?.target }
         monitor.isSupported = { [weak self] in self?.supported ?? false }
         monitor.onRequest = { [weak self] in self?.requests.append($0) }
+        monitor.onStatus = { [weak self] in self?.statuses.append($0) }
     }
     func clean() { monitor.stop(); board.releaseGlobally() }
     func put(_ text: String) { board.clearContents(); board.setString(text, forType: .string) }
@@ -143,4 +145,20 @@ import Testing
         Issue.record("image paste was not scoped"); return
     }
     #expect(NSBitmapImageRep(data: sent)?.pixelsWide == 2)
+}
+
+@MainActor @Test func unsupportedHostAndUnavailableTargetExplainClipboardFailure() {
+    let f = ClipboardFixture(); defer { f.clean() }
+    f.put("preserve local")
+    // Observed old host mask is 511: it includes popup alpha but lacks bit 9.
+    f.supported = (511 & ProtocolCapabilities.scopedClipboard) != 0
+    f.monitor.perform("paste", windowId: 7)
+    #expect(f.requests.isEmpty)
+    #expect(f.statuses.last?.contains("Restart the updated Windows host") == true)
+    #expect(f.board.string(forType: .string) == "preserve local")
+    f.supported = true
+    f.target = nil
+    f.monitor.perform("copy", windowId: 7)
+    #expect(f.requests.isEmpty)
+    #expect(f.statuses.last?.contains("interactive remote window") == true)
 }

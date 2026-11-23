@@ -86,9 +86,12 @@ final class ClipboardMonitor {
     }
     func perform(_ action: String, windowId: UInt64) {
         guard isEnabled else { onStatus?("剪贴板同步已关闭 / Clipboard is disabled"); return }
-        guard isSupported() else { onStatus?("请更新 Windows 主机以使用安全剪贴板 / Update the host for scoped clipboard"); return }
-        guard ["copy", "cut", "paste"].contains(action), let target = activeTarget(),
-              target.windowId == windowId, target.token != 0 else { return }
+        guard isSupported() else { onStatus?("当前连接的 Windows 主机不支持按窗口剪贴板；请退出旧进程或停止旧服务，再启动新版 / Restart the updated Windows host; the connected host lacks scoped clipboard"); return }
+        guard ["copy", "cut", "paste"].contains(action) else { return }
+        guard let target = activeTarget(), target.windowId == windowId, target.token != 0 else {
+            onStatus?("当前窗口尚不能使用剪贴板，请点击可操作的远程窗口后重试 / Click an interactive remote window and retry")
+            return
+        }
         var content: ClipboardSync.Content?
         if action == "paste" {
             guard board.types?.contains(.fileURL) != true else {

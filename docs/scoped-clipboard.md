@@ -17,6 +17,14 @@
 - 移除剪贴板文件枚举和自动取回；上传文件也不再改写 Windows 剪贴板。显式选择文件传输仍保留。
   文件浏览器中明确请求复制到 Mac 剪贴板的结果同样受同步开关、连接代次和本地变更保护。
 
+### 已更新文件但仍无法复制粘贴
+
+以实际连接握手的能力位为准，而不是下载包或显示的 `0.5.2` 版本号。旧主机可能也显示
+同一版本号。能力值 `511` 缺少 bit 9，新版主机为 `1019`。如果新版文件已下载但握手仍
+不支持，检查是否有旧后台进程、旧 Windows 服务或另一目录的可执行文件仍监听端口。
+退出/停止旧实例，再启动新版并重新连接。客户端会在连接提示和当前投射窗口的提示条中
+解释不兼容原因，不回退到全局剪贴板同步。
+
 ### 边界
 
 Windows 系统剪贴板仍然是全局的：主动向远端粘贴会修改它，其他 Windows 应用仍可能读取。
@@ -73,3 +81,12 @@ VM clipboard sharing disabled. They cover text/images, malformed payloads, stale
 responses, generation/replay checks, explicit file publication, native paste/copy/
 cut ordering and rejection of a separate clipboard-owner process. Native QQ/WeChat
 behavior remains a manual compatibility check.
+
+### Updated files but clipboard still unavailable
+
+Check the connected host's negotiated capabilities, not just its download filename
+or `0.5.2` version label. Mask `511` lacks bit 9; this fork's scoped-clipboard host
+advertises `1019`. An old background process, Windows service or another executable
+path may still own the listening port. Stop that instance, start the updated binary
+and reconnect. Connection status and the active viewer now explain this mismatch;
+global clipboard fallback remains disabled.
