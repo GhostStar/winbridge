@@ -5,10 +5,12 @@
 此 fork 采用 Kokoda 的按窗口请求语义，替换 WinBridge 的全局剪贴板广播。
 需要同时更新 Mac 客户端和 Windows 主机；不支持新能力的旧主机不会回退到旧同步。
 
-- Mac 只在当前投射窗口按 `⌘/Ctrl+C/X/V` 时发起文本或图片事务。没有本地剪贴板后台导出。
+- Mac 仅在当前投射窗口执行编辑菜单或 `⌘/Ctrl+C/X/V` 时发起文本或图片事务。连接、聚焦和剪贴板变化均不会自动传输。管理界面的“允许复制粘贴”是这些操作的总开关。
 - 粘贴先校验、写入 Windows 剪贴板，释放剪贴板锁后再发送 Ctrl+V，避免先粘贴到旧内容。
-- 复制/剪切等待剪贴板序号变化；右键菜单复制通过仅针对当前前台投射窗口的轮询取回。
-  首次聚焦只建立基线，不读取连接前或切换窗口前的内容。
+- 复制/剪切等待剪贴板序号变化并验证来源。后台轮询已移除，主机拒绝旧 `poll` 请求。
+- 在远端右键菜单复制后，主动选择 Mac“编辑 → 取回远端已复制内容”。此 `fetch` 操作不注入 Ctrl+C，
+  读取仍须通过同样的窗口、前台与所有者校验；它明确读取该应用已有内容，不要求内容刚刚发生变化。
+  不操作这些命令时，不读取连接前或当前剪贴板内容。
 - 主机校验订阅、订阅代次、进程创建时间、精确前台窗口和可用状态。读取还需剪贴板所有者
   属于该投射应用组的已订阅进程。拒绝完整桌面目标、过期句柄、重放请求及旧全局写入消息。
 - Mac 仅接受匹配的未过期请求；失焦、隐藏、关窗、断线或关闭同步后不应用旧结果。
@@ -33,7 +35,7 @@ Windows 系统剪贴板仍然是全局的：主动向远端粘贴会修改它，
 不要同时在主机上抢焦点。已开始的剪切/粘贴不会因为客户端之后失焦而被撤销。
 
 某些应用把剪贴板交给未订阅的辅助进程或没有有效所有者，内容会被拒绝而不是扩大读取范围。
-关闭同步时 `C/X/V` 剪贴板快捷键会被消费，不会退回到粘贴主机旧内容。普通输入不受影响。
+关闭允许复制粘贴时 `C/X/V` 剪贴板快捷键会被消费，不会退回到粘贴主机旧内容。普通输入不受影响。
 
 ### 验证
 
@@ -59,8 +61,11 @@ Copy/cut/paste carry a subscription generation and monotonic request ID. The hos
 validates the live subscription, process creation time, exact foreground target and
 enabled state. Reads also require an owner in the subscribed capture group. Paste
 publishes validated text/PNG before injecting Ctrl+V; copy/cut wait for a new
-sequence. Active-viewer polling supports context-menu copy, discarding the initial
-baseline. The observer services sent Windows messages while waiting so clipboard
+sequence. There is no background polling, and the host rejects legacy `poll` requests.
+Use Edit → Get remote copied content after a remote context-menu copy. This explicit
+`fetch` reads existing content from an eligible foreground owner without injecting Ctrl+C;
+it does not require a recent clipboard change. Connecting, focusing and clipboard changes
+alone never transfer content. Edit menu copy/cut/paste and keyboard shortcuts share one path. The observer services sent Windows messages while waiting so clipboard
 ownership transfer does not deadlock after a paste. See Microsoft's
 [PeekMessage documentation](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-peekmessagew)
 and [WM_DESTROYCLIPBOARD](https://learn.microsoft.com/en-us/windows/win32/dataxchg/wm-destroyclipboard).
@@ -90,3 +95,33 @@ advertises `1019`. An old background process, Windows service or another executa
 path may still own the listening port. Stop that instance, start the updated binary
 and reconnect. Connection status and the active viewer now explain this mismatch;
 global clipboard fallback remains disabled.
+
+## Explicit-transfer revision / 显式传输修订
+
+Upgrade both endpoints for manual retrieval and host-side rejection of old polling clients.
+The wire keeps the retired `discard` field for compatibility, but a true value is rejected.
+Requests still require authenticated subscriptions; request IDs and tokens do not prove a
+physical human gesture. An authorized custom client can issue explicit actions, and a local
+program with input automation permissions may simulate them. This change removes automatic
+transfer triggers; it does not isolate the OS clipboard or defend a compromised endpoint.
+
+手动取回及主机拒绝旧轮询客户端需要更新两端。协议保留旧 `discard` 字段，但拒绝 true。
+请求仍须经过连接认证和窗口授权；请求编号及窗口令牌不证明真人操作。已授权的自定义客户端
+可以发起显式命令，具备输入自动化权限的本机程序也可能模拟这些操作。本次改动移除自动传输
+触发源，不提供系统剪贴板隔离，也不能防御已被控制的端点。
+
+### Validation, 2026-11-24 / 本次验证
+
+- Mac: 98 tests passed; 3 optional live/fixture tests skipped (101 discovered). Named test
+  pasteboards cover idle/no-export, explicit fetch, replay/mismatch and reconnect rejection,
+  menu/shortcut routing and existing text/image protections.
+- Windows x64: 55 regular tests plus 1 isolated interactive clipboard test passed on Windows 11
+  ARM under x64 emulation. Native coverage includes copy/cut/paste, explicit fetch, legacy poll
+  rejection and no content returned for an unrelated owner process. VM clipboard sharing was
+  disabled for the native run and restored afterwards. This is not a new QQ/WeChat hardware test.
+
+Mac 共发现 101 项测试，98 项通过、3 项可选实机/素材测试跳过；新增空闲不传输、手动取回、
+重放/不匹配/重连拒绝及菜单快捷键路由验证。Windows x64 常规 55 项通过，另 1 项隔离交互
+剪贴板测试通过，覆盖复制/剪切/粘贴、手动取回、拒绝旧轮询以及无关进程内容不返回。
+Windows 测试环境为 Windows 11 ARM 的 x64 模拟执行；原生测试期间关闭虚拟机剪贴板共享，
+结束后恢复。本次未重新进行 QQ/微信物理机兼容性验证。

@@ -1001,6 +1001,18 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
 
     // MARK: - Keyboard & Shortcuts
 
+    // Responder-chain menu actions share the exact same scoped path as shortcuts.
+    @objc func copy(_ sender: Any?) { performClipboardAction("copy") }
+    @objc func cut(_ sender: Any?) { performClipboardAction("cut") }
+    @objc func paste(_ sender: Any?) { performClipboardAction("paste") }
+    @objc func fetchRemoteClipboard(_ sender: Any?) { performClipboardAction("fetch") }
+
+    private func performClipboardAction(_ action: String) {
+        guard inputEnabled, window?.isKeyWindow == true, window?.firstResponder === self else { return }
+        releaseAllHeldKeys()
+        onClipboardAction?(action)
+    }
+
     private func handleClipboardShortcut(_ event: NSEvent) -> Bool {
         let flags = event.modifierFlags.intersection([.command, .control, .option, .shift])
         guard flags == .control || (flags == .command && cmdMapsToCtrl()) else { return false }
@@ -1012,8 +1024,7 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
         default: return false
         }
         // Consume the shortcut even when unavailable; never paste stale host data.
-        releaseAllHeldKeys()
-        if inputEnabled { onClipboardAction?(action) }
+        performClipboardAction(action)
         return true
     }
 

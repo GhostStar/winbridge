@@ -34,10 +34,8 @@ final class ClipboardMonitor {
     var onRequest: ((ClipboardRequest) -> Void)?
     var onStatus: ((String) -> Void)?
     private let board: NSPasteboard
-    private var timer: Timer?
     private var nextID: UInt64 = 0
     private var generation: UInt64 = 0
-    private var baseline: ClipboardTarget?
     private struct Pending {
         let request: ClipboardRequest
         let changeCount: Int
@@ -54,40 +52,23 @@ final class ClipboardMonitor {
 
     init(board: NSPasteboard = .general) { self.board = board }
 
-    func start() {
-        stop()
-        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.poll() }
-        }
-    }
-    func stop() { timer?.invalidate(); timer = nil; cancel() }
+    // Lifecycle only: connecting, focusing and clipboard changes never send requests.
+    func start() { cancel() }
+    func stop() { cancel() }
     func cancel() {
         generation &+= 1
         pending = nil
-        baseline = nil
         files.removeAll()
     }
     func cancel(windowId: UInt64) {
-        if baseline?.windowId == windowId || pending?.request.windowId == windowId {
-            generation &+= 1; pending = nil; baseline = nil
+        if pending?.request.windowId == windowId {
+            generation &+= 1; pending = nil
         }
-    }
-    func poll() {
-        guard isEnabled, isSupported(), let target = activeTarget(), target.token != 0 else {
-            if baseline != nil || pending != nil { cancel() }
-            return
-        }
-        if (pending?.deadline ?? .distantFuture) < Date() { pending = nil; baseline = nil }
-        if let pending, pending.request.windowId == target.windowId && pending.request.token == target.token { return }
-        if baseline != target { pending = nil }
-        let discard = baseline != target
-        baseline = target
-        send(action: "poll", target: target, discard: discard, content: nil)
     }
     func perform(_ action: String, windowId: UInt64) {
         guard isEnabled else { onStatus?("剪贴板同步已关闭 / Clipboard is disabled"); return }
         guard isSupported() else { onStatus?("当前连接的 Windows 主机不支持按窗口剪贴板；请退出旧进程或停止旧服务，再启动新版 / Restart the updated Windows host; the connected host lacks scoped clipboard"); return }
-        guard ["copy", "cut", "paste"].contains(action) else { return }
+        guard ["copy", "cut", "paste", "fetch"].contains(action) else { return }
         guard let target = activeTarget(), target.windowId == windowId, target.token != 0 else {
             onStatus?("当前窗口尚不能使用剪贴板，请点击可操作的远程窗口后重试 / Click an interactive remote window and retry")
             return
@@ -108,13 +89,12 @@ final class ClipboardMonitor {
                 onStatus?("剪贴板没有可用文本或图片 / No supported clipboard content"); return
             }
         }
-        baseline = target
-        send(action: action, target: target, discard: false, content: content)
+        send(action: action, target: target, content: content)
     }
-    private func send(action: String, target: ClipboardTarget, discard: Bool, content: ClipboardSync.Content?) {
+    private func send(action: String, target: ClipboardTarget, content: ClipboardSync.Content?) {
         nextID &+= 1
         let request = ClipboardRequest(requestId: nextID, windowId: target.windowId, token: target.token,
-            action: action, data: content.map { ClipboardSync(content: $0) }, discard: discard)
+            action: action, data: content.map { ClipboardSync(content: $0) })
         pending = Pending(request: request, changeCount: board.changeCount, generation: generation,
             deadline: Date().addingTimeInterval(3))
         onRequest?(request)
@@ -127,11 +107,10 @@ final class ClipboardMonitor {
               result.action == saved.request.action,
               activeTarget() == ClipboardTarget(windowId: result.windowId, token: result.token) else { return }
         guard result.success else {
-            baseline = nil
-            if result.action != "poll" { onStatus?(result.error) }
+            onStatus?(result.error)
             return
         }
-        guard !saved.request.discard, result.action != "paste", let content = result.data?.content else { return }
+        guard result.action != "paste", let content = result.data?.content else { return }
         guard board.changeCount == saved.changeCount else {
             onStatus?("本地剪贴板已变化，保留新内容 / New local clipboard contents preserved"); return
         }

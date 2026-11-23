@@ -253,10 +253,21 @@ fn native_scoped_copy_paste_and_foreign_owner_rejection() {
         ))
     );
     assert!(editor.text().is_empty(), "cut did not remove selected text");
-    // Establish baseline, then a separate, unsubscribed process owns new content.
+    // Legacy polling is rejected even for a valid, foreground subscription.
+    let fetched = transact(&mut control, request("fetch"));
+    assert!(fetched.success, "{}", fetched.error);
+    assert_eq!(
+        fetched.data.and_then(|v| v.content),
+        Some(clipboard_sync::Content::TextUtf8(
+            "scoped synthetic paste".into()
+        ))
+    );
+    // A separate, unsubscribed process must never supply explicit fetch results.
     let mut baseline = request("poll");
     baseline.discard = true;
-    assert!(transact(&mut control, baseline).success);
+    let rejected_poll = transact(&mut control, baseline);
+    assert!(!rejected_poll.success && rejected_poll.data.is_none());
+    assert!(rejected_poll.error.contains("polling is disabled"));
     let mut helper = Command::new(std::env::current_exe().unwrap())
         .args([
             "--ignored",
@@ -278,7 +289,7 @@ fn native_scoped_copy_paste_and_foreign_owner_rejection() {
             break;
         }
     }
-    let polled = transact(&mut control, request("poll"));
+    let polled = transact(&mut control, request("fetch"));
     // Always stop helper before asserting, including a failed privacy check.
     drop(helper.stdin.take());
     assert!(helper.wait().unwrap().success());

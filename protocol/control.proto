@@ -611,9 +611,9 @@ message ClipboardRequest {
   uint64 request_id = 1;
   uint64 window_id = 2;
   uint64 token = 3;
-  string action = 4; // copy, cut, paste, poll
+  string action = 4; // explicit copy, cut, paste, fetch; legacy poll is rejected
   ClipboardSync data = 5;
-  bool discard = 6; // establish polling baseline without returning content
+  bool discard = 6; // retired polling baseline flag; true is rejected
 }
 message ClipboardResult {
   uint64 request_id = 1;

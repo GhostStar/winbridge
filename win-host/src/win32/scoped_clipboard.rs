@@ -2,7 +2,6 @@
 use crate::proto::{ClipboardRequest, ClipboardSync};
 use anyhow::{ensure, Context, Result};
 use std::{
-    collections::HashMap,
     mem, thread,
     time::{Duration, Instant},
 };
@@ -81,9 +80,7 @@ pub(crate) struct Command {
     pub reply: tokio::sync::oneshot::Sender<Result<Option<ClipboardSync>>>,
 }
 #[derive(Default)]
-pub(crate) struct Transactions {
-    baselines: HashMap<(u64, u64), u32>,
-}
+pub(crate) struct Transactions;
 impl Transactions {
     pub fn execute(
         &mut self,
@@ -92,26 +89,20 @@ impl Transactions {
         scope: Scope,
     ) -> Result<Option<ClipboardSync>> {
         ensure!(
-            matches!(request.action.as_str(), "copy" | "cut" | "paste" | "poll"),
-            "unknown clipboard action"
+            matches!(request.action.as_str(), "copy" | "cut" | "paste" | "fetch"),
+            "clipboard requires an explicit copy, cut, paste or fetch action; polling is disabled"
         );
         ensure!(
             request.action == "paste" || request.data.is_none(),
             "unexpected clipboard payload"
         );
-        let key = (request.window_id, request.token);
-        self.baselines
-            .retain(|(id, token), _| *id != request.window_id || *token == request.token);
-        if self.baselines.len() >= 64 && !self.baselines.contains_key(&key) {
-            self.baselines.clear();
-        }
-        if request.action == "poll" {
-            scope.validate()?;
-            let current = unsafe { GetClipboardSequenceNumber() };
-            let previous = self.baselines.insert(key, current);
-            if request.discard || previous.is_none() || previous == Some(current) {
-                return Ok(None);
-            }
+        ensure!(
+            !request.discard,
+            "clipboard polling baselines are no longer supported"
+        );
+        if request.action == "fetch" {
+            // Explicit context-menu retrieval: no synthetic Ctrl+C and no background polling.
+            // read() rechecks foreground, identity and owner under the clipboard lock.
             return super::clipboard::read(hwnd, &scope);
         }
         scope.activate()?;
@@ -128,8 +119,6 @@ impl Transactions {
             _ => 0x56,
         })?;
         if request.action == "paste" {
-            self.baselines
-                .insert(key, unsafe { GetClipboardSequenceNumber() });
             return Ok(None);
         }
         let until = Instant::now() + Duration::from_millis(500);
@@ -148,8 +137,6 @@ impl Transactions {
             thread::sleep(Duration::from_millis(10));
         }
         scope.validate()?;
-        self.baselines
-            .insert(key, unsafe { GetClipboardSequenceNumber() });
         super::clipboard::read(hwnd, &scope)
     }
 }
@@ -190,4 +177,27 @@ fn shortcut(vk: u16) -> Result<()> {
         "clipboard shortcut injection failed"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_poll_is_rejected_before_any_native_clipboard_access() {
+        let scope = Scope {
+            id: 0,
+            pid: 0,
+            started: 0,
+            allowed: vec![],
+        };
+        let request = ClipboardRequest {
+            action: "poll".into(),
+            ..Default::default()
+        };
+        let error = Transactions
+            .execute(std::ptr::null_mut(), request, scope)
+            .unwrap_err();
+        assert!(error.to_string().contains("polling is disabled"));
+    }
 }

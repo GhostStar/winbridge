@@ -27,11 +27,7 @@ import Testing
     let f = ClipboardFixture(); defer { f.clean() }
     f.put("before connection")
     f.monitor.start()
-    f.monitor.poll()
-    let baseline = try #require(f.requests.last)
-    #expect(baseline.action == "poll" && baseline.discard && baseline.data == nil)
-    f.monitor.receive(f.response(baseline, text: "old remote contents"))
-    #expect(f.board.string(forType: .string) == "before connection")
+    #expect(f.requests.isEmpty)
     f.put("fresh paste")
     f.monitor.perform("paste", windowId: 7)
     let paste = try #require(f.requests.last)
@@ -65,14 +61,14 @@ import Testing
     let f = ClipboardFixture(); defer { f.clean() }
     f.put("local")
     f.target = nil
-    f.monitor.poll(); f.monitor.perform("paste", windowId: 7)
+    f.monitor.perform("paste", windowId: 7)
     #expect(f.requests.isEmpty)
     f.target = ClipboardTarget(windowId: 7, token: 101)
     f.supported = false
-    f.monitor.poll(); f.monitor.perform("paste", windowId: 7)
+    f.monitor.perform("paste", windowId: 7)
     #expect(f.requests.isEmpty)
     f.supported = true; f.monitor.isEnabled = false
-    f.monitor.poll(); f.monitor.perform("paste", windowId: 7)
+    f.monitor.perform("paste", windowId: 7)
     #expect(f.requests.isEmpty)
 }
 
@@ -161,4 +157,83 @@ import Testing
     f.monitor.perform("copy", windowId: 7)
     #expect(f.requests.isEmpty)
     #expect(f.statuses.last?.contains("interactive remote window") == true)
+}
+
+@MainActor @Test func idleClipboardNeverRequestsRemoteData() async throws {
+    let f = ClipboardFixture(); defer { f.clean() }
+    f.put("before")
+    f.monitor.start()
+    f.put("changed by another local application")
+    try await Task.sleep(for: .milliseconds(650))
+    #expect(f.requests.isEmpty)
+    f.monitor.perform("poll", windowId: 7)
+    #expect(f.requests.isEmpty)
+    f.monitor.receive(ClipboardResult(requestId: 1, windowId: 7, token: 101,
+        action: "copy", success: true, data: ClipboardSync(content: .textUtf8("unsolicited"))))
+    #expect(f.board.string(forType: .string) == "changed by another local application")
+}
+
+@MainActor @Test func explicitRetrievalIsOneShotAndDoesNotExportLocalClipboard() throws {
+    let f = ClipboardFixture(); defer { f.clean() }
+    f.put("private local content")
+    f.monitor.perform("fetch", windowId: 7)
+    let request = try #require(f.requests.last)
+    #expect(request.action == "fetch" && request.data == nil && !request.discard)
+    f.monitor.receive(f.response(request, text: "explicit remote result"))
+    #expect(f.board.string(forType: .string) == "explicit remote result")
+    f.monitor.receive(f.response(request, text: "replayed response"))
+    #expect(f.board.string(forType: .string) == "explicit remote result")
+    #expect(f.requests.count == 1)
+}
+
+@MainActor @Test func clipboardResponseMustMatchRequestedActionAndConnection() throws {
+    let f = ClipboardFixture(); defer { f.clean() }
+    f.put("preserve")
+    f.monitor.perform("copy", windowId: 7)
+    let request = try #require(f.requests.last)
+    var mismatch = f.response(request, text: "mismatch")
+    mismatch.action = "poll"
+    f.monitor.receive(mismatch)
+    #expect(f.board.string(forType: .string) == "preserve")
+    f.monitor.perform("fetch", windowId: 7)
+    let fetch = try #require(f.requests.last)
+    f.monitor.stop(); f.monitor.start()
+    f.monitor.receive(f.response(fetch, text: "previous connection"))
+    #expect(f.board.string(forType: .string) == "preserve")
+}
+
+// Model key-window state without taking focus from the user's application.
+@MainActor private final class ClipboardActionWindow: NSWindow {
+    var focused = true
+    override var isKeyWindow: Bool { focused }
+}
+
+@MainActor @Test func remoteEditMenuAndShortcutsUseTheSameExplicitActions() throws {
+    _ = NSApplication.shared
+    let window = ClipboardActionWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 100),
+        styleMask: [.titled], backing: .buffered, defer: false)
+    window.isReleasedWhenClosed = false
+    let view = RemoteWindowView(windowId: 7, frame: window.contentLayoutRect)
+    window.contentView = view
+    window.makeFirstResponder(view)
+    defer { window.close() }
+    var actions: [String] = []
+    view.onClipboardAction = { actions.append($0) }
+    for selector in [#selector(RemoteWindowView.copy(_:)), #selector(RemoteWindowView.cut(_:)),
+                     #selector(RemoteWindowView.paste(_:)), #selector(RemoteWindowView.fetchRemoteClipboard(_:))] {
+        #expect(NSApp.sendAction(selector, to: view, from: nil))
+    }
+    #expect(actions == ["copy", "cut", "paste", "fetch"])
+    let event = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .control,
+        timestamp: 0, windowNumber: window.windowNumber, context: nil,
+        characters: "v", charactersIgnoringModifiers: "v", isARepeat: false, keyCode: 9))
+    #expect(view.performKeyEquivalent(with: event))
+    #expect(actions.last == "paste" && actions.count == 5)
+    view.inputEnabled = false
+    view.paste(nil)
+    #expect(actions.count == 5)
+    view.inputEnabled = true
+    window.focused = false
+    view.copy(nil)
+    #expect(actions.count == 5)
 }

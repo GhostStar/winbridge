@@ -273,6 +273,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         editMenu.addItem(withTitle: "拷贝", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
         editMenu.addItem(withTitle: "粘贴", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         editMenu.addItem(withTitle: "全选", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "取回远端已复制内容 / Get remote copied content",
+                         action: #selector(RemoteWindowView.fetchRemoteClipboard(_:)), keyEquivalent: "")
         editItem.submenu = editMenu
         mainMenu.addItem(editItem)
 

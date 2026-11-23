@@ -24,7 +24,7 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
     private var lastSyncedFallbackHost: String = ""
 
     private let cmdCtrlCheck = NSButton(checkboxWithTitle: "Cmd → Ctrl", target: nil, action: nil)
-    private let clipboardCheck = NSButton(checkboxWithTitle: "剪贴板同步", target: nil, action: nil)
+    private let clipboardCheck = NSButton(checkboxWithTitle: "允许复制粘贴", target: nil, action: nil)
     private let popupsCheck = NSButton(checkboxWithTitle: "追踪弹窗", target: nil, action: nil)
     private let resizeHint = NSTextField(labelWithString: ResizeInteractionText.hint)
     private let tlsCheck = NSButton(checkboxWithTitle: "TLS 加密", target: nil, action: nil)
@@ -472,7 +472,7 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
             codecPopup.selectItem(at: idx)
         }
         cmdCtrlCheck.state = state.settings.cmdMapsToCtrl ? .on : .off
-        clipboardCheck.toolTip = "仅在当前远程窗口复制、剪切或粘贴文本和图片；不会共享其他应用的剪贴板。 / Text and images for the active remote window only."
+        clipboardCheck.toolTip = "仅在明确复制、剪切、粘贴或手动取回时传输文本和图片，不在后台同步。 / Transfer text and images only on explicit copy, cut, paste or manual retrieval; no background sync."
         clipboardCheck.state = state.settings.syncClipboard ? .on : .off
         popupsCheck.state = state.settings.followPopups ? .on : .off
         tlsCheck.state = state.settings.useTls ? .on : .off
