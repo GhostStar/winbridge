@@ -26,7 +26,7 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
     private let cmdCtrlCheck = NSButton(checkboxWithTitle: "Cmd → Ctrl", target: nil, action: nil)
     private let clipboardCheck = NSButton(checkboxWithTitle: "剪贴板同步", target: nil, action: nil)
     private let popupsCheck = NSButton(checkboxWithTitle: "追踪弹窗", target: nil, action: nil)
-    private let syncResizeCheck = NSButton(checkboxWithTitle: "同步缩放", target: nil, action: nil)
+    private let resizeHint = NSTextField(labelWithString: ResizeInteractionText.hint)
     private let tlsCheck = NSButton(checkboxWithTitle: "TLS 加密", target: nil, action: nil)
     private let autoReconnectCheck = NSButton(checkboxWithTitle: "自动重连", target: nil, action: nil)
     private let hudCheck = NSButton(checkboxWithTitle: "性能 HUD", target: nil, action: nil)
@@ -203,9 +203,9 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         clipboardCheck.action = #selector(settingsChanged)
         popupsCheck.target = self
         popupsCheck.action = #selector(settingsChanged)
-        syncResizeCheck.target = self
-        syncResizeCheck.action = #selector(settingsChanged)
-        syncResizeCheck.toolTip = "关闭时仅在 Mac 本地等比缩放画面，不改变 Windows 原窗口大小"
+        resizeHint.toolTip = ResizeInteractionText.help
+        resizeHint.textColor = .secondaryLabelColor
+        resizeHint.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         tlsCheck.target = self
         tlsCheck.action = #selector(settingsChanged)
         tlsCheck.toolTip = "使用 TLS 1.3 + TOFU 证书指纹锁定加密控制与媒体通道（需 Windows 端未开启 --no-tls）"
@@ -236,7 +236,6 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
             cmdCtrlCheck,
             clipboardCheck,
             popupsCheck,
-            syncResizeCheck,
             tlsCheck,
             autoReconnectCheck,
             hudCheck,
@@ -362,7 +361,7 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         bannerLabel.lineBreakMode = .byTruncatingTail
         bannerLabel.maximumNumberOfLines = 1
 
-        let mainStack = NSStackView(views: [profileRow, connRow, optionsRow, audioStatusRow, tabRow, listContainer, bannerLabel])
+        let mainStack = NSStackView(views: [profileRow, connRow, optionsRow, audioStatusRow, resizeHint, tabRow, listContainer, bannerLabel])
         mainStack.orientation = .vertical
         mainStack.alignment = .leading
         mainStack.spacing = 10
@@ -476,7 +475,6 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         clipboardCheck.toolTip = "仅在当前远程窗口复制、剪切或粘贴文本和图片；不会共享其他应用的剪贴板。 / Text and images for the active remote window only."
         clipboardCheck.state = state.settings.syncClipboard ? .on : .off
         popupsCheck.state = state.settings.followPopups ? .on : .off
-        syncResizeCheck.state = state.settings.syncWindowResize ? .on : .off
         tlsCheck.state = state.settings.useTls ? .on : .off
         autoReconnectCheck.state = state.settings.autoReconnect ? .on : .off
         hudCheck.state = state.settings.showPerformanceHud ? .on : .off
@@ -513,7 +511,6 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         s.cmdMapsToCtrl = (cmdCtrlCheck.state == .on)
         s.syncClipboard = (clipboardCheck.state == .on)
         s.followPopups = (popupsCheck.state == .on)
-        s.syncWindowResize = (syncResizeCheck.state == .on)
         s.useTls = (tlsCheck.state == .on)
         s.autoReconnect = (autoReconnectCheck.state == .on)
         s.showPerformanceHud = (hudCheck.state == .on)

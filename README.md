@@ -51,6 +51,7 @@ flowchart LR
   - 非回环监听默认强制要求 Token（除非显式 `--allow-insecure-no-auth`）；使用常量时间比较、按 IP 指数退避防爆破锁定，并支持 `--allow-cidr` 来源网段白名单。
 
 ### 2. 无缝多窗口、游戏操控与日常体验
+- **拖边框缩放，⌥ 拖边框调整主机**：默认只等比缩放 Mac 画面；按住 Option 开始拖动才调整 Windows 源窗口大小。每次松手结束，不保留模式，主窗口与附属面板一致。见 [操作说明 / Border resizing](docs/border-resize.md)。
 - **局域网自动发现（mDNS / Bonjour）+ 指数退避自动重连**：Windows 端自动广播 `_winbridge._tcp.local.`，Mac 端下拉即可一键选择主机；意外断连或 Windows 唤醒后自动重连并恢复此前打开的窗口与桌面。
 - **双采集模式（按进程记忆）**：
   - **单窗模式（`WINDOW`）**：`WGC CreateForWindow`，支持多窗口互相遮挡并行投射。

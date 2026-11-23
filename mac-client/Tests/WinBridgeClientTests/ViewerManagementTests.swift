@@ -29,7 +29,7 @@ import Testing
 @MainActor @Test func titlebarCloseOnlyHidesLocallyAndReleasesInput() async throws {
     _ = NSApplication.shared
     let wc = RemoteWindowController(info: WindowInfo(windowId: 1, kind: .normal,
-        width: 640, height: 480, isResizable: true), owner: nil, syncWindowResize: { true })
+        width: 640, height: 480, isResizable: true), owner: nil)
     defer { wc.forceCloseLocally() }
     var messages: [ControlMessage.Payload] = []
     wc.onSendControl = { messages.append($0) }
@@ -77,11 +77,11 @@ import Testing
 @MainActor @Test func ownedPanelsStayOutOfWindowMenuAndModalParentCanCloseLocally() throws {
     _ = NSApplication.shared
     let root = RemoteWindowController(info: WindowInfo(windowId: 1, kind: .normal,
-        width: 640, height: 480, isDisabled: true), owner: nil, syncWindowResize: { false })
+        width: 640, height: 480, isDisabled: true), owner: nil)
     let panel = RemoteWindowController(info: WindowInfo(windowId: 2, ownerWindowId: 1,
-        kind: .dialog, width: 320, height: 200, isModal: true), owner: root, syncWindowResize: { false })
+        kind: .dialog, width: 320, height: 200, isModal: true), owner: root)
     let image = RemoteWindowController(info: WindowInfo(windowId: 3, ownerWindowId: 1,
-        kind: .normal, width: 320, height: 200), owner: root, syncWindowResize: { false })
+        kind: .normal, width: 320, height: 200), owner: root)
     defer { panel.forceCloseLocally(); image.forceCloseLocally(); root.forceCloseLocally() }
     root.present(owner: nil)
     panel.present(owner: root)
@@ -117,8 +117,8 @@ import Testing
         width: 1400, height: 1000, dpi: 144)
     let panelInfo = WindowInfo(windowId: 101, ownerWindowId: 100, processName: "Synthetic.exe",
         kind: .dialog, width: 400, height: 300, offsetX: 90, offsetY: 80, dpi: 144)
-    let root = RemoteWindowController(info: rootInfo, owner: nil, syncWindowResize: { false })
-    let panel = RemoteWindowController(info: panelInfo, owner: root, syncWindowResize: { false })
+    let root = RemoteWindowController(info: rootInfo, owner: nil)
+    let panel = RemoteWindowController(info: panelInfo, owner: root)
     defer { panel.forceCloseLocally(); root.forceCloseLocally() }
     #expect(AppState.layoutKey(for: rootInfo) == "proc:synthetic.exe")
     #expect(AppState.layoutKey(for: panelInfo) == nil)

@@ -693,10 +693,11 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
     }
 
     var inputEnabled = true
+    var localBorderGesture = false
     private var heldMouseButtons: [MouseButton: MouseEvent] = [:]
 
     func emitControl(_ payload: ControlMessage.Payload) {
-        guard inputEnabled else { return }
+        guard inputEnabled, !localBorderGesture else { return }
         if case .mouseEvent(let event) = payload {
             if event.kind == .buttonDown { heldMouseButtons[event.button] = event }
             if event.kind == .buttonUp { heldMouseButtons.removeValue(forKey: event.button) }
@@ -1019,6 +1020,7 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
     }
 
     override func flagsChanged(with event: NSEvent) {
+        guard !localBorderGesture else { return }
         if gameLockEnabled && event.modifierFlags.contains([.control, .option]) {
             setGameLockEnabled(false)
             releaseAllHeldKeys()
@@ -1064,6 +1066,7 @@ final class RemoteWindowView: NSView, @preconcurrency NSTextInputClient {
     }
 
     private func syncModifiers(from flags: NSEvent.ModifierFlags) {
+        guard !localBorderGesture else { return }
         let raw = flags.rawValue
         let mapCmd = cmdMapsToCtrl()
         var desired = Set<UInt32>()

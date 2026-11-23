@@ -39,11 +39,6 @@ final class AppState {
             SettingsStore.save(settings)
             clipboardMonitor.isEnabled = settings.syncClipboard
             audioPlayer.volume = settings.audioVolume
-            if oldValue.syncWindowResize != settings.syncWindowResize {
-                for (_, wc) in controllers {
-                    wc.updateResizeBehavior()
-                }
-            }
             if oldValue.showPerformanceHud != settings.showPerformanceHud {
                 for (_, wc) in controllers {
                     wc.updateHudVisibility()
@@ -2093,8 +2088,7 @@ final class AppState {
 
         let wc = RemoteWindowController(
             info: info,
-            owner: ownerController,
-            syncWindowResize: { [weak self] in self?.settings.syncWindowResize ?? false }
+            owner: ownerController
         )
         let procName = info.processName
         wc.compatibleTrackpadScroll = { [weak self] in self?.settings.compatibleTrackpadScroll ?? true }

@@ -47,7 +47,6 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
     var onFilesDropped: ((UInt64, [URL]) -> Void)?
     var cmdMapsToCtrl: () -> Bool = { true }
     var compatibleTrackpadScroll: () -> Bool = { true }
-    var syncWindowResize: () -> Bool = { false }
     var mouseSensitivity: () -> Float = { 1.0 }
     var suppressInactiveHover: () -> Bool = { false }
     var shortcuts: () -> ShortcutBindings = { .defaults }
@@ -60,7 +59,9 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
     private var isApplyingRemoteGeometry = false
     private var isLiveResizing = false
     private var localResizeSeq: UInt32 = 0
-    private var lastResizeSentAt: Date?
+    private var resizeGesture: BorderResizeGesture?
+    private var pendingHostResize: (sequence: UInt32, gesture: BorderResizeGesture)?
+    private var resizeAckTimer: Timer?
     private var resizeDebounceTimer: Timer?
     private var layoutSaveTimer: Timer?
     private(set) var isLocallyHidden = false
@@ -79,10 +80,9 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
     private var hudBytesInWindow: Int = 0
     private var hudLastCodec: String = "—"
 
-    init(info: WindowInfo, owner: RemoteWindowController?, syncWindowResize: @escaping () -> Bool) {
+    init(info: WindowInfo, owner: RemoteWindowController?) {
         self.windowId = info.windowId
         self.info = info
-        self.syncWindowResize = syncWindowResize
         self.decoder = WindowVideoDecoder(windowId: info.windowId)
 
         let contentSize = Self.macContentSize(for: info)
@@ -250,13 +250,10 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
             remoteView.updateDisplayGeometry(sourceSize: src, preserveAspect: false)
             return
         }
-        let localScaleOnly = isDesktop || !syncWindowResize()
-        if localScaleOnly && src.width > 0 && src.height > 0 {
-            window.contentAspectRatio = NSSize(width: src.width, height: src.height)
-        } else {
-            window.resizeIncrements = NSSize(width: 1, height: 1)
-        }
-        remoteView.updateDisplayGeometry(sourceSize: src, preserveAspect: localScaleOnly)
+        // A permanent AppKit aspect constraint would also constrain Option-resize.
+        // The delegate applies aspect locking only to local border gestures.
+        window.resizeIncrements = NSSize(width: 1, height: 1)
+        remoteView.updateDisplayGeometry(sourceSize: src, preserveAspect: true)
     }
 
     func present(owner: RemoteWindowController?) {
@@ -298,56 +295,47 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
             }
         }
 
+        if !hostResizeAllowed && (resizeGesture?.changesHost == true || pendingHostResize != nil) {
+            cancelResizeInteraction()
+        }
         if isLocallyHidden { return }
+        if let owner, newInfo.kind == .dialog || newInfo.kind == .popup {
+            presentationOwner = owner
+            if let ownerWindow = owner.window, window.parent !== ownerWindow {
+                ownerWindow.addChildWindow(window, ordered: .above)
+            }
+        }
+        // Protect both normal windows and panels before owner-relative layout.
+        if isLiveResizing { return }
+        if let pending = pendingHostResize {
+            guard update.ackResizeSeq >= pending.sequence else { return }
+            pendingHostResize = nil
+            resizeAckTimer?.invalidate(); resizeAckTimer = nil
+            let target = NSSize(width: CGFloat(newInfo.width) / pending.gesture.pixelsPerPoint.width,
+                                height: CGFloat(newInfo.height) / pending.gesture.pixelsPerPoint.height)
+            applyProgrammaticContentSize(target)
+            panelUsesLocalSize = info.kind == .dialog
+            rememberPanelOffset()
+            updateResizeBehavior()
+            return
+        }
         if newInfo.kind == .popup || newInfo.kind == .dialog {
-            if let owner, let ownerWindow = owner.window {
-                if newInfo.kind == .popup || newInfo.offsetX != oldInfo.offsetX || newInfo.offsetY != oldInfo.offsetY
-                    || newInfo.width != oldInfo.width || newInfo.height != oldInfo.height || newInfo.dpi != oldInfo.dpi {
-                    repositionRelative(to: owner)
-                }
-                if window.parent !== ownerWindow {
-                    ownerWindow.addChildWindow(window, ordered: .above)
-                }
+            if let owner, newInfo.kind == .popup || newInfo.offsetX != oldInfo.offsetX || newInfo.offsetY != oldInfo.offsetY
+                || newInfo.width != oldInfo.width || newInfo.height != oldInfo.height || newInfo.dpi != oldInfo.dpi {
+                repositionRelative(to: owner)
             }
             if newInfo.kind == .popup { return }
         }
-
         let dimsChanged = newInfo.width != oldInfo.width || newInfo.height != oldInfo.height || newInfo.dpi != oldInfo.dpi
-        if dimsChanged {
-            updateResizeBehavior()
-        }
-
-        if info.kind == .dialog, owner != nil { return }
-
-        // In Local Scale Mode (and always for Full Desktop), never override the user's chosen Mac window size
-        // unless Windows changed aspect ratio (e.g. emulator rotated portrait <-> landscape).
-        if isDesktop || !syncWindowResize() {
-            if dimsChanged && oldInfo.width > 0 && oldInfo.height > 0 && newInfo.width > 0 && newInfo.height > 0 {
-                let oldRatio = CGFloat(oldInfo.width) / CGFloat(oldInfo.height)
-                let newRatio = CGFloat(newInfo.width) / CGFloat(newInfo.height)
-                if abs(oldRatio - newRatio) > 0.02 {
-                    let current = window.contentLayoutRect.size
-                    let area = current.width * current.height
-                    let targetW = max(160.0, round(sqrt(area * newRatio)))
-                    let targetH = max(100.0, round(targetW / newRatio))
-                    applyProgrammaticContentSize(NSSize(width: targetW, height: targetH))
-                }
-            }
-            return
-        }
-
-        // Sync Windows Resize Mode: anti-loop check for in-flight resize.
-        let waitingForAck = update.ackResizeSeq < localResizeSeq
-            && (lastResizeSentAt.map { Date().timeIntervalSince($0) < 1.5 } ?? false)
-        if isLiveResizing || waitingForAck {
-            return
-        }
-
-        if dimsChanged {
-            let targetSize = Self.macContentSize(for: newInfo)
-            let currentSize = window.contentLayoutRect.size
-            if abs(targetSize.width - currentSize.width) >= 2 || abs(targetSize.height - currentSize.height) >= 2 {
-                applyProgrammaticContentSize(targetSize)
+        if dimsChanged { updateResizeBehavior() }
+        // Default behavior is always local scaling; remote snapshots do not reset zoom.
+        if dimsChanged && oldInfo.width > 0 && oldInfo.height > 0 && newInfo.width > 0 && newInfo.height > 0 {
+            let oldRatio = CGFloat(oldInfo.width) / CGFloat(oldInfo.height)
+            let newRatio = CGFloat(newInfo.width) / CGFloat(newInfo.height)
+            if abs(oldRatio - newRatio) > 0.002 {
+                let width = window.contentLayoutRect.width
+                applyProgrammaticContentSize(NSSize(width: width, height: width / newRatio))
+                rememberPanelOffset()
             }
         }
     }
@@ -386,8 +374,8 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func repositionRelative(to owner: RemoteWindowController) {
-        guard let window else { return }
         presentationOwner = owner
+        guard !isLiveResizing, pendingHostResize == nil, let window else { return }
         var frameRect = relativeFrame(to: owner)
         if info.kind == .dialog {
             frameRect.origin.x += localPanelOffset.x
@@ -536,6 +524,7 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
     private func updateWindowTitle() {
         guard info.kind != .popup, let window else { return }
         var tags: [String] = []
+        if resizeGesture?.changesHost == true { tags.append(ResizeInteractionText.active) }
         if isPinnedOnTop {
             tags.append("置顶")
         }
@@ -559,9 +548,7 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
 
     func hideLocally() {
         guard !isLocallyHidden else { return }
-        resizeDebounceTimer?.invalidate()
-        resizeDebounceTimer = nil
-        isLiveResizing = false
+        cancelResizeInteraction()
         unlockPointerIfNeeded()
         remoteView.releaseAllHeldKeys()
         isLocallyHidden = true
@@ -581,8 +568,7 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func forceCloseLocally() {
-        resizeDebounceTimer?.invalidate()
-        resizeDebounceTimer = nil
+        cancelResizeInteraction()
         layoutSaveTimer?.invalidate()
         layoutSaveTimer = nil
         hudTimer?.invalidate()
@@ -617,19 +603,47 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
         unlockPointerIfNeeded()
     }
 
+    private var hostResizeAllowed: Bool {
+        !isDesktop && info.kind != .popup && info.isResizable && !info.isDisabled && !isLocallyHidden && info.width > 0 && info.height > 0
+    }
+
+    // Internal entry point also used by native-window regression tests.
+    func beginBorderResize(option: Bool, pointerDown: Bool) {
+        guard pointerDown, !isLiveResizing, !localChromeResize, !isApplyingRemoteGeometry, !isLocallyHidden, info.kind != .popup,
+              let window else { return }
+        resizeAckTimer?.invalidate(); resizeAckTimer = nil
+        pendingHostResize = nil
+        isLiveResizing = true
+        remoteView.releaseAllHeldKeys()
+        remoteView.localBorderGesture = true
+        resizeGesture = BorderResizeGesture(option: option, hostAllowed: hostResizeAllowed,
+            source: NSSize(width: CGFloat(info.width), height: CGFloat(info.height)),
+            displayed: remoteView.currentVideoRect.size, aspect: activeSourceSize)
+        if info.kind == .dialog { panelUsesLocalSize = true }
+        window.resizeIncrements = NSSize(width: 1, height: 1)
+        if option && !hostResizeAllowed { showToast(ResizeInteractionText.unavailable, style: .progress, autoHideSeconds: 2) }
+        updateWindowTitle()
+    }
+
     func windowWillStartLiveResize(_ notification: Notification) {
-        // AppKit also sends resize callbacks for native chrome animations.
-        // Only a held-pointer border gesture can resize the host.
-        isLiveResizing = !localChromeResize && NSEvent.pressedMouseButtons & 1 != 0
+        guard let resizingWindow = notification.object as? NSWindow else { return }
+        beginBorderResize(option: resizingWindow.resizeFlags.contains(.option), pointerDown: NSEvent.pressedMouseButtons & 1 != 0)
+    }
+
+    func windowWillResize(_ sender: NSWindow, to proposedFrame: NSSize) -> NSSize {
+        guard !isApplyingRemoteGeometry, !localChromeResize, info.kind != .popup else { return proposedFrame }
+        if resizeGesture?.changesHost == true { return proposedFrame }
+        let proposed = sender.contentRect(forFrameRect: NSRect(origin: .zero, size: proposedFrame)).size
+        let size = BorderResizeGesture.proportional(proposed, from: sender.contentLayoutRect.size,
+                                                    source: resizeGesture?.sourceAspect ?? activeSourceSize)
+        return sender.frameRect(forContentRect: NSRect(origin: .zero, size: size)).size
     }
 
     func windowDidResize(_ notification: Notification) {
         guard !isApplyingRemoteGeometry, info.kind != .popup else { return }
         onOwnerMovedOrResized?(windowId)
         scheduleLayoutSave()
-        if isLiveResizing && !localChromeResize && !isDesktop && syncWindowResize() {
-            scheduleDebouncedResize()
-        }
+        if isLiveResizing, resizeGesture?.changesHost == true { scheduleDebouncedResize() }
     }
 
     func windowDidMove(_ notification: Notification) {
@@ -641,15 +655,26 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
 
     func windowDidEndLiveResize(_ notification: Notification) {
         let wasLiveResizing = isLiveResizing
+        resizeDebounceTimer?.invalidate(); resizeDebounceTimer = nil
+        if wasLiveResizing, resizeGesture?.changesHost == true { sendCurrentSizeToHost() }
         isLiveResizing = false
+        remoteView.localBorderGesture = false
+        resizeGesture = nil
         if wasLiveResizing && info.kind == .dialog { panelUsesLocalSize = true; rememberPanelOffset() }
-        guard !isApplyingRemoteGeometry, info.kind != .popup else { return }
-        resizeDebounceTimer?.invalidate()
-        resizeDebounceTimer = nil
-        scheduleLayoutSave()
-        if wasLiveResizing && !localChromeResize && !isDesktop && syncWindowResize() {
-            sendCurrentSizeToHost()
-        }
+        updateWindowTitle()
+        updateResizeBehavior()
+        if wasLiveResizing { scheduleLayoutSave() }
+    }
+
+    private func cancelResizeInteraction() {
+        resizeDebounceTimer?.invalidate(); resizeDebounceTimer = nil
+        resizeAckTimer?.invalidate(); resizeAckTimer = nil
+        isLiveResizing = false
+        remoteView.localBorderGesture = false
+        resizeGesture = nil
+        pendingHostResize = nil
+        updateWindowTitle()
+        updateResizeBehavior()
     }
 
     private func rememberPanelOffset() {
@@ -671,46 +696,60 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
         return false
     }
 
-    // Native title-bar actions affect only the local viewer, even in sync mode.
+    // Native title-bar actions always affect only the local viewer.
     func windowShouldZoom(_ sender: NSWindow, toFrame newFrame: NSRect) -> Bool {
-        resizeDebounceTimer?.invalidate()
-        resizeDebounceTimer = nil
+        cancelResizeInteraction()
         isApplyingRemoteGeometry = true
-        let target = preZoomFrame ?? newFrame
+        var target = preZoomFrame ?? newFrame
+        if preZoomFrame == nil {
+            let content = sender.contentRect(forFrameRect: target)
+            let ratio = activeSourceSize.width / max(1, activeSourceSize.height)
+            let width = min(content.width, content.height * ratio)
+            target = sender.frameRect(forContentRect: NSRect(x: content.minX, y: content.maxY - width / ratio,
+                                                            width: width, height: width / ratio))
+        }
         preZoomFrame = preZoomFrame == nil ? sender.frame : nil
         sender.setFrame(target, display: true)
         isApplyingRemoteGeometry = false
         return false
     }
 
-    func windowWillEnterFullScreen(_ notification: Notification) { localChromeResize = true }
+    func windowWillEnterFullScreen(_ notification: Notification) { cancelResizeInteraction(); localChromeResize = true }
     func windowDidEnterFullScreen(_ notification: Notification) { localChromeResize = false }
     func windowWillExitFullScreen(_ notification: Notification) { localChromeResize = true }
     func windowDidExitFullScreen(_ notification: Notification) { localChromeResize = false }
 
     private func scheduleDebouncedResize() {
-        resizeDebounceTimer?.invalidate()
-        resizeDebounceTimer = Timer.scheduledTimer(withTimeInterval: 0.045, repeats: false) { [weak self] _ in
-            Task { @MainActor in
+        guard resizeDebounceTimer == nil else { return }
+        let timer = Timer(timeInterval: 0.1, repeats: false) { [weak self] _ in
+            // Common run-loop modes include AppKit's native resize tracking loop.
+            MainActor.assumeIsolated {
+                self?.resizeDebounceTimer = nil
                 self?.sendCurrentSizeToHost()
             }
         }
+        resizeDebounceTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     private func sendCurrentSizeToHost() {
-        guard !isLocallyHidden, !info.isDisabled, !localChromeResize else { return }
-        guard let window else { return }
-        let contentSize = window.contentLayoutRect.size
-        let scale = Self.dpiScale(for: info)
-        let physW = UInt32(max(16, round(contentSize.width * scale)))
-        let physH = UInt32(max(16, round(contentSize.height * scale)))
+        guard hostResizeAllowed, !localChromeResize, isLiveResizing,
+              let gesture = resizeGesture, gesture.changesHost, let window else { return }
+        let (physW, physH) = gesture.hostSize(for: window.contentLayoutRect.size)
         localResizeSeq &+= 1
-        lastResizeSentAt = Date()
-        onSendControl?(.resizeWindow(ResizeWindow(
-            windowId: windowId,
-            width: physW,
-            height: physH,
-            resizeSeq: localResizeSeq
-        )))
+        pendingHostResize = (localResizeSeq, gesture)
+        resizeAckTimer?.invalidate()
+        let sequence = localResizeSeq
+        let timer = Timer(timeInterval: 2, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, !self.isLiveResizing, self.pendingHostResize?.sequence == sequence else { return }
+                self.pendingHostResize = nil
+                self.resizeAckTimer = nil
+                self.updateResizeBehavior()
+            }
+        }
+        resizeAckTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+        onSendControl?(.resizeWindow(ResizeWindow(windowId: windowId, width: physW, height: physH, resizeSeq: localResizeSeq)))
     }
 }

@@ -59,8 +59,8 @@ private func alphaFrame(color:Data,mask:Data,width:UInt16=2,height:UInt16=2)->Me
 
 @MainActor @Test func followedImageViewerHasNativeFrameAndTransparentCanvas() {
     _=NSApplication.shared
-    let owner=RemoteWindowController(info:WindowInfo(windowId:1,pid:7,kind:.normal,width:640,height:480,dpi:96),owner:nil,syncWindowResize:{false})
-    let image=RemoteWindowController(info:WindowInfo(windowId:2,ownerWindowId:1,pid:7,kind:.dialog,width:320,height:240,dpi:144),owner:owner,syncWindowResize:{false})
+    let owner=RemoteWindowController(info:WindowInfo(windowId:1,pid:7,kind:.normal,width:640,height:480,dpi:96),owner:nil)
+    let image=RemoteWindowController(info:WindowInfo(windowId:2,ownerWindowId:1,pid:7,kind:.dialog,width:320,height:240,dpi:144),owner:owner)
     #expect(image.window?.styleMask.contains(.titled)==true)
     #expect(image.window?.canBecomeKey==true)
     image.applyTransparency(true)

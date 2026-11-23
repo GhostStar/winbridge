@@ -163,7 +163,6 @@ struct ClientSettings {
     var syncClipboard: Bool
     var autoPullClipboardFiles: Bool
     var followPopups: Bool
-    var syncWindowResize: Bool
     var audioEnabled: Bool
     var audioQuality: AudioQualityPreference
     var audioProcessOnly: Bool
@@ -269,7 +268,6 @@ enum SettingsStore {
         let clipboard = defaults.object(forKey: "winbridge.syncClipboard") as? Bool ?? true
         let autoPullClipboardFiles = false // Retired global clipboard-file auto sharing; do not migrate unsafe opt-ins.
         let popups = defaults.object(forKey: "winbridge.followPopups") as? Bool ?? true
-        let syncResize = defaults.object(forKey: "winbridge.syncWindowResize") as? Bool ?? false
         let audioEnabled = defaults.object(forKey: "winbridge.audioEnabled") as? Bool ?? false
         let audioQualityRaw = defaults.string(forKey: "winbridge.audioQuality") ?? AudioQualityPreference.opus128.rawValue
         let audioQuality = AudioQualityPreference(rawValue: audioQualityRaw) ?? .opus128
@@ -353,7 +351,6 @@ enum SettingsStore {
             syncClipboard: clipboard,
             autoPullClipboardFiles: autoPullClipboardFiles,
             followPopups: popups,
-            syncWindowResize: syncResize,
             audioEnabled: audioEnabled,
             audioQuality: audioQuality,
             audioProcessOnly: audioProcessOnly,
@@ -406,7 +403,7 @@ enum SettingsStore {
         defaults.set(s.syncClipboard, forKey: "winbridge.syncClipboard")
         defaults.set(s.autoPullClipboardFiles, forKey: "winbridge.autoPullClipboardFiles")
         defaults.set(s.followPopups, forKey: "winbridge.followPopups")
-        defaults.set(s.syncWindowResize, forKey: "winbridge.syncWindowResize")
+        defaults.removeObject(forKey: "winbridge.syncWindowResize") // Retired: border gestures are local unless Option starts the drag.
         defaults.set(s.audioEnabled, forKey: "winbridge.audioEnabled")
         defaults.set(s.audioQuality.rawValue, forKey: "winbridge.audioQuality")
         defaults.set(s.audioProcessOnly, forKey: "winbridge.audioProcessOnly")
