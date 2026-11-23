@@ -126,3 +126,33 @@ rerun for this presentation-only change. The release binary is PE32+ x86-64.
 验证：Mac 92 项测试通过，含真实 Quinn 握手；Windows x64 的 54 项单元／回环测试
 及 1 项交互式原生资料卡测试通过（Windows 11 ARM，x64 仿真执行）。本次仅修改
 显示元数据，没有重跑其他标为忽略的交互测试。交付主机为 PE32+ x86-64。
+
+
+## 2026-11-24: keep framed viewers opaque / 保留 Mac 原生外框
+
+An independent transparent image viewer retained its traffic-light buttons but
+lost the native frame: each alpha frame made the entire NSWindow transparent and
+disabled its shadow. Alpha now applies to video composition. Titled viewers keep
+an opaque system window background, normal title bar and native shadow; transparent
+capture margins blend onto that backdrop. Borderless cards/menus still reveal the
+underlying windows and avoid a duplicate shadow. Chrome metadata updates reapply
+this policy immediately, even before another video frame arrives.
+
+独立图片查看器虽然还保留三个按钮，但每帧 alpha 都把整个 NSWindow 变透明并关闭阴影，
+导致标题悬空、外框消失。现在有标题栏的窗口保留系统背景、标题栏及原生阴影，采集画面
+的透明区域合成在该背景上；无边框资料卡／菜单继续透出下方窗口，不重复添加阴影。
+边框元数据切换时立即刷新背景策略，不等待下一帧视频。仅需更新 Mac 客户端。
+
+Validation: 92 Mac tests passed, including opaque/alpha frame transitions, framed
+dialogs, independent viewers and borderless-to-modal metadata changes. An opt-in
+visual check captures only a synthetic window and reproduced the missing frame
+with the previous settings, then verified the native frame after the fix. Run:
+
+```sh
+WINBRIDGE_FRAME_PREVIEW_DIR=/tmp/winbridge-native-frame-preview \
+  ./mac-client/scripts/run_tests.sh --disable-sandbox
+```
+
+验证：92 项 Mac 回归通过；额外使用合成窗口的原生截图，复现旧配置的外框消失并确认
+修复后的完整窗口。截图仅针对该测试窗口，不获取桌面或用户应用；常规测试不要求
+截屏权限。真实微信窗口仍需用户复测。

@@ -186,6 +186,8 @@ This fork follows Kokoda's separation of application membership and window roles
 Independent viewers remain normal Mac windows. Owned floating/modal windows are
 focusable panels excluded from the Window menu; lightweight native borderless cards
 keep no Mac title bar, while ordinary/modal dialogs retain it. Menus/tooltips stay borderless.
+Titled viewers keep an opaque system backdrop and native shadow even with alpha video;
+only borderless surfaces reveal the windows underneath.
 The red close button and Cmd+W hide the local viewer and its owned subtree, never
 send a remote close. Independent siblings remain visible. Restore from the Window
 menu or the manager's **重新显示** button. **结束投射** ends the subscription;
@@ -193,7 +195,8 @@ the application's own buttons inside the streamed picture still act on Windows.
 
 本分支参考 Kokoda 的窗口角色与本地关闭语义：独立图片窗口单独管理；所属浮窗／模态
 对话框使用可聚焦原生面板，不加入窗口菜单；原生无边框的轻量资料卡不额外添加 Mac
-标题栏，普通／模态对话框保留标题栏；菜单、提示保留无边框。Mac 红色关闭按钮
+标题栏，普通／模态对话框保留标题栏；菜单、提示保留无边框。有标题栏的窗口始终
+保留系统背景和阴影，透明视频在该背景上合成；只有无边框浮层透出下方窗口。Mac 红色关闭按钮
 和 ⌘W 只隐藏本地窗口及所属子树，独立窗口继续显示。可从窗口菜单或管理列表恢复；
 “结束投射”才释放订阅。远端画面内应用自己的关闭按钮仍操作 Windows。
 

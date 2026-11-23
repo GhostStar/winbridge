@@ -72,6 +72,7 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
     private var panelUsesLocalSize = false
     private var allowImmediateClose = false
     private var lastFrameSize: (UInt16, UInt16)?
+    private var videoHasAlpha = false
 
     // Rolling Performance HUD counters
     private var hudTimer: Timer?
@@ -235,11 +236,17 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
         return window.convertToScreen(rectInWin)
     }
 
-    func applyTransparency(_ enabled:Bool) {
-        window?.isOpaque = !enabled
-        window?.backgroundColor = enabled ? .clear : .black
-        // WGC already includes the source shadow in its alpha pixels.
-        window?.hasShadow = !enabled
+    func applyTransparency(_ enabled: Bool) {
+        videoHasAlpha = enabled
+        guard let window else { return }
+        let framed = window.styleMask.contains(.titled)
+        // Alpha describes the captured pixels, not the native Mac frame. Titled
+        // viewers keep a system backdrop and shadow; transparent video blends
+        // onto that backdrop. Only borderless surfaces reveal windows below.
+        window.isOpaque = framed || !enabled
+        window.backgroundColor = framed ? .windowBackgroundColor : (enabled ? .clear : .black)
+        window.hasShadow = framed || !enabled
+        if framed { window.titlebarAppearsTransparent = false }
         remoteView.setTransparency(enabled)
     }
 
@@ -253,6 +260,7 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
         if info.kind == .popup { style.insert(.nonactivatingPanel) }
         isApplyingRemoteGeometry = true
         window.styleMask = style
+        applyTransparency(videoHasAlpha)
         window.minSize = info.usesBorderlessPresentation ? NSSize(width: 16, height: 16) : NSSize(width: 160, height: 100)
         window.setFrame(window.frameRect(forContentRect: content), display: true)
         window.isExcludedFromWindowsMenu = isLocallyHidden || !info.usesIndependentLayout
