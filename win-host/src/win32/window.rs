@@ -256,6 +256,7 @@ pub fn info(id: u64) -> Result<WindowInfo> {
             has_alpha: ex & WS_EX_LAYERED != 0,
             is_disabled: IsWindowEnabled(hwnd) == 0,
             is_modal,
+            is_borderless_panel: borderless_panel(kind, style, is_modal),
             ..Default::default()
         })
     }
@@ -376,9 +377,30 @@ fn presentation_kind(class: &str, owned: bool, _style: u32, ex: u32) -> i32 {
     }
 }
 
+// Preserve lightweight native cards without stripping chrome from standalone
+// viewers, modal prompts, or resizable tool windows. Alpha is not a role signal.
+fn borderless_panel(kind: i32, style: u32, modal: bool) -> bool {
+    kind == 2 && !modal && style & (WS_CAPTION | WS_THICKFRAME | WS_SYSMENU) == 0
+}
+
 #[cfg(test)]
 mod presentation_tests {
     use super::*;
+    #[test]
+    fn only_lightweight_owned_surfaces_are_borderless() {
+        assert!(borderless_panel(2, WS_POPUP, false));
+        assert!(borderless_panel(2, 0, false));
+        for style in [
+            WS_POPUP | WS_CAPTION,
+            WS_POPUP | WS_THICKFRAME,
+            WS_POPUP | WS_SYSMENU,
+        ] {
+            assert!(!borderless_panel(2, style, false));
+        }
+        assert!(!borderless_panel(2, WS_POPUP, true));
+        assert!(!borderless_panel(1, WS_POPUP, false));
+        assert!(!borderless_panel(3, WS_POPUP, false));
+    }
     #[test]
     fn separate_application_membership_from_window_role() {
         assert_eq!(

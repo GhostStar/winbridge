@@ -93,3 +93,36 @@ Physical WeChat confirmation is pending. No Windows host/protocol update is need
 
 验证：68 项 Mac 测试通过，包含真实 AppKit 窗口几何回归。同包保留滚动修复，并补充剪贴板
 能力不匹配的可见提示。微信实机效果待复测；本次无需更新 Windows 主机。
+
+
+## 2026-11-24: preserve native borderless cards / 资料卡保留无边框
+
+Previously every DIALOG received a Mac title bar, including lightweight native
+cards. Field 23 now carries the host's conservative native-style classification.
+The card remains an owned, focusable panel; it is not converted to a nonactivating
+menu. Metadata changes update chrome in place without moving the captured content
+or issuing remote resize/close commands. Transparency remains independent.
+
+此前所有 DIALOG 都加上 Mac 标题栏，导致原本无边框的资料卡多出一排按钮。现在由
+Windows 原生样式识别轻量浮层，经字段 23 传给 Mac；保留附属关系及焦点能力，
+不降级为不可激活菜单。动态更新边框保持内容位置，不发送远端缩放／关闭操作。
+透明度与是否加边框独立处理。旧主机保持旧行为，需要两端更新。
+
+Regression coverage includes protocol defaults/round trips, opaque and transparent
+focusable cards, owner-relative placement without title-bar height, live metadata
+changes, modal fallback, and independent viewers retaining local buttons. A native
+Windows fixture checks actual HWND styles, owner enabled state and same-HWND style
+updates. Only synthetic windows are used; physical QQ/WeChat acceptance is pending.
+
+回归覆盖协议兼容、透明及不透明资料卡的焦点／定位、动态边框变化、模态回退和独立
+窗口按钮。Windows 原生夹具检查真实 HWND 样式、拥有者禁用状态及同一 HWND 的样式
+更新。测试使用隔离合成窗口，真实 QQ／微信版本仍需用户验收。
+
+Validation: 92 Mac tests passed, including the real Quinn handshake fixture;
+Windows x64 passed 54 unit/loopback tests plus the interactive native-card test
+on Windows 11 ARM under x64 emulation. Other ignored interactive tests were not
+rerun for this presentation-only change. The release binary is PE32+ x86-64.
+
+验证：Mac 92 项测试通过，含真实 Quinn 握手；Windows x64 的 54 项单元／回环测试
+及 1 项交互式原生资料卡测试通过（Windows 11 ARM，x64 仿真执行）。本次仅修改
+显示元数据，没有重跑其他标为忽略的交互测试。交付主机为 PE32+ x86-64。

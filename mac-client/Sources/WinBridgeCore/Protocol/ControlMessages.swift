@@ -310,6 +310,11 @@ struct WindowInfo: Equatable, Sendable {
     var isDisabled: Bool = false
     var isModal: Bool = false
     var clipboardToken: UInt64 = 0
+    var isBorderlessPanel: Bool = false
+
+    var usesBorderlessPresentation: Bool {
+        kind == .popup || (kind == .dialog && isBorderlessPanel && !isModal)
+    }
 
     func encode() -> Data {
         var w = ProtoWriter()
@@ -335,6 +340,7 @@ struct WindowInfo: Equatable, Sendable {
         w.writeBool(field: 20, isDisabled)
         w.writeBool(field: 21, isModal)
         w.writeUInt64(field: 22, clipboardToken)
+        w.writeBool(field: 23, isBorderlessPanel)
         return w.data
     }
 
@@ -366,6 +372,7 @@ struct WindowInfo: Equatable, Sendable {
             case 20: m.isDisabled = try r.readBool()
             case 21: m.isModal = try r.readBool()
             case 22: m.clipboardToken = try r.readUInt64()
+            case 23: m.isBorderlessPanel = try r.readBool()
             default: try r.skip(wireType: wire)
             }
         }

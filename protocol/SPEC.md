@@ -258,3 +258,28 @@ Text is at most 1 MiB UTF-8; PNG at most 8 MiB with at most 16 Mi pixels decoded
 Explicit file transfers retain separate, guarded publication tickets.
 
 See [design and validation](../docs/scoped-clipboard.md) for privacy boundaries.
+
+
+## Borderless owned panels (fork extension)
+
+WindowInfo field 23 `is_borderless_panel` preserves a lightweight owned surface's
+native presentation without changing its DIALOG kind or input authorization. The
+host sets it only for a non-modal DIALOG lacking WS_CAPTION, WS_THICKFRAME and
+WS_SYSMENU. Independent image/document windows, resizable tools and modal prompts
+retain client chrome. Alpha, process names and user titles are not classifiers.
+
+The Mac uses a focusable borderless NSPanel, keeps owner-relative geometry and
+Window-menu exclusion, and updates chrome on metadata changes while preserving
+the screen content rectangle. Closing/hiding remains local. Missing field 23
+defaults to false (legacy titled panel); old clients ignore it. Both endpoints
+must be updated to see this improvement with an old host. No new capability is
+needed because the field only controls presentation.
+
+WindowInfo 字段 23 `is_borderless_panel` 保留轻量附属窗口原本的无边框外观，
+不改变 DIALOG 类型和输入授权。主机仅对非模态、没有 WS_CAPTION／WS_THICKFRAME／
+WS_SYSMENU 的附属窗口设置标记；独立图片窗口、可缩放工具窗、模态提示仍保留 Mac
+标题栏。不根据透明度、进程名或用户窗口标题猜测类型。
+
+Mac 使用可聚焦的无边框面板，保留相对拥有者定位和窗口菜单排除；元数据变化时更新
+边框并保持画面的屏幕位置。关闭／隐藏仍只作用于本地。旧主机缺少该字段时保持原有
+标题栏，旧客户端忽略新字段，因此需要同时更新两端才能获得该改进。

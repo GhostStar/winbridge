@@ -110,7 +110,7 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
         case .dialog:
             let win = OwnedPanel(
                 contentRect: contentRect,
-                styleMask: [.titled, .closable, .resizable],
+                styleMask: info.usesBorderlessPresentation ? [.borderless] : [.titled, .closable, .resizable],
                 backing: .buffered,
                 defer: false
             )
@@ -136,7 +136,7 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
         remoteView.inputEnabled = !info.isDisabled
         window.contentView = remoteView
         window.acceptsMouseMovedEvents = true
-        window.minSize = NSSize(width: 160, height: 100)
+        window.minSize = info.usesBorderlessPresentation ? NSSize(width: 16, height: 16) : NSSize(width: 160, height: 100)
 
         self.baseTitle = info.title.isEmpty ? info.processName : info.title
         super.init(window: window)
@@ -243,6 +243,22 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
         remoteView.setTransparency(enabled)
     }
 
+    // Chrome follows presentation metadata, including updates on an existing HWND.
+    // Keep the captured content at the same screen rect when adding/removing a title.
+    private func updateNativeChrome() {
+        guard let window else { return }
+        let content = window.contentRect(forFrameRect: window.frame)
+        var style: NSWindow.StyleMask = info.usesBorderlessPresentation ? [.borderless] : [.titled, .closable, .resizable]
+        if info.usesIndependentLayout { style.insert(.miniaturizable) }
+        if info.kind == .popup { style.insert(.nonactivatingPanel) }
+        isApplyingRemoteGeometry = true
+        window.styleMask = style
+        window.minSize = info.usesBorderlessPresentation ? NSSize(width: 16, height: 16) : NSSize(width: 160, height: 100)
+        window.setFrame(window.frameRect(forContentRect: content), display: true)
+        window.isExcludedFromWindowsMenu = isLocallyHidden || !info.usesIndependentLayout
+        isApplyingRemoteGeometry = false
+    }
+
     func updateResizeBehavior() {
         let src = activeSourceSize
         guard let window else { return }
@@ -283,6 +299,9 @@ final class RemoteWindowController: NSWindowController, NSWindowDelegate {
         let oldInfo = self.info
         self.info = newInfo
         if newInfo.kind != oldInfo.kind { updateHudVisibility() }
+        if newInfo.kind != oldInfo.kind || newInfo.usesBorderlessPresentation != oldInfo.usesBorderlessPresentation {
+            updateNativeChrome()
+        }
         if newInfo.isDisabled && !oldInfo.isDisabled { remoteView.releaseAllHeldKeys() }
         remoteView.inputEnabled = !isLocallyHidden && !newInfo.isDisabled
 

@@ -271,6 +271,9 @@ message WindowInfo {
   bool is_disabled = 20;
   bool is_modal = 21;
   uint64 clipboard_token = 22;
+  // Owned, fixed-size, non-modal native surface without caption/system chrome.
+  // Presentation only: it remains a focusable DIALOG, not a nonactivating POPUP.
+  bool is_borderless_panel = 23;
 }
 
 message ListWindowsRequest {
