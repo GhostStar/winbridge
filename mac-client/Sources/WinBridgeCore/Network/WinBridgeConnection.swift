@@ -13,6 +13,7 @@ enum ConnectionError: Error, LocalizedError {
     case controlFrameTooLarge(Int)
     case unexpectedControlMessage(String)
     case connectTimeout
+    case handshakeTimeout(transport: String, stage: String)
     case localNetworkProhibited
     case certificateMissing
     case certificateMismatch(hostKey: String, expected: String, actual: String)
@@ -29,6 +30,7 @@ enum ConnectionError: Error, LocalizedError {
         case .controlFrameTooLarge(let n): return "控制帧超过 16 MiB（\(n) 字节）"
         case .unexpectedControlMessage(let m): return "收到异常控制消息：\(m)"
         case .connectTimeout: return "连接 Windows 主机超时"
+        case .handshakeTimeout(let transport, let stage): return "\(transport) 连接超时（阶段：\(stage)）"
         case .localNetworkProhibited:
             return "macOS 拦截了本地网络访问权限：请在「系统设置 → 隐私与安全性 → 本地网络」中允许 WinBridge（重新打包建议使用固定自签证书）"
         case .certificateMissing:
@@ -356,7 +358,7 @@ final class WinBridgeConnection: @unchecked Sendable {
         guard !isCancelled, transport == .auto else { return false }
         if let ce = error as? ConnectionError {
             switch ce {
-            case .handshakeRejected, .certificateMismatch, .localNetworkProhibited, .invalidEndpoint:
+            case .handshakeRejected, .certificateMismatch, .certificateMissing, .localNetworkProhibited, .invalidEndpoint:
                 return false
             default:
                 return true
@@ -379,7 +381,7 @@ final class WinBridgeConnection: @unchecked Sendable {
         }
         if let ce = error as? ConnectionError {
             switch ce {
-            case .handshakeRejected, .certificateMismatch, .localNetworkProhibited:
+            case .handshakeRejected, .certificateMismatch, .certificateMissing, .localNetworkProhibited:
                 return false
             default:
                 return true
@@ -439,7 +441,10 @@ final class WinBridgeConnection: @unchecked Sendable {
         hostConfig.expectedFingerprint = expectedFingerprint
         let tcpTimeout = fastTimeout ? 2.5 : 8.0
 
-        if hostConfig.useTls && hostConfig.transport != .tcp {
+        let retryKey = "\(host.lowercased()):\(config.port)|\(expectedFingerprint ?? "first-use")"
+        let skipQuic = hostConfig.transport == .auto && QuicRetryBackoff.shared.shouldSkip(retryKey)
+        if skipQuic { ClientLogger.shared.info("QUIC retry cooling down; using TCP+TLS") }
+        if hostConfig.useTls && hostConfig.transport != .tcp && !skipQuic {
             do {
                 let quicTimeout: Double
                 if hostConfig.transport == .auto {
@@ -447,11 +452,13 @@ final class WinBridgeConnection: @unchecked Sendable {
                 } else {
                     quicTimeout = fastTimeout ? 3.0 : 8.0
                 }
-                return try await connectQUIC(
+                let outcome = try await connectQUIC(
                     config: hostConfig,
                     timeoutSeconds: quicTimeout,
                     usedFallbackHost: usedFallbackHost
                 )
+                QuicRetryBackoff.shared.succeeded(retryKey)
+                return outcome
             } catch {
                 cleanupResourcesWithoutNotifying()
                 let cancelled = cancelledOrDisconnected || Task.isCancelled
@@ -460,6 +467,7 @@ final class WinBridgeConnection: @unchecked Sendable {
                     error: error,
                     isCancelled: cancelled
                 ) {
+                    QuicRetryBackoff.shared.failed(retryKey)
                     ClientLogger.shared.info(
                         "QUIC unavailable on \(host) (\(error.localizedDescription)); falling back to TCP+TLS"
                     )
@@ -476,7 +484,7 @@ final class WinBridgeConnection: @unchecked Sendable {
         return try await connectTCP(
             config: hostConfig,
             timeoutSeconds: tcpTimeout,
-            fellBackFromQuic: false,
+            fellBackFromQuic: skipQuic,
             usedFallbackHost: usedFallbackHost
         )
     }
@@ -486,13 +494,39 @@ final class WinBridgeConnection: @unchecked Sendable {
         timeoutSeconds: Double,
         usedFallbackHost: Bool
     ) async throws -> ConnectOutcome {
+        let deadline = HandshakeDeadline(transport: "QUIC", seconds: timeoutSeconds)
+        defer { deadline.stopTimer() }
+        return try await withTaskCancellationHandler(operation: {
+            do {
+                return try await establishQUIC(
+                    config: config, timeoutSeconds: timeoutSeconds,
+                    usedFallbackHost: usedFallbackHost, deadline: deadline
+                )
+            } catch {
+                let failure = deadline.failure(error)
+                deadline.cancel()
+                throw failure
+            }
+        }, onCancel: { deadline.cancel() })
+    }
+
+    private func establishQUIC(
+        config: ConnectionConfig,
+        timeoutSeconds: Double,
+        usedFallbackHost: Bool,
+        deadline: HandshakeDeadline
+    ) async throws -> ConnectOutcome {
         guard let nwPort = NWEndpoint.Port(rawValue: config.port) else {
             throw ConnectionError.invalidEndpoint(config.host, config.port)
         }
 
         let quicQueue = DispatchQueue(label: "winbridge.quic")
         let quicOptions = NWProtocolQUIC.Options(alpn: [WireConstants.quicAlpn])
-        quicOptions.direction = .bidirectional
+        // NWConnectionGroup reserves an implicit stream. Making it bidirectional
+        // leaves stream 0 empty while our Control becomes stream 4: Quinn accepts
+        // the lower stream first and waits forever for its preface. Reserve a uni
+        // stream instead; explicit Control/Bulk streams remain bidirectional.
+        quicOptions.direction = .unidirectional
         quicOptions.idleTimeout = 15_000
         quicOptions.initialMaxData = 32 * 1024 * 1024
         quicOptions.initialMaxStreamDataBidirectionalLocal = 8 * 1024 * 1024
@@ -515,6 +549,8 @@ final class WinBridgeConnection: @unchecked Sendable {
         let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(config.host), port: nwPort)
         let group = NWConnectionGroup(with: NWMultiplexGroup(to: endpoint), using: params)
         self.quicGroup = group
+        deadline.register { group.cancel() }
+        try deadline.enter("quic-tls")
 
         // Accept server-initiated unidirectional Audio / per-window Video streams immediately.
         group.newConnectionHandler = { [weak self] incoming in
@@ -523,20 +559,27 @@ final class WinBridgeConnection: @unchecked Sendable {
 
         try await startQuicGroup(group, queue: quicQueue, verifyState: verifyState, timeoutSeconds: timeoutSeconds)
 
-        // 1. Open Stream 0 (Control bidirectional stream)
+        try deadline.enter("control-stream")
+        // 1. Open the first bidirectional stream (Control).
         let streamOptions = NWProtocolQUIC.Options(alpn: [WireConstants.quicAlpn])
         streamOptions.direction = .bidirectional
         guard let ctlConn = NWConnection(from: group, using: streamOptions) else {
             throw ConnectionError.quicStreamOpenFailed
         }
         let control = BufferedNWStream(connection: ctlConn, queue: DispatchQueue(label: "winbridge.quic.control"))
-        try await control.connect(timeoutSeconds: 4.0)
         self.controlStream = control
+        deadline.register { control.close() }
+        try await control.connect(timeoutSeconds: 4.0)
+        if let metadata = ctlConn.metadata(definition: NWProtocolQUIC.definition) as? NWProtocolQUIC.Metadata {
+            ClientLogger.shared.info("QUIC control stream_id=\(metadata.streamIdentifier)")
+        }
+        try deadline.enter("hello-send")
 
         try await control.send(WireConstants.controlPreface)
         let hello = makeHello(config: config)
         try await sendControlAsync(stream: control, payload: .hello(hello))
 
+        try deadline.enter("hello-ack")
         // 2. Read HelloAck
         let reply = try await readControlFrame(from: control)
         guard case .helloAck(let ack) = reply.payload else {
@@ -549,22 +592,27 @@ final class WinBridgeConnection: @unchecked Sendable {
             throw ConnectionError.invalidSessionId
         }
 
-        // 3. Open Stream 1 (Isolated low-priority Bulk File Transfer bidirectional stream)
+        try deadline.enter("bulk-stream")
+        // 3. Open the next bidirectional stream (isolated bulk transfer).
         guard let bulkConn = NWConnection(from: group, using: streamOptions) else {
             throw ConnectionError.quicStreamOpenFailed
         }
         let bulk = BufferedNWStream(connection: bulkConn, queue: DispatchQueue(label: "winbridge.quic.bulk"))
+        self.bulkStream = bulk
+        deadline.register { bulk.close() }
         try await bulk.connect(timeoutSeconds: 4.0)
         var bulkBind = Data(capacity: 24)
         bulkBind.append(WireConstants.bulkPreface)
         bulkBind.append(ack.sessionId)
         try await bulk.send(bulkBind)
+        try deadline.enter("bulk-bind")
         let bindAck = try await bulk.readExact(1)
         guard bindAck[0] == 0 else {
             throw ConnectionError.bulkBindRejected(bindAck[0])
         }
         self.bulkStream = bulk
 
+        try deadline.finish()
         // Monitor QUIC tunnel failure after connect
         if cancelledOrDisconnected || Task.isCancelled {
             cleanupResourcesWithoutNotifying()
@@ -722,6 +770,30 @@ final class WinBridgeConnection: @unchecked Sendable {
         fellBackFromQuic: Bool,
         usedFallbackHost: Bool
     ) async throws -> ConnectOutcome {
+        let deadline = HandshakeDeadline(transport: "TCP", seconds: timeoutSeconds)
+        defer { deadline.stopTimer() }
+        return try await withTaskCancellationHandler(operation: {
+            do {
+                return try await establishTCP(
+                    config: config, timeoutSeconds: timeoutSeconds,
+                    fellBackFromQuic: fellBackFromQuic,
+                    usedFallbackHost: usedFallbackHost, deadline: deadline
+                )
+            } catch {
+                let failure = deadline.failure(error)
+                deadline.cancel()
+                throw failure
+            }
+        }, onCancel: { deadline.cancel() })
+    }
+
+    private func establishTCP(
+        config: ConnectionConfig,
+        timeoutSeconds: Double,
+        fellBackFromQuic: Bool,
+        usedFallbackHost: Bool,
+        deadline: HandshakeDeadline
+    ) async throws -> ConnectOutcome {
         let control = try BufferedNWStream(
             host: config.host,
             port: config.port,
@@ -729,14 +801,18 @@ final class WinBridgeConnection: @unchecked Sendable {
             useTls: config.useTls,
             expectedFingerprint: config.expectedFingerprint
         )
-        try await control.connect(timeoutSeconds: timeoutSeconds)
         self.controlStream = control
+        deadline.register { control.close() }
+        try deadline.enter("tcp-tls")
+        try await control.connect(timeoutSeconds: timeoutSeconds)
+        try deadline.enter("hello-send")
 
         // 1. Control preface + Hello
         try await control.send(WireConstants.controlPreface)
         let hello = makeHello(config: config)
         try await sendControlAsync(stream: control, payload: .hello(hello))
 
+        try deadline.enter("hello-ack")
         // 2. Read HelloAck
         let reply = try await readControlFrame(from: control)
         guard case .helloAck(let ack) = reply.payload else {
@@ -760,12 +836,16 @@ final class WinBridgeConnection: @unchecked Sendable {
             useTls: config.useTls,
             expectedFingerprint: control.verifiedFingerprint ?? config.expectedFingerprint
         )
+        self.mediaStream = media
+        deadline.register { media.close() }
+        try deadline.enter("media-tls")
         do {
             try await media.connect(timeoutSeconds: timeoutSeconds)
             var bindPacket = Data(capacity: 24)
             bindPacket.append(WireConstants.mediaPreface)
             bindPacket.append(ack.sessionId)
             try await media.send(bindPacket)
+            try deadline.enter("media-bind")
             let statusBytes = try await media.readExact(1)
             let status = statusBytes[0]
             guard status == 0 else {
@@ -781,6 +861,7 @@ final class WinBridgeConnection: @unchecked Sendable {
             cleanupResourcesWithoutNotifying()
             throw ConnectionError.connectionClosed
         }
+        try deadline.finish()
         self.mediaStream = media
         self.hostName = ack.hostName
         self.selectedCodec = ack.selectedCodec

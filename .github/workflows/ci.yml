@@ -50,8 +50,11 @@ jobs:
       - name: Show Swift toolchain
         run: swift --version
 
-      - name: Run Swift Testing suite
-        run: ./scripts/run_tests.sh
+      - name: Install Rust for Quinn interoperability fixture
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run Swift suite with real Quinn peer
+        run: ./scripts/run_quic_tests.sh
 
       - name: Build WinBridge.app release bundle
         run: ./scripts/bundle_app.sh

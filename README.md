@@ -6,6 +6,8 @@
 
 > 典型场景：Windows 主机与 Mac 共用显示器，平时显示器切给 Mac 使用，无需来回切换显示器输入源即可在 Mac 上直接使用 Windows 应用、安卓模拟器（如 MuMu）或 3D PC 游戏。
 
+连接慢或 QUIC 回退 TCP 的原因、修复与验证见 [连接诊断 / Connection handshake](docs/connection-handshake.md)。
+
 ---
 
 ## 系统架构
